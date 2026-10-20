@@ -121,6 +121,56 @@ presets.action(() => {
   }
 });
 
+const probe = program.command("probe").description("reálná metadata média (ffprobe)");
+probe.argument("<file>", "mediální soubor");
+probe.action(async (file: string) => {
+  const { probeMedia } = await import("../core/media.js");
+  const info = await probeMedia(file);
+  console.log(JSON.stringify(info, null, 2));
+});
+
+const frame = program.command("frame").description("uloží snímek z videa (F1)");
+frame.argument("<file>", "video soubor");
+frame.requiredOption("--at <sec>", "čas v sekundách");
+frame.requiredOption("--out <file>", "výstupní JPEG");
+frame.option("--width <px>", "šířka", "640");
+frame.action(async (file: string, opts: { at: string; out: string; width: string }) => {
+  const { extractFrame } = await import("../core/media.js");
+  const { writeFile } = await import("node:fs/promises");
+  const jpeg = await extractFrame(file, Number(opts.at), { width: Number(opts.width) });
+  await writeFile(opts.out, jpeg);
+  console.log(`snímek uložen → ${opts.out} (${jpeg.length} B)`);
+});
+
+const proxy = program.command("proxy").description("vygeneruje 640p proxy (F1)");
+proxy.argument("<file>", "zdrojový soubor");
+proxy.requiredOption("--out <file>", "výstupní soubor");
+proxy.action(async (file: string, opts: { out: string }) => {
+  const { generateProxy } = await import("../core/media.js");
+  await generateProxy(file, opts.out);
+  console.log(`proxy uloženo → ${opts.out}`);
+});
+
+const exportCmd = program.command("export").description("reálný render timeline přes FFmpeg (F1)");
+projectPathOpt(exportCmd);
+exportCmd.requiredOption("--out <file>", "výstupní video (mp4)");
+exportCmd.option("--width <px>", "šířka");
+exportCmd.option("--height <px>", "výška");
+exportCmd.option("--fps <fps>", "fps");
+exportCmd.action(async (opts: { project: string; out: string; width?: string; height?: string; fps?: string }) => {
+  const { renderSequence } = await import("../render/export.js");
+  const engine = await loadOrInitEngine(resolve(opts.project));
+  const result = await renderSequence(engine.project, {
+    outPath: resolve(opts.out),
+    width: opts.width ? Number(opts.width) : undefined,
+    height: opts.height ? Number(opts.height) : undefined,
+    fps: opts.fps ? Number(opts.fps) : undefined,
+    onProgress: (pct) => process.stdout.write(`\rrender ${pct}%   `),
+  });
+  console.log(`\nhotovo → ${result.outPath} (${result.duration.toFixed(2)}s, ${result.sizeBytes} B)`);
+  for (const w of result.warnings) console.warn(`varování: ${w}`);
+});
+
 const animate = program.command("animate").description("aplikuje animační preset na klip");
 projectPathOpt(animate);
 animate.argument("<clipId>", "ID klipu");

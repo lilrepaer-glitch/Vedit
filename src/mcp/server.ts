@@ -6,7 +6,9 @@ import { z } from "zod";
 import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
 import { sequenceDuration } from "../core/types.js";
-import { runStubGenJob } from "../server/app.js";
+import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
+import { runStubGenJob, runRealRenderJob, runProxyJob } from "../server/app.js";
+import { resolve as resolvePath } from "node:path";
 
 export interface McpContext {
   engine: VeditEngine;
@@ -140,14 +142,69 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   server.registerTool(
     "media.get_frames",
     {
-      description: "Náhled snímků (F0: stub — bude ve F1 přes dekodér).",
-      inputSchema: { assetId: idSchema, times: z.array(z.number()).optional() },
+      description: "Reálné náhledy snímků z média (F1: dekódování přes FFmpeg, vrací base64 JPEG).",
+      inputSchema: {
+        assetId: idSchema.optional(),
+        path: z.string().optional(),
+        times: z.array(z.number()).optional(),
+        width: z.number().int().positive().max(640).default(320),
+      },
+    },
+    async ({ assetId, path, times, width }) =>
+      wrapTool(async () => {
+        const mediaPath = assetId ? engine().findAsset(assetId).path : path;
+        if (!mediaPath) throw new Error("zadej assetId nebo path");
+        const asset = assetId ? engine().findAsset(assetId) : undefined;
+        const ts = times?.length ? times : [0, asset?.duration ? asset.duration / 2 : 1, asset?.duration ?? 2];
+        const frames = [];
+        for (const t of ts) {
+          const jpeg = await extractFrame(mediaPath, t, { width });
+          frames.push({ t, jpegBase64: jpeg.toString("base64") });
+        }
+        return { frames, format: "jpeg", width };
+      }),
+  );
+
+  server.registerTool(
+    "media.probe",
+    {
+      description: "Reálná metadata média přes ffprobe (délka, kodeky, rozlišení, fps).",
+      inputSchema: {
+        assetId: idSchema.optional(),
+        path: z.string().optional(),
+      },
+    },
+    async ({ assetId, path }) =>
+      wrapTool(async () => {
+        const mediaPath = assetId ? engine().findAsset(assetId).path : path;
+        if (!mediaPath) throw new Error("zadej assetId nebo path");
+        return { probe: await probeMedia(mediaPath) };
+      }),
+  );
+
+  server.registerTool(
+    "media.waveform",
+    {
+      description: "Audio waveform peaks (0..1) pro zobrazení stopy.",
+      inputSchema: { assetId: idSchema, samples: z.number().int().min(10).max(2000).default(400) },
+    },
+    async ({ assetId, samples }) =>
+      wrapTool(async () => {
+        const asset = engine().findAsset(assetId);
+        return { peaks: await extractPeaks(asset.path, samples), samples };
+      }),
+  );
+
+  server.registerTool(
+    "media.proxy",
+    {
+      description: "Vygeneruje 64p proxy pro plynulý střih (F1, asynchronní job).",
+      inputSchema: { assetId: idSchema },
     },
     async ({ assetId }) =>
-      ok({
-        assetId,
-        stub: true,
-        note: "F0: výstup snímků zatím není implementovaný (čeká na F1 dekodér)",
+      wrapTool(() => {
+        engine().findAsset(assetId);
+        return runProxyJob(engine(), assetId, { proxyDir: resolvePath(process.cwd(), ".vedit/proxies") });
       }),
   );
 
@@ -288,6 +345,36 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       wrapTool(() => ({ clip: engine().updateClip(clipId, patch, trackId) })),
   );
 
+  server.registerTool(
+    "timeline.roll",
+    {
+      description: "Roll edit: posune střih mezi klipem a sousedem vpravo (F1).",
+      inputSchema: { clipId: idSchema, delta: z.number(), trackId: idSchema.optional() },
+    },
+    async ({ clipId, delta, trackId }) =>
+      wrapTool(() => engine().rollClip(clipId, delta, trackId)),
+  );
+
+  server.registerTool(
+    "timeline.slip",
+    {
+      description: "Slip edit: posune obsah klipu (in/out) bez pohybu na timeline (F1).",
+      inputSchema: { clipId: idSchema, delta: z.number(), trackId: idSchema.optional() },
+    },
+    async ({ clipId, delta, trackId }) =>
+      wrapTool(() => ({ clip: engine().slipClip(clipId, delta, trackId) })),
+  );
+
+  server.registerTool(
+    "timeline.slide",
+    {
+      description: "Slide edit: posune klip po timeline a upraví sousedy (F1).",
+      inputSchema: { clipId: idSchema, delta: z.number(), trackId: idSchema.optional() },
+    },
+    async ({ clipId, delta, trackId }) =>
+      wrapTool(() => ({ clip: engine().slideClip(clipId, delta, trackId) })),
+  );
+
   // ---- titulky ----
   server.registerTool(
     "captions.generate",
@@ -406,7 +493,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   server.registerTool(
     "effect.apply",
     {
-      description: "Aplikuje efekt na klip (F0: evidence efektů, renderování ve F1).",
+      description: "Aplikuje efekt na klip (F1: blur/color/grayscale se renderují, ostatní evidence).",
       inputSchema: {
         clipId: idSchema,
         type: z.string(),
@@ -416,6 +503,21 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     },
     async ({ clipId, type, params, trackId }) =>
       wrapTool(() => ({ effect: engine().addEffect(clipId, type, params ?? {}, trackId) })),
+  );
+
+  server.registerTool(
+    "effect.update",
+    {
+      description: "Upraví parametry efektu (např. color: brightness/contrast/saturation/gamma).",
+      inputSchema: {
+        clipId: idSchema,
+        effectId: idSchema,
+        params: z.record(z.unknown()),
+        trackId: idSchema.optional(),
+      },
+    },
+    async ({ clipId, effectId, params, trackId }) =>
+      wrapTool(() => ({ effect: engine().updateEffect(clipId, effectId, params, trackId) })),
   );
 
   server.registerTool(
@@ -484,32 +586,46 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   server.registerTool(
     "export.render",
     {
-      description: "Export videa (F0: simulovaný render job; reálný pipeline ve F1).",
+      description: "Reálný export videa přes FFmpeg (F1) — asynchronní render job, stav přes gen.job_status.",
       inputSchema: {
-        format: z.enum(["mp4", "webm", "mov"]).default("mp4"),
+        format: z.enum(["mp4", "mov"]).default("mp4"),
         width: z.number().int().positive().optional(),
         height: z.number().int().positive().optional(),
+        fps: z.number().positive().optional(),
+        crf: z.number().int().min(0).max(51).optional(),
       },
     },
     async (args) =>
       wrapTool(() => {
         const seq = engine().activeSequence();
-        return runStubGenJob(engine(), "render", {
-          ...args,
-          width: args.width ?? seq.width,
-          height: args.height ?? seq.height,
-          duration: sequenceDuration(seq),
-        });
+        return runRealRenderJob(
+          engine(),
+          {
+            ...args,
+            width: args.width ?? seq.width,
+            height: args.height ?? seq.height,
+            duration: sequenceDuration(seq),
+          },
+          { renderDir: resolvePath(process.cwd(), ".vedit/renders") },
+        );
       }),
   );
 
   server.registerTool(
     "export.download",
     {
-      description: "Výsledek exportu (F0: metadata jobu).",
+      description: "Výsledek exportu — cesta k hotovému souboru + metadata jobu.",
       inputSchema: { jobId: idSchema },
     },
-    async ({ jobId }) => wrapTool(() => ({ job: engine().getJob(jobId) })),
+    async ({ jobId }) =>
+      wrapTool(() => {
+        const job = engine().getJob(jobId);
+        return {
+          job,
+          outPath: typeof job.output?.outPath === "string" ? job.output.outPath : undefined,
+          note: "soubor je na disku tohoto stroje; MCP klient si ho může přečíst",
+        };
+      }),
   );
 
   return server;

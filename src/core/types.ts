@@ -22,6 +22,13 @@ export interface Asset {
   height?: number;
   fps?: number;
   sizeBytes?: number;
+  /** F1: metadata z ffprobe */
+  videoCodec?: string;
+  audioCodec?: string;
+  hasAudio?: boolean;
+  bitrate?: number;
+  /** F1: cesta k proxy souboru */
+  proxyPath?: string;
   source?: AssetSource;
   createdAt: string;
 }

@@ -149,4 +149,47 @@ describe("MCP server", () => {
     expect(res.isError).toBe(false);
     expect(res.json().captions.map((c: { text: string }) => c.text)).toEqual(["Ahoj", "světe"]);
   });
+
+  it("F1: roll/slip/slide přes MCP", async () => {
+    const { client } = await connect();
+    const imp = await call(client, "media.import", {
+      name: "v.mp4",
+      path: "/tmp/v.mp4",
+      kind: "video",
+      duration: 20,
+    });
+    const assetId = imp.json().asset.id;
+    const c1 = await call(client, "timeline.add_clip", { assetId, start: 0, duration: 4, in: 0, out: 4 });
+    const c2 = await call(client, "timeline.add_clip", { assetId, start: 4, duration: 4, in: 4, out: 8 });
+    const roll = await call(client, "timeline.roll", { clipId: c1.json().clip.id, delta: 1 });
+    expect(roll.isError).toBe(false);
+    expect(roll.json().left.duration).toBeCloseTo(5);
+    const slip = await call(client, "timeline.slip", { clipId: c2.json().clip.id, delta: -1 });
+    expect(slip.isError).toBe(false);
+    expect(slip.json().clip.in).toBeCloseTo(4);
+    const slide = await call(client, "timeline.slide", { clipId: c2.json().clip.id, delta: 0.5 });
+    expect(slide.isError).toBe(false);
+    expect(slide.json().clip.start).toBeCloseTo(5.5);
+  });
+
+  it("F1: media.get_frames vrací skutečné JPEG", async () => {
+    const { client } = await connect();
+    const { generateTestClip } = await import("../src/core/media.js");
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "vedit-mcp-"));
+    const file = join(dir, "x.mp4");
+    await generateTestClip(file, { seconds: 1, size: "320x240", rate: 25 });
+    const res = await call(client, "media.get_frames", { path: file, times: [0.2], width: 160 });
+    expect(res.isError).toBe(false);
+    const frame = res.json().frames[0];
+    const buf = Buffer.from(frame.jpegBase64, "base64");
+    expect(buf[0]).toBe(0xff);
+    expect(buf[1]).toBe(0xd8);
+
+    const probe = await call(client, "media.probe", { path: file });
+    expect(probe.json().probe.width).toBe(320);
+    expect(probe.json().probe.hasAudio).toBe(true);
+  }, 60000);
 });

@@ -1,4 +1,5 @@
 import type { Asset, Caption, Clip, Project, Track } from "./api";
+import { withToken } from "./api";
 
 export function fmt(t: number): string {
   return `${t.toFixed(2)}s`;
@@ -82,22 +83,24 @@ export function Preview({
   project,
   clip,
   playhead,
+  frameUrl,
 }: {
   project: Project;
   clip: Clip | null;
   playhead: number;
+  frameUrl: string | null;
 }) {
   const seq = project.sequences.find((s) => s.id === project.activeSequenceId)!;
   const t = clip?.transform;
   return (
     <section className="panel preview-panel">
       <h2>
-        Náhled <span className="muted">— F0: bez dekódování videa (F1)</span>
+        Náhled <span className="muted">— F1: skutečný snímek z média (FFmpeg)</span>
       </h2>
       <div className="preview-stage" style={{ aspectRatio: `${seq.width} / ${seq.height}` }}>
-        {clip ? (
+        {clip && frameUrl ? (
           <div
-            className="preview-clip"
+            className="preview-clip preview-frame"
             style={{
               transform: t
                 ? `translate(${t.x}px, ${t.y}px) rotate(${t.rotation}deg) scale(${t.scaleX}, ${t.scaleY})`
@@ -105,18 +108,61 @@ export function Preview({
               opacity: t?.opacity ?? 1,
             }}
           >
-            <strong>{clip.name}</strong>
-            <div className="muted">
-              {fmt(clip.start)} → {fmt(clip.start + clip.duration)} • {clip.keyframes.length} kf
+            <img
+              src={frameUrl}
+              alt={clip.name}
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = "none";
+              }}
+            />
+            <div className="frame-label">
+              <strong>{clip.name}</strong>
+              <div className="muted">
+                {fmt(clip.start)} → {fmt(clip.start + clip.duration)} • {clip.keyframes.length} kf
+              </div>
             </div>
           </div>
         ) : (
-          <div className="preview-empty">Vyberte klip na timeline</div>
+          <div className="preview-empty">Vyberte klip nebo posuňte playhead nad klip</div>
         )}
       </div>
       <div className="preview-meta">
         {seq.width}×{seq.height} • {seq.fps} fps • playhead {fmt(playhead)}
       </div>
+    </section>
+  );
+}
+
+// ---------- Jobs ----------
+
+export function JobsPanel({ project }: { project: Project }) {
+  const jobs = [...project.jobs].reverse().slice(0, 8);
+  return (
+    <section className="panel">
+      <h2>Úlohy</h2>
+      {jobs.length === 0 && <p className="muted">Zatím žádné úlohy.</p>}
+      <ul className="job-list">
+        {jobs.map((j) => (
+          <li key={j.id} className={`job job-${j.status}`}>
+            <div className="job-row">
+              <span className="job-type">{j.type}</span>
+              <span className="muted">{j.status}</span>
+            </div>
+            <div className="job-bar">
+              <div className="job-fill" style={{ width: `${j.status === "done" ? 100 : j.progress}%` }} />
+            </div>
+            {j.status === "done" && (j.output as { outPath?: string } | undefined)?.outPath && (
+              <a
+                className="job-dl"
+                href={withToken(`/api/v1/jobs/${j.id}/output`)}
+                download
+              >
+                ⬇ stáhnout výstup
+              </a>
+            )}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

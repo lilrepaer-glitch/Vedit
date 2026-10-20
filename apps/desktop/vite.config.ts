@@ -8,6 +8,8 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
     strictPort: true,
+    // povolit preview host (Arena proxy) i localhost
+    allowedHosts: true,
     proxy: {
       "/api": { target: "http://127.0.0.1:47000", changeOrigin: true },
       "/ws": { target: "ws://127.0.0.1:47000", ws: true },

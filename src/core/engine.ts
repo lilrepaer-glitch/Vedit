@@ -244,17 +244,7 @@ export class VeditEngine {
 
   // ---- assets ----
 
-  addAsset(input: {
-    name: string;
-    kind: AssetKind;
-    path: string;
-    duration?: number;
-    width?: number;
-    height?: number;
-    fps?: number;
-    sizeBytes?: number;
-    source?: Asset["source"];
-  }): Asset {
+  addAsset(input: Omit<Asset, "id" | "createdAt">): Asset {
     const asset: Asset = { id: newId(), createdAt: now(), ...input };
     this.commit(`asset.add "${asset.name}"`, () => {
       this.project.assets.push(asset);
@@ -544,7 +534,108 @@ export class VeditEngine {
     });
   }
 
-  // ---- jobs (render / generation — F0 stubs, real providers in F4) ----
+  // ---- F1: plná editace (roll / slip / slide) ----
+
+  /**
+   * Roll edit: posune střih mezi tímto klipem a sousedem vpravo.
+   * Kladné delta prodlužuje tento klip na úkor souseda.
+   */
+  rollClip(clipId: ID, delta: number, trackId?: ID): { left: Clip; right: Clip } {
+    const { track, clip: left } = trackId ? this.findClip(trackId, clipId) : this.findClipAnywhere(clipId);
+    if (track.locked) throw new Error(`track is locked: ${track.name}`);
+    const end = clipEnd(left);
+    const right = track.clips.find((c) => Math.abs(c.start - end) < 0.02);
+    if (!right) throw new Error("roll potřebuje sousední klip vpravo (bez mezery)");
+    const maxRight = right.duration - 0.01;
+    const maxLeft = -(left.duration - 0.01);
+    if (delta > maxRight) throw new Error(`roll delta překračuje délku souseda (max ${maxRight.toFixed(2)}s)`);
+    if (delta < maxLeft) throw new Error(`roll delta překračuje délku klipu (min ${maxLeft.toFixed(2)}s)`);
+    this.commit(`clip.roll "${left.name}" ${delta > 0 ? "+" : ""}${delta.toFixed(2)}s`, () => {
+      left.duration += delta;
+      left.out = left.in + left.duration;
+      right.start += delta;
+      right.duration -= delta;
+      right.in += delta;
+    });
+    return { left, right };
+  }
+
+  /** Slip edit: posune obsah klipu (in/out) bez pohybu na timeline. */
+  slipClip(clipId: ID, delta: number, trackId?: ID): Clip {
+    const { track, clip } = trackId ? this.findClip(trackId, clipId) : this.findClipAnywhere(clipId);
+    if (track.locked) throw new Error(`track is locked: ${track.name}`);
+    const newIn = clip.in + delta;
+    const newOut = clip.out + delta;
+    if (newIn < 0) throw new Error("slip by přetáhl začátek zdroje (in < 0)");
+    const asset = this.project.assets.find((a) => a.id === clip.assetId);
+    if (asset?.duration != null && newOut > asset.duration + 0.01) {
+      throw new Error(`slip by přetáhl konec zdroje (out > ${asset.duration.toFixed(2)}s)`);
+    }
+    this.commit(`clip.slip "${clip.name}" ${delta > 0 ? "+" : ""}${delta.toFixed(2)}s`, () => {
+      clip.in = newIn;
+      clip.out = newOut;
+    });
+    return clip;
+  }
+
+  /**
+   * Slide edit: posune klip po timeline a upraví sousedy, aby nevznikla mezera.
+   * Předchozí klip se natáhne/zkrátí, následující klip se ořízne zepředu.
+   */
+  slideClip(clipId: ID, delta: number, trackId?: ID): Clip {
+    const { track, clip } = trackId ? this.findClip(trackId, clipId) : this.findClipAnywhere(clipId);
+    if (track.locked) throw new Error(`track is locked: ${track.name}`);
+    const oldStart = clip.start;
+    const oldEnd = clipEnd(clip);
+    const newStart = Math.max(0, oldStart + delta);
+    const realDelta = newStart - oldStart;
+    const prev = track.clips.find((c) => Math.abs(clipEnd(c) - oldStart) < 0.02);
+    const next = track.clips.find((c) => Math.abs(c.start - oldEnd) < 0.02);
+    if (prev && newStart - prev.start < 0.01) throw new Error("slide: předchozí klip by zmizel");
+    if (next && next.duration - realDelta < 0.01) {
+      throw new Error("slide: následující klip by neměl dost délky");
+    }
+    if (next && next.in + realDelta < 0) {
+      throw new Error("slide: následující klip by přetáhl začátek zdroje");
+    }
+    this.commit(`clip.slide "${clip.name}" ${realDelta > 0 ? "+" : ""}${realDelta.toFixed(2)}s`, () => {
+      clip.start = newStart;
+      if (prev) {
+        prev.duration = newStart - prev.start;
+        prev.out = prev.in + prev.duration;
+      }
+      if (next) {
+        next.start = newStart + clip.duration;
+        next.in += realDelta;
+        next.duration -= realDelta;
+        next.out = next.in + next.duration;
+      }
+    });
+    return clip;
+  }
+
+  /** Aktualizace parametrů efektu (např. barevné korekce). */
+  updateEffect(clipId: ID, effectId: ID, params: Record<string, unknown>, trackId?: ID): EffectInstance {
+    const { track, clip } = trackId ? this.findClip(trackId, clipId) : this.findClipAnywhere(clipId);
+    if (track.locked) throw new Error(`track is locked: ${track.name}`);
+    const effect = clip.effects.find((e) => e.id === effectId);
+    if (!effect) throw new Error(`effect not found: ${effectId}`);
+    this.commit(`effect.update "${effect.type}" on "${clip.name}"`, () => {
+      Object.assign(effect.params, params);
+    });
+    return effect;
+  }
+
+  /** Aktualizace metadat assetu (např. výsledek probe, proxyPath) — bez undo záznamu. */
+  updateAsset(assetId: ID, patch: Partial<Omit<Asset, "id" | "createdAt">>): Asset {
+    const asset = this.findAsset(assetId);
+    Object.assign(asset, patch);
+    this.project.updatedAt = now();
+    this.emit({ type: "change", label: `asset.update "${asset.name}"` });
+    return asset;
+  }
+
+  // ---- jobs (render / generation — gen stuby do F4, render je reálný od F1) ----
 
   createJob(type: JobType, input: Record<string, unknown>): Job {
     const job: Job = {
