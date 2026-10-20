@@ -1,0 +1,43 @@
+{
+  "name": "vedit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vedit — desktop video editor with MCP server and direct API for AI-driven editing (F0 skeleton)",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "vedit": "./dist/cli/index.js"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:api": "tsx src/cli/index.ts serve",
+    "dev:mcp": "tsx src/cli/index.ts mcp",
+    "dev:ui": "npm run dev -w @vedit/desktop"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "commander": "^12.1.0",
+    "express": "^4.21.2",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@types/supertest": "^6.0.2",
+    "@types/ws": "^8.5.13",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
