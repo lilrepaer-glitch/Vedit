@@ -109,6 +109,15 @@ irm https://raw.githubusercontent.com/lilrepaer-glitch/Vedit/main/vedit-install.
 
 Skript `vedit-install.ps1` stáhne a spustí instalátor z [Releases](https://github.com/lilrepaer-glitch/Vedit/releases); pokud tam ještě není, **postaví ho sám ze zdrojáků** na tvém PC (doinstaluje Node.js/Rust jen pokud chybí). Nebo stáhni `Vedit_installer.exe` přímo z Releases a spusť ho (instalace pro aktuálního uživatele, bez admin práv → Vedit v Start menu).
 
+Instalátor stavím **programem NSIS** — stejně jako `FCH-steam-Setup.exe`:
+
+> **složka appky (281 MB) → LZMA komprese → český průvodce + branding → zástupce + odinstalátor → 89 MB**
+
+- **Český průvodce** — NSIS `Czech` (fallback `English`), bez přepínače jazyka; `BrandingText "Vedit"`
+- **Branding** — ikona + header `150×57` + welcome `164×314` (`apps/desktop/src-tauri/installer-assets/`) s modrým „V“
+- **Komprese** — `lzma /SOLID` + `DictSize 32` → ~3× menší soubor
+- **Zástupci** — Start menu `Vedit` + plocha + odinstalátor v „Přidat nebo odebrat programy“
+
 Instalátor obsahuje:
 - Tauri shell + React UI (timeline, preview, AI panely)
 - **REST+WS API server** jako sidecar (spouští se automaticky na `127.0.0.1:47000`, token `dev`)
@@ -117,7 +126,20 @@ Instalátor obsahuje:
 
 **Volitelné:** TTS/ASR (espeak-ng + pocketsphinx přes Python) se doinstalují zvlášť podle sekce AI titulky — bez nich jsou funkce neviditelné/deaktivované (aplikace hlásí `nedostupný`).
 
-Sestavení lokálně (vyžaduje Rust): `npm ci && npx tauri build` (z adresáře `apps/desktop`) → `src-tauri/target/release/bundle/nsis/Vedit_*_x64-setup.exe`.
+Sestavení — dvě cesty:
+
+```powershell
+# 1) Tauri (doporučeno) — už má branding a češtinu v tauri.conf.json:
+npm ci
+npx tauri build              # → src-tauri/target/release/bundle/nsis/Vedit_*_x64-setup.exe → přejmenuj na Vedit_installer.exe
+
+# 2) Čistý NSIS jako FCH — zabal libovolnou složku app\:
+makensis installer/Vedit_installer.nsi   # → installer/Vedit_installer.exe (~89 MB)
+# automaticky i s buildem:
+powershell -ExecutionPolicy Bypass -File installer/Build-Vedit-Installer.ps1
+```
+
+Podrobně viz [`installer/README.md`](./installer/README.md).
 
 ## License
 
