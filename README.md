@@ -101,11 +101,13 @@ UI běží samostatně přes Vite; **Windows instalátor (`Vedit_installer.exe`)
 
 ## Windows instalátor (Vedit_installer.exe)
 
-Vedit je **desktopová aplikace pro Windows** — instalátor se skládá automaticky v CI (GitHub Actions, `windows-latest`):
+Vedit je **desktopová aplikace pro Windows**. Nejjednodušší instalace — v PowerShellu jeden příkaz:
 
-1. **Stáhni** `Vedit_installer.exe` z [Releases](https://github.com/lilrepaer-glitch/Vedit/releases) (vydává workflow `.github/workflows/release.yml`)
-2. **Spusť instalátor** (instalace pro aktuálního uživatele, bez admin práv) → Vedit najdeš v Start menu
-3. Po prvním spuštění se vytvoří demo projekt s ukázkovými klipy
+```powershell
+irm https://raw.githubusercontent.com/lilrepaer-glitch/Vedit/main/vedit-install.ps1 | iex
+```
+
+Skript `vedit-install.ps1` stáhne a spustí instalátor z [Releases](https://github.com/lilrepaer-glitch/Vedit/releases); pokud tam ještě není, **postaví ho sám ze zdrojáků** na tvém PC (doinstaluje Node.js/Rust jen pokud chybí). Nebo stáhni `Vedit_installer.exe` přímo z Releases a spusť ho (instalace pro aktuálního uživatele, bez admin práv → Vedit v Start menu).
 
 Instalátor obsahuje:
 - Tauri shell + React UI (timeline, preview, AI panely)
