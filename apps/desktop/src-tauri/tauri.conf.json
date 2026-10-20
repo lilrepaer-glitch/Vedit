@@ -39,7 +39,14 @@
     },
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "languages": ["Czech", "English"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer-assets/header.bmp",
+        "sidebarImage": "installer-assets/welcome.bmp",
+        "compression": "lzma",
+        "startMenuFolder": "Vedit"
       }
     }
   }
