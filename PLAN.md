@@ -1,32 +1,32 @@
-# Vedit — plán a popis projektu
+# Vedit — Project Plan & Specification
 
-**Vedit** je profesionální desktopová aplikace pro střih a tvorbu videa na PC. Uživatel si ji **stáhne a nainstaluje** (žádný webový editor) — běží lokálně na výkonu jeho CPU/GPU, pracuje offline soubory na disku a je od základu navržená tak, aby ji uměla ovládat nejen myší, ale i AI přes **vestavěný MCP server a přímé API**.
+**Vedit** is a professional desktop video-editing app for PC. The user **downloads and installs it** (no web editor) — it runs locally on the user's CPU/GPU, works with offline files on disk and is designed from the ground up to be controlled not only by mouse but also by AI via a **built-in MCP server and direct API**.
 
-> **Vize:** profesionální střih videa na PC, který ovládáte myší i AI — od hrubého sestřihu přes titulky a animace až po generované záběry a motion grafiku.
+> **Vision:** professional PC video editing that you control with mouse and AI — from rough cut through captions and animation to generated footage and motion graphics.
 
 ---
 
-## 1. Proč desktopová aplikace (ne web)
+## 1. Why a Desktop App (not Web)
 
-| Požadavek | Řešení u Vedit |
+| Requirement | Vedit Solution |
 |---|---|
-| Velké 4K/8K soubory | Bez nahrávání do cloudu — čte se z disku, proxy workflow pro plynulý střih |
-| Výkon | GPU akcelerace (NVENC / AMF / QSV), real-time preview na hardwaru uživatele |
-| Soukromí | Materiály zůstávají lokálně; cloud AI jen výslovně na vyžádání |
-| Offline | Plný střih a export bez internetu; online jen pro AI generování/updates |
-| Distribuce | Stažitelný instalátor (`.exe` / MSI), automatické delta aktualizace |
+| Large 4K/8K files | No cloud upload — read from disk, proxy workflow for smooth editing |
+| Performance | GPU acceleration (NVENC / AMF / QSV), real-time preview on user hardware |
+| Privacy | Footage stays local; cloud AI only on explicit request |
+| Offline | Full editing & export without internet; online only for AI generation/updates |
+| Distribution | Downloadable installer (`.exe` / MSI), automatic delta updates |
 
-**Platforma:** Windows 10/11 (64-bit) jako primární cíl; macOS a Linux v pozdější fázi.
-**Distribuce:** instalátor ke stažení z webu projektu + portable verze; auto-update přes vlastní updater.
+**Platform:** Windows 10/11 (64-bit) as primary target; macOS & Linux later.
+**Distribution:** installer from project website + portable build; auto-update via built-in updater.
 
 ---
 
-## 2. Cíloví uživatelé
+## 2. Target Users
 
-- **Tvůrci obsahu** (YouTube, Twitch, TikTok/Reels) — rychlý střih, shorts z dlouhých videí
-- **Freelance střihači a malá studia** — vícestopý NLE, barevné korekce, export
-- **Marketéři a social media týmy** — motion grafika, reklamní spoty, šablony
-- **AI-first uživatelé** — chtějí stříhat příkazy a agentem („sestříhej mi 20s highlight")
+- **Content Creators** (YouTube, Twitch, TikTok/Reels) — fast cuts, shorts from long videos
+- **Freelance Editors & Small Studios** — multi-track NLE, color correction, export
+- **Marketers & Social Teams** — motion graphics, ad spots, templates
+- **AI-first Users** — want to edit by commands and agent ("cut me a 20s highlight")
 
 ---
 

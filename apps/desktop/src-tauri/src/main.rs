@@ -31,7 +31,7 @@ fn main() {
             let ffmpeg = find_resource(&res, "bin/ffmpeg.exe");
             let ffprobe = find_resource(&res, "bin/ffprobe.exe");
             if !node.exists() || !entry.exists() {
-                return Err(format!("chybí sidecar soubory v {}", res.display()).into());
+                return Err(format!("missing sidecar files in {}", res.display()).into());
             }
 
             // Data uživatele mimo instalační složku (Program Files je read-only).
@@ -63,7 +63,7 @@ fn main() {
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
 
-            let child = cmd.spawn().map_err(|e| format!("start API serveru: {e}"))?;
+            let child = cmd.spawn().map_err(|e| format!("start API server: {e}"))?;
             *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
             Ok(())
         })

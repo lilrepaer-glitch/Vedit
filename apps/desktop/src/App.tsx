@@ -15,7 +15,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [presets, setPresets] = useState<Array<{ id: string; label: string }>>([]);
   const [presetId, setPresetId] = useState("fade-in");
-  const [prompt, setPrompt] = useState("ohňostroj nad Prahou, noční panorama");
+  const [prompt, setPrompt] = useState("fireworks over Prague, night skyline");
   const [busy, setBusy] = useState(false);
   const [aiCaps, setAiCaps] = useState<Awaited<ReturnType<typeof api.aiCaps>> | null>(null);
 
@@ -41,7 +41,7 @@ export function App() {
         setPresets((await api.presets()).presets);
         setAiCaps(await api.aiCaps());
       } catch (err) {
-        flash(`Chyba: ${(err as Error).message}`);
+        flash(`Error: ${(err as Error).message}`);
       }
     })();
     return connectWs(() => void refresh());
@@ -85,7 +85,7 @@ export function App() {
         await refresh();
         if (okMessage) flash(okMessage);
       } catch (err) {
-        flash(`Chyba: ${(err as Error).message}`);
+        flash(`Error: ${(err as Error).message}`);
       } finally {
         setBusy(false);
       }
@@ -94,11 +94,11 @@ export function App() {
   );
 
   if (!project || !seq) {
-    return <div className="app loading">Připojuji se k Vedit API…</div>;
+    return <div className="app loading">Connecting to Vedit API…</div>;
   }
 
   const clipId = selection?.clipId;
-  const captionText = `Popisek @ ${fmt(playhead)}`;
+  const captionText = `Caption @ ${fmt(playhead)}`;
 
   return (
     <div className="app">
@@ -118,17 +118,17 @@ export function App() {
         <div className="toolbar-group">
           <button
             disabled={busy || !clipId}
-            title="Rozdělí vybraný klip v playhead"
-            onClick={() => clipId && act(() => api.splitClip(clipId, playhead), `Rozděleno @ ${fmt(playhead)}`)}
+            title="Split selected clip at playhead"
+            onClick={() => clipId && act(() => api.splitClip(clipId, playhead), `Split @ ${fmt(playhead)}`)}
           >
             ✂ Split @ playhead
           </button>
-          <button disabled={busy || !clipId} onClick={() => clipId && act(() => api.deleteClip(clipId), "Klip smazán")}>
+          <button disabled={busy || !clipId} onClick={() => clipId && act(() => api.deleteClip(clipId), "Clip deleted")}>
             🗑 Delete
           </button>
           <button
             disabled={busy || !clipId}
-            onClick={() => clipId && act(() => api.deleteClip(clipId, true), "Klip smazán (ripple)")}
+            onClick={() => clipId && act(() => api.deleteClip(clipId, true), "Clip deleted (ripple)")}
           >
              ripple delete
           </button>
@@ -143,24 +143,25 @@ export function App() {
           </select>
           <button
             disabled={busy || !clipId}
-            onClick={() => clipId && act(() => api.applyPreset(clipId, presetId), `Animace ${presetId}`)}
+            onClick={() => clipId && act(() => api.applyPreset(clipId, presetId), `Animation ${presetId}`)}
           >
-            ✨ Animace
+            ✨ Animation
+
           </button>
           <button
             disabled={busy}
             onClick={() =>
-              act(() => api.addCaption({ text: captionText, start: playhead, end: playhead + 2 }), "Titulek přidán")
+              act(() => api.addCaption({ text: captionText, start: playhead, end: playhead + 2 }), "Caption added")
             }
           >
-            💬 Titulek
+            💬 Caption
           </button>
         </div>
         <div className="toolbar-group">
           <input className="prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="AI prompt…" />
           <button
             disabled={busy}
-            title="F0: simulované generování (reálné modely ve F4)"
+            title="F0: simulated generation (real models in F4)"
             onClick={() =>
               act(async () => {
                 const res = await api.genVideo(prompt, 5);
@@ -194,13 +195,13 @@ export function App() {
             onVoiceover={(script, voice) =>
               act(async () => {
                 const res = await api.voiceover(script, voice, playhead);
-                flash(`Voiceover job ${res.jobId.slice(0, 8)}… (TTS + titulky)`);
+                flash(`Voiceover job ${res.jobId.slice(0, 8)}… (TTS + captions)`);
               })
             }
             onTranscribe={(assetId) =>
               act(async () => {
                 const res = await api.transcribe(assetId);
-                flash(`Přepis job ${res.jobId.slice(0, 8)}…`);
+                flash(`Transcription job ${res.jobId.slice(0, 8)}…`);
               })
             }
             selectedClipId={selection?.clipId ?? null}
@@ -209,27 +210,27 @@ export function App() {
                 switch (action) {
                   case "remove-silences": {
                     const res = await api.removeSilences(params.clipId);
-                    flash(`Ticha vyhozena: −${res.savedDuration.toFixed(2)}s`);
+                    flash(`Silences removed: −${res.savedDuration.toFixed(2)}s`);
                     break;
                   }
                   case "highlight": {
                     const res = await api.highlight(15);
-                    flash(`Highlight ${res.totalDuration.toFixed(1)}s (${res.clips.length} klipů)`);
+                    flash(`Highlight ${res.totalDuration.toFixed(1)}s (${res.clips.length} clips)`);
                     break;
                   }
                   case "beat-sync": {
                     const res = await api.beatSync(params.clipId!, params.musicAssetId!);
-                    flash(`Beat-sync: ${res.beats.length} beatů → ${res.splits.length} střihů`);
+                    flash(`Beat-sync: ${res.beats.length} beats → ${res.splits.length} cuts`);
                     break;
                   }
                   case "auto-reframe": {
                     const res = await api.autoReframe(params.clipId!);
-                    flash(`Auto-reframe: ${res.keyframes} keyframů`);
+                    flash(`Auto-reframe: ${res.keyframes} keyframes`);
                     break;
                   }
                   case "track-motion": {
                     const res = await api.trackMotion(params.clipId!, params.sourceAssetId!);
-                    flash(`Tracking: ${res.keyframes} keyframů`);
+                    flash(`Tracking: ${res.keyframes} keyframes`);
                     break;
                   }
                 }

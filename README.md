@@ -1,33 +1,33 @@
 # Vedit
 
-**Vedit** je desktopová aplikace pro střih a tvorbu videa na PC se **vestavěným MCP serverem a přímým API** — editor umí ovládat člověk i AI agent (střih, titulky a popisky, animace, motion grafika, generování videa).
+**Vedit** is a desktop video-editing app for PC with a **built-in MCP server and direct API** — you can control the editor by hand or let an AI agent drive it (cutting, captions & callouts, animation, motion graphics, video generation).
 
-📖 **[PLAN.md](./PLAN.md)** — plán a popis projektu (vize, funkce, architektura, roadmapa).
+📖 **[PLAN.md](./PLAN.md)** — project plan & spec (vision, features, architecture, roadmap).
 
-> **Stav: F0 + F1 + F2 + F3 hotovo** — jádro s undo/redo a plnou editací, REST/WS API, MCP server (68 tools), CLI, UI timeline, reálný FFmpeg render export, **AI titulky (TTS voiceover + přepis řeči)** a **AI střih (vyhoď ticha, highlight, beat-sync, motion tracking/auto-reframe)**. Generování videa modely přijde ve F4.
+> **Status: F0 + F1 + F2 + F3 done** — core with undo/redo and full editing, REST/WS API, MCP server (68 tools), CLI, UI timeline, real FFmpeg render export, **AI captions (TTS voiceover + speech-to-text)** and **AI editing (remove silences, highlight, beat-sync, motion tracking / auto-reframe)**. Model-based video generation comes in F4.
 
-## Struktura repozitáře
+## Repository Structure
 
 ```
-src/core/        jádro: datový model (.vedit JSON), operace timeline, undo/redo
+src/core/        core: data model (.vedit JSON), timeline ops, undo/redo
 src/server/      REST API + WebSocket (localhost, bearer token)
-src/mcp/         MCP server — stdio + Streamable HTTP (tools pro AI agenty)
-src/cli/         příkazová řádka `vedit`
-test/            testy (vitest) — core, API, MCP
-apps/desktop/    UI aplikace (React + Vite) + Tauri scaffold (Windows instalátor)
+src/mcp/         MCP server — stdio + Streamable HTTP (tools for AI agents)
+src/cli/         CLI `vedit`
+test/            tests (vitest) — core, API, MCP
+apps/desktop/    Desktop UI (React + Vite) + Tauri shell (Windows installer)
 ```
 
-## Rychlý start
+## Quick Start
 
 ```bash
 npm install
 npm test            # testy jádra, API i MCP
 npm run build       # překlad TypeScriptu do dist/
 
-# API server (REST + WS) — http://127.0.0.1:47000, token se vytiskne
+# API server (REST + WS) — http://127.0.0.1:47000, token is printed on start
 npm run dev:api
 
-# Desktop UI — http://localhost:5173 (dev server s proxy na API)
+# Desktop UI — http://localhost:5173 (dev server proxied to API)
 npm run dev:ui
 ```
 
@@ -45,9 +45,9 @@ npx tsx src/cli/index.ts mcp       # MCP stdio server
 
 ## MCP — připojení AI agenta
 
-Vedit se registruje jako MCP server s tooly podle PLAN.md §4.1 (`timeline.cut`, `captions.generate`, `animation.apply_preset`, `gen.video`, `export.render`, …).
+Vedit registers as an MCP server with tools per PLAN.md §4.1 (`timeline.cut`, `captions.generate`, `animation.apply_preset`, `gen.video`, `export.render`, …).
 
-Ukázka pro Claude Desktop / Cursor (`mcpServers`):
+Example for Claude Desktop / Cursor (`mcpServers`):
 
 ```json
 {
@@ -59,87 +59,87 @@ Ukázka pro Claude Desktop / Cursor (`mcpServers`):
 }
 ```
 
-Nebo přes HTTP: `npm exec -- tsx src/cli/index.ts mcp-http` → `http://127.0.0.1:47001/mcp`.
+Or via HTTP: `npm exec -- tsx src/cli/index.ts mcp-http` → `http://127.0.0.1:47001/mcp`.
 
-## API (výběr)
+## API (selection)
 
 | Endpoint | Popis |
 |---|---|
-| `GET /api/v1/health` | stav serveru |
-| `GET/POST /api/v1/projects` | projekty |
-| `POST /api/v1/projects/:id/clips` | přidat klip |
-| `POST .../clips/:clipId/split` | razor / rozdělení klipu |
-| `GET .../assets/:assetId/frame?t=` | reálný JPEG snímek z média |
+| `GET /api/v1/health` | server health |
+| `GET/POST /api/v1/projects` | projects |
+| `POST /api/v1/projects/:id/clips` | add clip |
+| `POST .../clips/:clipId/split` | razor / split clip |
+| `GET .../assets/:assetId/frame?t=` | real JPEG frame from media |
 | `GET .../assets/:assetId/waveform` | audio waveform peaks |
-| `POST .../captions/from-text` | titulky z segmentů |
-| `POST .../gen/video` | generování videa (F0: simulovaný job) |
-| `POST .../export` | **reálný render přes FFmpeg** (F1) |
-| `GET /api/v1/jobs/:jobId/output` | stažení render výstupu |
-| `POST .../undo` / `redo` | historie |
+| `POST .../captions/from-text` | captions from segments |
+| `POST .../gen/video` | video generation (F0: simulated job) |
+| `POST .../export` | **real FFmpeg render** (F1) |
+| `GET /api/v1/jobs/:jobId/output` | download render output |
+| `POST .../undo` / `redo` | history |
 
-WebSocket `ws://127.0.0.1:47000/ws` vysílá události `change` a `job`.
+WebSocket `ws://127.0.0.1:47000/ws` emits `change` and `job` events.
 
-## AI titulky (F2)
+## AI Captions (F2)
 
-- **TTS voiceover** — `POST /api/v1/projects/:id/voiceover` (skript → audio + klip + titulky s přesným časováním), CLI `vedit tts | voiceover`, MCP `gen.audio (kind: voice)` / `captions.from_script`
-- **Přepis řeči** — `POST .../assets/:id/transcribe`, CLI `vedit transcribe`, MCP `captions.transcribe` (pocketsphinx en; Whisper a další přes `VEDIT_ASR_CMD`)
-- Speech enginy běží v Python sidecar (`python/speech_tool.py`): `python3 -m venv .venv-ai && .venv-ai/bin/pip install -r python/requirements.txt` (Node si venv najde automaticky; lze přepsat přes `VEDIT_PYTHON`)
-- Dostupnost enginů: `GET /api/v1/ai/capabilities` / MCP `ai.capabilities`
+- **TTS voiceover** — `POST /api/v1/projects/:id/voiceover` (script → audio + clip + captions with precise timing), CLI `vedit tts | voiceover`, MCP `gen.audio (kind: voice)` / `captions.from_script`
+- **Speech-to-text** — `POST .../assets/:id/transcribe`, CLI `vedit transcribe`, MCP `captions.transcribe` (pocketsphinx en; Whisper etc. via `VEDIT_ASR_CMD`)
+- Speech engines run in Python sidecar (`python/speech_tool.py`): `python3 -m venv .venv-ai && .venv-ai/bin/pip install -r python/requirements.txt` (Node finds venv automatically; override via `VEDIT_PYTHON`)
+- Engine availability: `GET /api/v1/ai/capabilities` / MCP `ai.capabilities`
 
-## AI střih (F3)
+## AI Editing (F3)
 
-- **Vyhoď ticha** — `POST /api/v1/projects/:id/edit/remove-silences`, CLI `vedit cut-silence`, MCP `edit.remove_silences` — detekce tich (silencedetect) + ripple collapse na stopě
-- **Highlight reel** — `POST .../edit/highlight`, CLI `vedit highlight`, MCP `edit.highlight` — skórování oken (pohyb + audio energie + střihy scén) → nejlepší části do nové stopy
-- **Beat-sync střih** — `POST .../clips/:clipId/beat-sync`, CLI `vedit beats`, MCP `edit.beat_sync` — rozdělí klip přesně na beaty hudby (detekce přes energii PCM)
-- **Auto-reframe / motion tracking** — `POST .../clips/:clipId/auto-reframe` / `track-motion`, CLI `vedit track`, MCP `edit.auto_reframe` / `edit.track_motion` — těžiště pohybu → pan keyframy (9:16 výřez, grafika sleduje objekt)
-- **Analýza** — `POST .../analyze/{silences,scenes,beats,motion,energy}`, CLI `vedit analyze`, MCP `analysis.silences|scenes|beats|motion` — čistý signálový processing (FFmpeg dekód + PCM/snímková analýza), žádné ML modely
-- Všechny operace jsou transakční (jedno `undo` vrátí celý AI střih)
+- **Remove silences** — `POST /api/v1/projects/:id/edit/remove-silences`, CLI `vedit cut-silence`, MCP `edit.remove_silences` — silence detection (silencedetect) + ripple collapse on track
+- **Highlight reel** — `POST .../edit/highlight`, CLI `vedit highlight`, MCP `edit.highlight` — window scoring (motion + audio energy + scene cuts) → best parts to a new track
+- **Beat-sync editing** — `POST .../clips/:clipId/beat-sync`, CLI `vedit beats`, MCP `edit.beat_sync` — splits clip exactly on music beats (PCM energy detection)
+- **Auto-reframe / motion tracking** — `POST .../clips/:clipId/auto-reframe` / `track-motion`, CLI `vedit track`, MCP `edit.auto_reframe` / `edit.track_motion` — motion centroid → pan keyframes (9:16 crop, graphics follow object)
+- **Analysis** — `POST .../analyze/{silences,scenes,beats,motion,energy}`, CLI `vedit analyze`, MCP `analysis.silences|scenes|beats|motion` — pure signal processing (FFmpeg decode + PCM/frame analysis), no ML models
+- All operations are transactional (one `undo` reverts the whole AI edit)
 
-## Desktop build (Tauri)
+## Desktop Build (Tauri)
 
-UI běží samostatně přes Vite; **Windows instalátor (`Vedit_installer.exe`)** se skládá automaticky v CI přes Tauri 2 (`apps/desktop/src-tauri/`) — viz workflow `.github/workflows/release.yml` a sekce „Windows instalátor". Finální build lokálně vyžaduje Rust toolchain.
+UI runs standalone via Vite; **Windows installer (`Vedit_installer.exe`)** is built automatically in CI via Tauri 2 (`apps/desktop/src-tauri/`) — see workflow `.github/workflows/release.yml` and the "Windows Installer" section. Local final build requires Rust toolchain.
 
-## Windows instalátor (Vedit_installer.exe)
+## Windows Installer (Vedit_installer.exe)
 
-Vedit je **desktopová aplikace pro Windows**. Nejjednodušší instalace — v PowerShellu jeden příkaz:
+Vedit is a **desktop app for Windows**. Easiest install — one PowerShell command:
 
 ```powershell
 irm https://raw.githubusercontent.com/lilrepaer-glitch/Vedit/main/vedit-install.ps1 | iex
 ```
 
-Skript `vedit-install.ps1` stáhne a spustí instalátor z [Releases](https://github.com/lilrepaer-glitch/Vedit/releases); pokud tam ještě není, **postaví ho sám ze zdrojáků** na tvém PC (doinstaluje Node.js/Rust jen pokud chybí). Nebo stáhni `Vedit_installer.exe` přímo z Releases a spusť ho (instalace pro aktuálního uživatele, bez admin práv → Vedit v Start menu).
+The `vedit-install.ps1` script downloads and runs the installer from [Releases](https://github.com/lilrepaer-glitch/Vedit/releases); if not yet there, it **builds it from source** on your PC (installs Node.js/Rust only if missing). Or download `Vedit_installer.exe` directly from Releases and run it (current-user install, no admin → Vedit in Start menu).
 
-Instalátor stavím **programem NSIS** — stejně jako `FCH-steam-Setup.exe`:
+The installer is built with **NSIS** — same as `FCH-steam-Setup.exe`:
 
-> **složka appky (281 MB) → LZMA komprese → český průvodce + branding → zástupce + odinstalátor → 89 MB**
+> **app folder (281 MB) → LZMA compression → multi-language wizard + branding → shortcuts + uninstaller → 89 MB**
 
-- **Český průvodce** — NSIS `Czech` (fallback `English`), bez přepínače jazyka; `BrandingText "Vedit"`
-- **Branding** — ikona + header `150×57` + welcome `164×314` (`apps/desktop/src-tauri/installer-assets/`) s modrým „V“
-- **Komprese** — `lzma /SOLID` + `DictSize 32` → ~3× menší soubor
-- **Zástupci** — Start menu `Vedit` + plocha + odinstalátor v „Přidat nebo odebrat programy“
+- **Multi-language wizard** — NSIS `English` (base) + `German` / `Russian` / `SimpChinese` with language selector; `BrandingText "Vedit"`
+- **Branding** — icon + header `150×57` + welcome `164×314` (`apps/desktop/src-tauri/installer-assets/`) with blue "V"
+- **Compression** — `lzma /SOLID` + `DictSize 32` → ~3× smaller file
+- **Shortcuts** — Start menu `Vedit` + Desktop + uninstaller in "Add or Remove Programs"
 
-Instalátor obsahuje:
-- Tauri shell + React UI (timeline, preview, AI panely)
-- **REST+WS API server** jako sidecar (spouští se automaticky na `127.0.0.1:47000`, token `dev`)
-- **FFmpeg/ffprobe** binárky (dekódování, render export)
-- Node.js runtime — není potřeba nic doinstalovávat
+The installer contains:
+- Tauri shell + React UI (timeline, preview, AI panels)
+- **REST+WS API server** as sidecar (auto-starts on `127.0.0.1:47000`, token `dev`)
+- **FFmpeg/ffprobe** binaries (decoding, render export)
+- Node.js runtime — no extra install needed
 
-**Volitelné:** TTS/ASR (espeak-ng + pocketsphinx přes Python) se doinstalují zvlášť podle sekce AI titulky — bez nich jsou funkce neviditelné/deaktivované (aplikace hlásí `nedostupný`).
+**Optional:** TTS/ASR (espeak-ng + pocketsphinx via Python) are installed separately per AI Captions section — without them features are hidden/disabled (app reports `unavailable`).
 
-Sestavení — dvě cesty:
+Build — two options:
 
 ```powershell
-# 1) Tauri (doporučeno) — už má branding a češtinu v tauri.conf.json:
+# 1) Tauri (recommended) — has branding and multi-language already in tauri.conf.json:
 npm ci
-npx tauri build              # → src-tauri/target/release/bundle/nsis/Vedit_*_x64-setup.exe → přejmenuj na Vedit_installer.exe
+npx tauri build              # → src-tauri/target/release/bundle/nsis/Vedit_*_x64-setup.exe → rename to Vedit_installer.exe
 
-# 2) Čistý NSIS jako FCH — zabal libovolnou složku app\:
+# 2) Plain NSIS like FCH — pack any app\ folder:
 makensis installer/Vedit_installer.nsi   # → installer/Vedit_installer.exe (~89 MB)
 # automaticky i s buildem:
 powershell -ExecutionPolicy Bypass -File installer/Build-Vedit-Installer.ps1
 ```
 
-Podrobně viz [`installer/README.md`](./installer/README.md).
+See [`installer/README.md`](./installer/README.md) for details.
 
 ## License
 

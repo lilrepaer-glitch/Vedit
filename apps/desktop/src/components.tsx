@@ -18,7 +18,7 @@ export function MediaPool({
 }) {
   return (
     <section className="panel">
-      <h2>Media pool</h2>
+      <h2>Media Pool</h2>
       <ul className="asset-list">
         {project.assets.map((a) => (
           <li key={a.id} className="asset">
@@ -59,19 +59,19 @@ function ImportForm({ projectId, onImported }: { projectId: string; onImported: 
           form.reset();
           onImported();
         } else {
-          alert((await res.json()).error ?? "import selhal");
+          alert((await res.json()).error ?? "import failed");
         }
       }}
     >
-      <h3>Import média</h3>
-      <input name="name" placeholder="název.mp4" required />
-      <input name="path" placeholder="/media/soubor.mp4" required />
+      <h3>Import Media</h3>
+      <input name="name" placeholder="name.mp4" required />
+      <input name="path" placeholder="/media/file.mp4" required />
       <select name="kind" defaultValue="video">
         <option value="video">video</option>
         <option value="audio">audio</option>
-        <option value="image">obrázek</option>
+        <option value="image">image</option>
       </select>
-      <input name="duration" type="number" placeholder="délka (s)" defaultValue={10} min={0} step={0.1} />
+      <input name="duration" type="number" placeholder="duration (s)" defaultValue={10} min={0} step={0.1} />
       <button type="submit">+ Import</button>
     </form>
   );
@@ -95,7 +95,7 @@ export function Preview({
   return (
     <section className="panel preview-panel">
       <h2>
-        Náhled <span className="muted">— F1: skutečný snímek z média (FFmpeg)</span>
+        Preview <span className="muted">— F1: real frame from media (FFmpeg)</span>
       </h2>
       <div className="preview-stage" style={{ aspectRatio: `${seq.width} / ${seq.height}` }}>
         {clip && frameUrl ? (
@@ -123,7 +123,7 @@ export function Preview({
             </div>
           </div>
         ) : (
-          <div className="preview-empty">Vyberte klip nebo posuňte playhead nad klip</div>
+          <div className="preview-empty">Select a clip or move playhead over a clip</div>
         )}
       </div>
       <div className="preview-meta">
@@ -133,7 +133,7 @@ export function Preview({
   );
 }
 
-// ---------- AI titulky (F2) ----------
+// ---------- AI captions (F2) ----------
 
 export function AiPanel({
   caps,
@@ -156,10 +156,10 @@ export function AiPanel({
   const videoAssets = assets.filter((a) => a.kind === "video");
   return (
     <section className="panel">
-      <h2>AI titulky &amp; voiceover</h2>
+      <h2>AI Captions &amp; Voiceover</h2>
       <p className="muted">
-        TTS: {caps?.tts.available ? caps.tts.engine : "nedostupný"} • ASR:{" "}
-        {caps?.asr.available ? caps.asr.engine : "nedostupný"}
+        TTS: {caps?.tts.available ? caps.tts.engine : "unavailable"} • ASR:{" "}
+        {caps?.asr.available ? caps.asr.engine : "unavailable"}
       </p>
       <form
         className="import-form"
@@ -173,7 +173,7 @@ export function AiPanel({
         <textarea
           name="script"
           rows={3}
-          placeholder="Skript — každá věta bude titulek…"
+          placeholder="Script — each sentence will be a caption…"
           required
         />
         <div className="row">
@@ -185,7 +185,7 @@ export function AiPanel({
             ))}
           </select>
           <button type="submit" disabled={busy || !caps?.tts.available}>
-            🎙 Voiceover + titulky
+            🎙 Voiceover + Captions
           </button>
         </div>
       </form>
@@ -201,30 +201,30 @@ export function AiPanel({
         </select>
         <button
           disabled={busy || !caps?.asr.available || assets.length === 0}
-          title="Přepíše řeč z média na titulky (pocketsphinx/en)"
+          title="Transcribe speech from media to captions (pocketsphinx/en)"
           onClick={() => {
             const select = document.getElementById("transcribe-asset") as HTMLSelectElement | null;
             if (select?.value) onTranscribe(select.value);
           }}
         >
-          📝 Přepsat řeč
+          📝 Transcribe
         </button>
       </div>
-      <h2>AI střih</h2>
+      <h2>AI Editing</h2>
       <p className="muted">
-        {selectedClipId ? `klip ${selectedClipId.slice(0, 8)}…` : "vyber klip na timeline"}
+        {selectedClipId ? `clip ${selectedClipId.slice(0, 8)}…` : "select a clip on timeline"}
       </p>
       <div className="row">
         <button
           disabled={busy || !selectedClipId}
-          title="Detekuje ticha a zavře mezery na stopě vybraného klipu"
+          title="Detect silences and close gaps on the selected clip track"
           onClick={() => selectedClipId && onAiEdit("remove-silences", { clipId: selectedClipId })}
         >
-          ✂️ Vyhoď ticha
+          ✂️ Remove Silences
         </button>
         <button
           disabled={busy || videoAssets.length === 0}
-          title="Sestaví highlight reel (pohyb + energie + scény) do nové stopy"
+          title="Build highlight reel (motion + energy + scenes) to a new track"
           onClick={() => onAiEdit("highlight", {})}
         >
           ⭐ Highlight
@@ -240,7 +240,7 @@ export function AiPanel({
         </select>
         <button
           disabled={busy || !selectedClipId || audioAssets.length === 0}
-          title="Rozdělí vybraný klip na střihy přesně na beaty hudby"
+          title="Split selected clip exactly on music beats"
           onClick={() => {
             const music = (document.getElementById("beat-music") as HTMLSelectElement | null)?.value;
             if (selectedClipId && music) onAiEdit("beat-sync", { clipId: selectedClipId, musicAssetId: music });
@@ -252,7 +252,7 @@ export function AiPanel({
       <div className="row">
         <button
           disabled={busy || !selectedClipId}
-          title="Vycentruje pohyb v klipu (pan keyframy) — pro výřez 9:16"
+          title="Center motion in clip (pan keyframes) — for 9:16 crop"
           onClick={() => selectedClipId && onAiEdit("auto-reframe", { clipId: selectedClipId })}
         >
           📐 Auto-reframe
@@ -266,7 +266,7 @@ export function AiPanel({
         </select>
         <button
           disabled={busy || !selectedClipId || videoAssets.length === 0}
-          title="Vybraný klip (grafika/text) bude sledovat pohyb ve zdroji"
+          title="Selected clip (graphics/text) will follow motion in source"
           onClick={() => {
             const src = (document.getElementById("motion-source") as HTMLSelectElement | null)?.value;
             if (selectedClipId && src) onAiEdit("track-motion", { clipId: selectedClipId, sourceAssetId: src });
@@ -285,8 +285,8 @@ export function JobsPanel({ project }: { project: Project }) {
   const jobs = [...project.jobs].reverse().slice(0, 8);
   return (
     <section className="panel">
-      <h2>Úlohy</h2>
-      {jobs.length === 0 && <p className="muted">Zatím žádné úlohy.</p>}
+      <h2>Jobs</h2>
+      {jobs.length === 0 && <p className="muted">No jobs yet.</p>}
       <ul className="job-list">
         {jobs.map((j) => (
           <li key={j.id} className={`job job-${j.status}`}>
@@ -303,7 +303,7 @@ export function JobsPanel({ project }: { project: Project }) {
                 href={withToken(`/api/v1/jobs/${j.id}/output`)}
                 download
               >
-                ⬇ stáhnout výstup
+                ⬇ download output
               </a>
             )}
           </li>
@@ -427,7 +427,7 @@ export function Inspector({
     return (
       <section className="panel">
         <h2>Inspector</h2>
-        <p className="muted">Nic nevybráno.</p>
+        <p className="muted">Nothing selected.</p>
         <Captions captions={captions} />
       </section>
     );
@@ -451,17 +451,17 @@ export function Inspector({
     <section className="panel">
       <h2>Inspector</h2>
       <div className="inspector-grid">
-        {field("název", "name", clip.name)}
+        {field("name", "name", clip.name)}
         {field("start (s)", "start", clip.start)}
-        {field("délka (s)", "duration", clip.duration)}
+        {field("duration (s)", "duration", clip.duration)}
         {field("in (s)", "in", clip.in)}
         {field("out (s)", "out", clip.out)}
         {field("X", "transform.x", clip.transform.x)}
         {field("Y", "transform.y", clip.transform.y)}
-        {field("rotace", "transform.rotation", clip.transform.rotation, 1)}
+        {field("rotation", "transform.rotation", clip.transform.rotation, 1)}
         {field("opacity", "transform.opacity", clip.transform.opacity)}
       </div>
-      <h3>Keyframy ({clip.keyframes.length})</h3>
+      <h3>Keyframes ({clip.keyframes.length})</h3>
       <ul className="kf-list">
         {clip.keyframes.map((k, i) => (
           <li key={i}>
@@ -478,7 +478,7 @@ export function Inspector({
 function Captions({ captions }: { captions: Caption[] }) {
   return (
     <>
-      <h3>Titulky ({captions.length})</h3>
+      <h3>Captions ({captions.length})</h3>
       <ul className="caption-list">
         {captions.map((c) => (
           <li key={c.id}>

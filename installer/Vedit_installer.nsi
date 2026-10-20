@@ -1,28 +1,28 @@
-; Vedit — NSIS instalátor (styl FCH-steam-Setup.exe)
-; Workflow: vezmu složku appky (281 MB) → zkomprimuju LZMA → český průvodce + branding → zástupce + odinstalátor → ~89 MB
+; Vedit — NSIS installer (FCH-steam-Setup.exe style)
+; Workflow: take app folder (281 MB) → compress with LZMA → multi-language wizard + branding → shortcuts + uninstaller → ~89 MB
 ;
-; Použití (na Windows):
-;   1) Sestav Vedit:  npm ci && npm run build
-;      → zkopíruj výstup do složky "app" vedle tohoto .nsi:
-;        - Vedit.exe (z apps/desktop/src-tauri/target/release/vedit-desktop.exe)
-;        - složky resources/ (server + bin/ffmpeg), ikony, atd.
-;      NEBO použij Tauri bundle: rozbal Vedit_0.1.0_x64-setup.exe /S /D=C:\tmp\vedit-portable → zkopíruj do app\
-;   2) Nainstaluj NSIS 3.x (nsis.sourceforge.io) — ujisti se že makensis je v PATH
-;   3) Spusť:  makensis installer/Vedit_installer.nsi
-;      → vznikne Vedit_installer.exe vedle .nsi (~80–120 MB dle obsahu app\)
-;   Nebo jedním příkazem:  powershell -ExecutionPolicy Bypass -File installer/Build-Vedit-Installer.ps1
+; Usage (Windows):
+;   1) Build Vedit:  npm ci && npm run build
+;      → copy output to "app" folder next to this .nsi:
+;        - Vedit.exe (from apps/desktop/src-tauri/target/release/vedit-desktop.exe)
+;        - resources/ (server + bin/ffmpeg), icons, etc.
+;      OR use Tauri bundle: extract Vedit_0.1.0_x64-setup.exe /S /D=C:\tmp\vedit-portable → copy to app\
+;   2) Install NSIS 3.x (nsis.sourceforge.io) — ensure makensis is in PATH
+;   3) Run:  makensis installer/Vedit_installer.nsi
+;      → creates Vedit_installer.exe next to .nsi (~80–120 MB depending on app\)
+;   Or in one command:  powershell -ExecutionPolicy Bypass -File installer/Build-Vedit-Installer.ps1
 ;
-; Tento skript je plně samostatný — nepotřebuje Tauri. Pokud chceš stavět přes Tauri,
-; stačí `npx tauri build` v apps/desktop — branding a čeština jsou už nastavené v tauri.conf.json.
+; This script is standalone — does not require Tauri. To build via Tauri,
+; just run `npx tauri build` in apps/desktop — branding and languages are configured in tauri.conf.json.
 
 Unicode True
 SetCompressor /SOLID lzma
 SetCompressorDictSize 32
 
-; ---- Základní info ----
+; ---- Basic info ----
 !define APPNAME "Vedit"
 !define COMPANYNAME "Vedit"
-!define DESCRIPTION "Vedit — video editor s AI (desktopová aplikace pro Windows)"
+!define DESCRIPTION "Vedit — AI-powered video editor (desktop app for Windows)"
 !define VERSIONMAJOR 0
 !define VERSIONMINOR 1
 !define VERSIONBUILD 0
@@ -31,16 +31,16 @@ SetCompressorDictSize 32
 !define URLINFOABOUT "https://github.com/lilrepaer-glitch/Vedit"
 !define HELPURL "https://github.com/lilrepaer-glitch/Vedit#readme"
 
-!define INSTALLSIZE 281000  ; KB — informativní pro Přidat/odebrat programy (281 MB)
+!define INSTALLSIZE 281000  ; KB — for Add/Remove Programs (281 MB)
 
 Name "${APPNAME}"
 OutFile "Vedit_installer.exe"
 InstallDir "$LOCALAPPDATA\${APPNAME}"
 InstallDirRegKey HKCU "Software\${APPNAME}" ""
 RequestExecutionLevel user
-BrandingText "Vedit — Forged for victory"
+BrandingText "Vedit — AI Video Editor"
 
-; ---- Ikona a branding ----
+; ---- Icon and branding ----
 Icon "..\apps\desktop\src-tauri\icons\icon.ico"
 UninstallIcon "..\apps\desktop\src-tauri\icons\icon.ico"
 !define MUI_ICON "..\apps\desktop\src-tauri\icons\icon.ico"
@@ -56,69 +56,77 @@ UninstallIcon "..\apps\desktop\src-tauri\icons\icon.ico"
 
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "Spustit Vedit"
+!define MUI_FINISHPAGE_RUN_TEXT "Run Vedit"
 !define MUI_FINISHPAGE_RUN_FUNCTION "LaunchVedit"
-!define MUI_FINISHPAGE_LINK "Vedit na GitHubu"
+!define MUI_FINISHPAGE_LINK "Vedit on GitHub"
 !define MUI_FINISHPAGE_LINK_LOCATION "${URLINFOABOUT}"
 !define MUI_FINISHPAGE_NOREBOOTSUPPORT
 
-; Stránky instalátoru
+; Installer pages
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
-; Stránky odinstalátoru
+; Uninstaller pages
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_UNPAGE_FINISH
 
-; Jazyky — čeština první = výchozí (jako u FCH-steam-Setup.exe)
-!insertmacro MUI_LANGUAGE "Czech"
+; Languages — English is base / default (FCH-style FCH-steam-Setup but international)
+; User selects: English (base) → German → Russian → Chinese (Simplified)
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "German"
+!insertmacro MUI_LANGUAGE "Russian"
+!insertmacro MUI_LANGUAGE "SimpChinese"
 
-; Český popis (fallback pro ne-MUI texty)
-LangString DESC_SecMain ${LANG_CZECH} "Nainstaluje Vedit včetně zástupců a odinstalátoru."
+; ---- Localized strings (EN base, then DE/RU/ZH) ----
 LangString DESC_SecMain ${LANG_ENGLISH} "Install Vedit with shortcuts and uninstaller."
-LangString TEXT_CREATE_SHORTCUTS ${LANG_CZECH} "Vytvářím zástupce…"
-LangString TEXT_CREATE_SHORTCUTS ${LANG_ENGLISH} "Creating shortcuts…"
-LangString TEXT_REGISTER ${LANG_CZECH} "Zapisuji do systému…"
-LangString TEXT_REGISTER ${LANG_ENGLISH} "Registering application…"
+LangString DESC_SecMain ${LANG_GERMAN} "Installiert Vedit mit Verknüpfungen und Deinstallation."
+LangString DESC_SecMain ${LANG_RUSSIAN} "Устанавливает Vedit с ярлыками и деинсталлятором."
+LangString DESC_SecMain ${LANG_SIMPCHINESE} "安装 Vedit 并创建快捷方式和卸载程序。"
 
-; ---- Funkce: spuštění po instalaci ----
+LangString TEXT_CREATE_SHORTCUTS ${LANG_ENGLISH} "Creating shortcuts…"
+LangString TEXT_CREATE_SHORTCUTS ${LANG_GERMAN} "Verknüpfungen werden erstellt…"
+LangString TEXT_CREATE_SHORTCUTS ${LANG_RUSSIAN} "Создание ярлыков…"
+LangString TEXT_CREATE_SHORTCUTS ${LANG_SIMPCHINESE} "正在创建快捷方式…"
+
+LangString TEXT_REGISTER ${LANG_ENGLISH} "Registering application…"
+LangString TEXT_REGISTER ${LANG_GERMAN} "Anwendung wird registriert…"
+LangString TEXT_REGISTER ${LANG_RUSSIAN} "Регистрация приложения…"
+LangString TEXT_REGISTER ${LANG_SIMPCHINESE} "正在注册应用程序…"
+
+; ---- Launch after install ----
 Function LaunchVedit
   ExecShell "" "$INSTDIR\Vedit.exe"
 FunctionEnd
 
-; ---- Hlavní sekce ----
+; ---- Main section ----
 Section "!${APPNAME}" SecMain
   SectionIn RO
 
   SetOutPath "$INSTDIR"
   SetOverwrite on
 
-  ; Hlavní obsah — složka app\ vedle .nsi (to je ta "složka appky 281 MB")
-  ; Pokud chceš jinou cestu, změň na File /r "C:\cesta\k\app\*.*"
+  ; Main content — app\ folder next to .nsi (the "281 MB app folder")
+  ; If you need a different path, change to File /r "C:\path\to\app\*.*"
   File /r "app\*.*"
 
-  ; Velikost pro ARP
-  ; (NSIS neumí automaticky spočítat, proto fixní odhad — viz INSTALLSIZE)
-  
   DetailPrint "$(TEXT_CREATE_SHORTCUTS)"
-  ; Start menu — složka Vedit
+  ; Start menu — Vedit folder
   CreateDirectory "$SMPROGRAMS\Vedit"
-  CreateShortCut "$SMPROGRAMS\Vedit\Vedit.lnk" "$INSTDIR\Vedit.exe" "" "$INSTDIR\Vedit.exe" 0 "" "" "Vedit — video editor s AI"
-  CreateShortCut "$SMPROGRAMS\Vedit\Odinstalovat Vedit.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\uninstall.exe" 0
-  ; Desktop zástupce (volitelně lze přidat checkbox přes MUI)
+  CreateShortCut "$SMPROGRAMS\Vedit\Vedit.lnk" "$INSTDIR\Vedit.exe" "" "$INSTDIR\Vedit.exe" 0 "" "" "Vedit — AI-powered video editor"
+  CreateShortCut "$SMPROGRAMS\Vedit\Uninstall Vedit.lnk" "$INSTDIR\uninstall.exe" "" "$INSTDIR\uninstall.exe" 0
+  ; Desktop shortcut (can add checkbox via MUI if needed)
   CreateShortCut "$DESKTOP\Vedit.lnk" "$INSTDIR\Vedit.exe" "" "$INSTDIR\Vedit.exe" 0 "" "" "Vedit"
 
-  ; Odinstalátor
+  ; Uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   DetailPrint "$(TEXT_REGISTER)"
-  ; Registry — aby se Vedit objevil v "Přidat nebo odebrat programy" s ikonou, verzí a odinstalátorem
+  ; Registry — so Vedit appears in Add/Remove Programs with icon, version and uninstaller
   WriteRegStr HKCU "Software\${APPNAME}" "" "$INSTDIR"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayName" "${APPNAME} — video editor s AI"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayName" "${APPNAME} — AI Video Editor"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayIcon" "$INSTDIR\Vedit.exe,0"
@@ -131,14 +139,15 @@ Section "!${APPNAME}" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "NoRepair" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "EstimatedSize" ${INSTALLSIZE}
 
-  ; Pro currentUser instalaci není potřeba zapisovat do HKLM
 SectionEnd
 
-LangString DESC_Uninstall ${LANG_CZECH} "Odstraní Vedit ze systému."
-LangString DESC_Uninstall ${LANG_ENGLISH} "Removes Vedit from your system."
+LangString DESC_Uninstall ${LANG_ENGLISH} "Remove Vedit from your system."
+LangString DESC_Uninstall ${LANG_GERMAN} "Entfernt Vedit von Ihrem System."
+LangString DESC_Uninstall ${LANG_RUSSIAN} "Удаляет Vedit с вашего компьютера."
+LangString DESC_Uninstall ${LANG_SIMPCHINESE} "从系统中移除 Vedit。"
 
 Section "Uninstall"
-  ; Zastav běžící proces (pokud existuje) — nevadí když selže
+  ; Stop running process if any — ignore failure
   ExecWait 'taskkill /f /im Vedit.exe /t' 
   Sleep 500
 
@@ -146,7 +155,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR"
 
   Delete "$SMPROGRAMS\Vedit\Vedit.lnk"
-  Delete "$SMPROGRAMS\Vedit\Odinstalovat Vedit.lnk"
+  Delete "$SMPROGRAMS\Vedit\Uninstall Vedit.lnk"
   RMDir "$SMPROGRAMS\Vedit"
   Delete "$DESKTOP\Vedit.lnk"
 
@@ -154,17 +163,16 @@ Section "Uninstall"
   DeleteRegKey HKCU "Software\${APPNAME}"
 SectionEnd
 
-; Popisky sekcí
+; Section descriptions
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} $(DESC_SecMain)
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
-; Kontrola místa
+; Check for existing install
 Function .onInit
-  ; Pokud už je nainstalováno, nabídni odinstalaci staré verze
   ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString"
   StrCmp $R0 "" done
-    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "Vedit je již nainstalován.$\n$\nKlikni OK pro odinstalaci předchozí verze, nebo Storno pro pokračování." IDOK uninst
+    MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "Vedit is already installed.$\n$\nClick OK to uninstall the previous version first, or Cancel to continue." IDOK uninst
     Goto done
     uninst:
       ClearErrors
