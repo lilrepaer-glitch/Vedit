@@ -27,8 +27,8 @@
     "active": true,
     "targets": ["nsis", "msi"],
     "category": "Video",
-    "shortDescription": "Vedit — video editor s AI",
-    "longDescription": "Desktopový video editor s MCP podporou a přímým API pro AI agenty.",
+    "shortDescription": "Vedit — AI-powered video editor",
+    "longDescription": "Desktop video editor with built-in MCP server and direct API for AI agents.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,8 +40,8 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["Czech", "English"],
-        "displayLanguageSelector": false,
+        "languages": ["English", "German", "Russian", "SimpChinese"],
+        "displayLanguageSelector": true,
         "installerIcon": "icons/icon.ico",
         "headerImage": "installer-assets/header.bmp",
         "sidebarImage": "installer-assets/welcome.bmp",
