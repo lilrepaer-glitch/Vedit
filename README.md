@@ -4,7 +4,7 @@
 
 📖 **[PLAN.md](./PLAN.md)** — plán a popis projektu (vize, funkce, architektura, roadmapa).
 
-> **Stav: F0 + F1 + F2 hotovo** — jádro s undo/redo a plnou editací, REST/WS API, MCP server (45+ tools), CLI, UI timeline, reálný FFmpeg render export a **AI titulky: TTS voiceover (espeak-ng, cs/en/…) + přepis řeči (pocketsphinx / VEDIT_ASR_CMD pro Whisper)**. Generování videa modely přijde ve F4.
+> **Stav: F0 + F1 + F2 + F3 hotovo** — jádro s undo/redo a plnou editací, REST/WS API, MCP server (68 tools), CLI, UI timeline, reálný FFmpeg render export, **AI titulky (TTS voiceover + přepis řeči)** a **AI střih (vyhoď ticha, highlight, beat-sync, motion tracking/auto-reframe)**. Generování videa modely přijde ve F4.
 
 ## Struktura repozitáře
 
@@ -85,6 +85,15 @@ WebSocket `ws://127.0.0.1:47000/ws` vysílá události `change` a `job`.
 - **Přepis řeči** — `POST .../assets/:id/transcribe`, CLI `vedit transcribe`, MCP `captions.transcribe` (pocketsphinx en; Whisper a další přes `VEDIT_ASR_CMD`)
 - Speech enginy běží v Python sidecar (`python/speech_tool.py`): `python3 -m venv .venv-ai && .venv-ai/bin/pip install -r python/requirements.txt` (Node si venv najde automaticky; lze přepsat přes `VEDIT_PYTHON`)
 - Dostupnost enginů: `GET /api/v1/ai/capabilities` / MCP `ai.capabilities`
+
+## AI střih (F3)
+
+- **Vyhoď ticha** — `POST /api/v1/projects/:id/edit/remove-silences`, CLI `vedit cut-silence`, MCP `edit.remove_silences` — detekce tich (silencedetect) + ripple collapse na stopě
+- **Highlight reel** — `POST .../edit/highlight`, CLI `vedit highlight`, MCP `edit.highlight` — skórování oken (pohyb + audio energie + střihy scén) → nejlepší části do nové stopy
+- **Beat-sync střih** — `POST .../clips/:clipId/beat-sync`, CLI `vedit beats`, MCP `edit.beat_sync` — rozdělí klip přesně na beaty hudby (detekce přes energii PCM)
+- **Auto-reframe / motion tracking** — `POST .../clips/:clipId/auto-reframe` / `track-motion`, CLI `vedit track`, MCP `edit.auto_reframe` / `edit.track_motion` — těžiště pohybu → pan keyframy (9:16 výřez, grafika sleduje objekt)
+- **Analýza** — `POST .../analyze/{silences,scenes,beats,motion,energy}`, CLI `vedit analyze`, MCP `analysis.silences|scenes|beats|motion` — čistý signálový processing (FFmpeg dekód + PCM/snímková analýza), žádné ML modely
+- Všechny operace jsou transakční (jedno `undo` vrátí celý AI střih)
 
 ## Desktop build (Tauri)
 

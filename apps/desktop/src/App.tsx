@@ -203,6 +203,38 @@ export function App() {
                 flash(`Přepis job ${res.jobId.slice(0, 8)}…`);
               })
             }
+            selectedClipId={selection?.clipId ?? null}
+            onAiEdit={(action, params) =>
+              act(async () => {
+                switch (action) {
+                  case "remove-silences": {
+                    const res = await api.removeSilences(params.clipId);
+                    flash(`Ticha vyhozena: −${res.savedDuration.toFixed(2)}s`);
+                    break;
+                  }
+                  case "highlight": {
+                    const res = await api.highlight(15);
+                    flash(`Highlight ${res.totalDuration.toFixed(1)}s (${res.clips.length} klipů)`);
+                    break;
+                  }
+                  case "beat-sync": {
+                    const res = await api.beatSync(params.clipId!, params.musicAssetId!);
+                    flash(`Beat-sync: ${res.beats.length} beatů → ${res.splits.length} střihů`);
+                    break;
+                  }
+                  case "auto-reframe": {
+                    const res = await api.autoReframe(params.clipId!);
+                    flash(`Auto-reframe: ${res.keyframes} keyframů`);
+                    break;
+                  }
+                  case "track-motion": {
+                    const res = await api.trackMotion(params.clipId!, params.sourceAssetId!);
+                    flash(`Tracking: ${res.keyframes} keyframů`);
+                    break;
+                  }
+                }
+              })
+            }
           />
           <JobsPanel project={project} />
         </div>
