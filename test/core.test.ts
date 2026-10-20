@@ -162,6 +162,36 @@ describe("VeditEngine — základní operace", () => {
     expect(next.in).toBeCloseTo(6);
     expect(next.duration).toBeCloseTo(2);
   });
+
+  it("transaction sloučí více operací do jednoho undo kroku", () => {
+    const { engine, v1, video } = setup();
+    const base = engine.undoLabels.length;
+    const clips = engine.transaction("test.tx", () => {
+      const a = engine.addClip({ trackId: v1.id, assetId: video.id, start: 0, duration: 2 });
+      const b = engine.addClip({ trackId: v1.id, assetId: video.id, start: 2, duration: 2 });
+      engine.addCaption({ text: "tx", start: 0, end: 1 });
+      return [a, b];
+    });
+    expect(clips).toHaveLength(2);
+    expect(engine.undoLabels.length - base).toBe(1);
+    expect(engine.activeSequence().captions).toHaveLength(1);
+    engine.undo();
+    expect(engine.findTrack(v1.id).clips).toHaveLength(0);
+    expect(engine.activeSequence().captions).toHaveLength(0);
+  });
+
+  it("transaction rollback při chybě vrátí stav", () => {
+    const { engine, v1, video } = setup();
+    const base = engine.undoLabels.length;
+    expect(() =>
+      engine.transaction("test.fail", () => {
+        engine.addClip({ trackId: v1.id, assetId: video.id, start: 0, duration: 2 });
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    expect(engine.findTrack(v1.id).clips).toHaveLength(0);
+    expect(engine.undoLabels.length).toBe(base);
+  });
 });
 
 describe("animace, titulky, export", () => {

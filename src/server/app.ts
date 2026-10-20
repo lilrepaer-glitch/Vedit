@@ -7,6 +7,8 @@ import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
 import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
 import { renderSequence } from "../render/export.js";
+import { speechCapabilities } from "../ai/speech.js";
+import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
 import type { AssetKind, JobType, TrackKind } from "../core/types.js";
 
 export interface ServerOptions {
@@ -192,6 +194,73 @@ export function runProxyJob(
         status: "done",
         progress: 100,
         output: { proxyPath: outPath, assetId },
+      });
+    } catch (err) {
+      engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
+    }
+  })();
+  return { jobId: job.id };
+}
+
+/** Voiceover job (F2) — TTS ze skriptu → audio + klip + titulky s přesným časováním. */
+export function runVoiceoverJob(
+  engine: VeditEngine,
+  input: {
+    script: string;
+    voice?: string;
+    rate?: number;
+    gap?: number;
+    start?: number;
+    trackId?: string;
+    captions?: boolean;
+  },
+  opts: { dataDir: string },
+): { jobId: string } {
+  const job = engine.createJob("gen.voice", { ...input, script: String(input.script ?? "").slice(0, 200) });
+  void (async () => {
+    try {
+      if (!input.script?.trim()) throw new Error("script je prázdný");
+      engine.updateJob(job.id, { status: "running", progress: 15 });
+      const result = await generateVoiceover(engine, input, {
+        mediaDir: resolvePath(opts.dataDir, "media"),
+      });
+      engine.updateJob(job.id, {
+        status: "done",
+        progress: 100,
+        output: {
+          assetId: result.asset.id,
+          clipId: result.clip.id,
+          captions: result.captions.length,
+          duration: result.duration,
+          engine: result.engine,
+        },
+      });
+    } catch (err) {
+      engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
+    }
+  })();
+  return { jobId: job.id };
+}
+
+/** Transcribe job (F2) — přepis řeči z média → titulky. */
+export function runTranscribeJob(
+  engine: VeditEngine,
+  assetId: string,
+  opts: { language?: string; maxWords?: number },
+): { jobId: string } {
+  const job = engine.createJob("captions", { op: "transcribe", assetId, language: opts.language ?? "en" });
+  void (async () => {
+    try {
+      engine.updateJob(job.id, { status: "running", progress: 15 });
+      const result = await transcribeToCaptions(engine, assetId, opts);
+      engine.updateJob(job.id, {
+        status: "done",
+        progress: 100,
+        output: {
+          captions: result.captions.length,
+          text: result.text.slice(0, 500),
+          engine: result.engine,
+        },
       });
     } catch (err) {
       engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
@@ -548,6 +617,40 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       format: String(req.body?.format ?? "mp4"),
       ...req.body,
     }, { renderDir: resolvePath(dataDir, "renders") });
+    res.status(201).json(result);
+  }, registry));
+
+  // ---- F2: AI titulky a voiceover ----
+  app.get("/api/v1/ai/capabilities", async (_req, res, next) => {
+    try {
+      res.json(await speechCapabilities());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/v1/projects/:id/voiceover", wrap((req, res, engine) => {
+    const { script, voice, rate, gap, start, trackId, captions } = req.body ?? {};
+    if (!script || !String(script).trim()) return badRequest(res, "script je povinný");
+    const result = runVoiceoverJob(engine, {
+      script: String(script),
+      voice: voice != null ? String(voice) : undefined,
+      rate: rate != null ? Number(rate) : undefined,
+      gap: gap != null ? Number(gap) : undefined,
+      start: start != null ? Number(start) : undefined,
+      trackId: trackId != null ? String(trackId) : undefined,
+      captions: captions !== false,
+    }, { dataDir });
+    res.status(201).json(result);
+  }, registry));
+
+  app.post("/api/v1/projects/:id/assets/:assetId/transcribe", wrap((req, res, engine) => {
+    const assetId = String(req.params.assetId);
+    engine.findAsset(assetId);
+    const result = runTranscribeJob(engine, assetId, {
+      language: req.body?.language != null ? String(req.body.language) : undefined,
+      maxWords: req.body?.maxWords != null ? Number(req.body.maxWords) : undefined,
+    });
     res.status(201).json(result);
   }, registry));
 

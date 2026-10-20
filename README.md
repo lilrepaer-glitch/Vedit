@@ -4,7 +4,7 @@
 
 📖 **[PLAN.md](./PLAN.md)** — plán a popis projektu (vize, funkce, architektura, roadmapa).
 
-> **Stav: F0 + F1 hotovo** — datový model + engine (undo/redo, roll/slip/slide), REST/WS API, MCP server (40+ tools), CLI, UI timeline, **reálné dekódování médií (ffprobe/FFmpeg) a skutečný render export**. AI titulky a generování modelů přijdou v dalších fázích (viz roadmapa v PLAN.md).
+> **Stav: F0 + F1 + F2 hotovo** — jádro s undo/redo a plnou editací, REST/WS API, MCP server (45+ tools), CLI, UI timeline, reálný FFmpeg render export a **AI titulky: TTS voiceover (espeak-ng, cs/en/…) + přepis řeči (pocketsphinx / VEDIT_ASR_CMD pro Whisper)**. Generování videa modely přijde ve F4.
 
 ## Struktura repozitáře
 
@@ -78,6 +78,13 @@ Nebo přes HTTP: `npm exec -- tsx src/cli/index.ts mcp-http` → `http://127.0.0
 | `POST .../undo` / `redo` | historie |
 
 WebSocket `ws://127.0.0.1:47000/ws` vysílá události `change` a `job`.
+
+## AI titulky (F2)
+
+- **TTS voiceover** — `POST /api/v1/projects/:id/voiceover` (skript → audio + klip + titulky s přesným časováním), CLI `vedit tts | voiceover`, MCP `gen.audio (kind: voice)` / `captions.from_script`
+- **Přepis řeči** — `POST .../assets/:id/transcribe`, CLI `vedit transcribe`, MCP `captions.transcribe` (pocketsphinx en; Whisper a další přes `VEDIT_ASR_CMD`)
+- Speech enginy běží v Python sidecar (`python/speech_tool.py`): `python3 -m venv .venv-ai && .venv-ai/bin/pip install -r python/requirements.txt` (Node si venv najde automaticky; lze přepsat přes `VEDIT_PYTHON`)
+- Dostupnost enginů: `GET /api/v1/ai/capabilities` / MCP `ai.capabilities`
 
 ## Desktop build (Tauri)
 

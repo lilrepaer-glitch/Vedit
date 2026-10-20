@@ -210,6 +210,38 @@ describe("REST API", () => {
     expect(wave.body.peaks).toHaveLength(50);
   }, 60000);
 
+  it("F2: voiceover job vygeneruje TTS audio + titulky", async () => {
+    const id = await createProject(false);
+    const res = await auth(
+      request(app)
+        .post(`/api/v1/projects/${id}/voiceover`)
+        .send({ script: "Ahoj světe. Tohle je test.", voice: "cs", start: 0 }),
+    );
+    expect(res.status).toBe(201);
+    const { jobId } = res.body;
+    let job: Record<string, { status: string; output?: { captions?: number; assetId?: string } }> | null = null;
+    for (let i = 0; i < 60; i++) {
+      const j = await auth(request(app).get(`/api/v1/jobs/${jobId}`));
+      job = j.body.job;
+      if (job!.status === "done" || job!.status === "failed") break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(job!.status).toBe("done");
+    expect(job!.output!.captions).toBe(2);
+
+    const project = await auth(request(app).get(`/api/v1/projects/${id}`));
+    expect(project.body.project.sequences[0].captions).toHaveLength(2);
+    const voiceAsset = project.body.project.assets.find((a: { kind: string }) => a.kind === "audio");
+    expect(voiceAsset.source.simulated).toBe(false);
+  }, 60000);
+
+  it("F2: capabilities hlásí TTS/ASR enginy", async () => {
+    const res = await auth(request(app).get("/api/v1/ai/capabilities"));
+    expect(res.status).toBe(200);
+    expect(res.body.tts.available).toBe(true);
+    expect(res.body.asr.available).toBe(true);
+  }, 60000);
+
   it("validace vrací 400 s chybovou zprávou", async () => {
     const id = await createProject(false);
     const res = await auth(request(app).post(`/api/v1/projects/${id}/clips`).send({ start: 0 }));

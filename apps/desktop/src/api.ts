@@ -113,6 +113,15 @@ export const api = {
     req<{ jobId: string; assetId?: string }>("POST", `/projects/${currentId}/gen/video`, { prompt, duration }),
   exportRender: () => req<{ jobId: string }>("POST", `/projects/${currentId}/export`, { format: "mp4" }),
   presets: () => req<{ presets: Array<{ id: string; label: string }> }>("GET", "/animation/presets"),
+  aiCaps: () =>
+    req<{ tts: { engine: string; available: boolean }; asr: { engine: string; available: boolean }; voices: string[] }>(
+      "GET",
+      "/ai/capabilities",
+    ),
+  voiceover: (script: string, voice: string, start = 0) =>
+    req<{ jobId: string }>("POST", `/projects/${currentId}/voiceover`, { script, voice, start }),
+  transcribe: (assetId: string, language = "en") =>
+    req<{ jobId: string }>("POST", `/projects/${currentId}/assets/${assetId}/transcribe`, { language }),
 };
 
 export let currentId = "";
