@@ -182,6 +182,51 @@ animate.action(async (clipId: string, opts: { project: string; preset: string })
   });
 });
 
+const tts = program.command("tts").description("F2: syntéza řeči (espeak-ng) → WAV");
+tts.requiredOption("--text <text>", "text k přečtení");
+tts.option("--voice <voice>", "hlas (cs, en, sk, …)", "cs");
+tts.option("--rate <wpm>", "tempo", "175");
+tts.requiredOption("--out <file>", "výstupní WAV");
+tts.action(async (opts: { text: string; voice: string; rate: string; out: string }) => {
+  const { ttsSynthesize } = await import("../ai/speech.js");
+  const { writeFile } = await import("node:fs/promises");
+  const result = await ttsSynthesize(opts.text, { voice: opts.voice, rate: Number(opts.rate) });
+  await writeFile(opts.out, result.wav);
+  console.log(`TTS hotovo → ${opts.out} (${result.duration.toFixed(2)}s, ${result.sampleRate} Hz)`);
+});
+
+const voiceover = program.command("voiceover").description("F2: voiceover ze skriptu → audio + klip + titulky");
+projectPathOpt(voiceover);
+voiceover.requiredOption("--script <file>", "textový soubor se skriptem");
+voiceover.option("--voice <voice>", "hlas", "cs");
+voiceover.option("--start <sec>", "začátek na timeline", "0");
+voiceover.action(async (opts: { project: string; script: string; voice: string; start: string }) => {
+  const { generateVoiceover } = await import("../ai/voiceover.js");
+  const { readFile, mkdir } = await import("node:fs/promises");
+  const script = await readFile(resolve(opts.script), "utf8");
+  await withEngine(opts, async (engine) => {
+    await mkdir(resolve(".vedit/media"), { recursive: true });
+    const result = await generateVoiceover(engine, { script, voice: opts.voice, start: Number(opts.start) }, {
+      mediaDir: resolve(".vedit/media"),
+    });
+    console.log(`voiceover: ${result.asset.name} (${result.duration.toFixed(2)}s, ${result.engine})`);
+    console.log(`titulky: ${result.captions.length}`);
+  });
+});
+
+const transcribe = program.command("transcribe").description("F2: přepis řeči z média → titulky");
+projectPathOpt(transcribe);
+transcribe.argument("<assetId>", "ID assetu v projektu");
+transcribe.option("--language <lang>", "jazyk", "en");
+transcribe.action(async (assetId: string, opts: { project: string; language: string }) => {
+  const { transcribeToCaptions } = await import("../ai/voiceover.js");
+  await withEngine(opts, async (engine) => {
+    const result = await transcribeToCaptions(engine, assetId, { language: opts.language });
+    console.log(`přepsáno (${result.engine}): ${result.captions.length} titulků`);
+    console.log(result.text.slice(0, 300));
+  });
+});
+
 const serve = program.command("serve").description("spustí REST+WS API server");
 serve.option("--port <port>", "port", "47000");
 serve.option("--host <host>", "host", "127.0.0.1");

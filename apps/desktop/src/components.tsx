@@ -133,6 +133,81 @@ export function Preview({
   );
 }
 
+// ---------- AI titulky (F2) ----------
+
+export function AiPanel({
+  caps,
+  assets,
+  busy,
+  onVoiceover,
+  onTranscribe,
+}: {
+  caps: { tts: { engine: string; available: boolean }; asr: { engine: string; available: boolean }; voices: string[] } | null;
+  assets: Asset[];
+  busy: boolean;
+  onVoiceover: (script: string, voice: string) => void;
+  onTranscribe: (assetId: string) => void;
+}) {
+  return (
+    <section className="panel">
+      <h2>AI titulky &amp; voiceover</h2>
+      <p className="muted">
+        TTS: {caps?.tts.available ? caps.tts.engine : "nedostupný"} • ASR:{" "}
+        {caps?.asr.available ? caps.asr.engine : "nedostupný"}
+      </p>
+      <form
+        className="import-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const form = e.currentTarget;
+          const data = new FormData(form);
+          onVoiceover(String(data.get("script") || ""), String(data.get("voice") || "cs"));
+        }}
+      >
+        <textarea
+          name="script"
+          rows={3}
+          placeholder="Skript — každá věta bude titulek…"
+          required
+        />
+        <div className="row">
+          <select name="voice" defaultValue="cs">
+            {(caps?.voices.length ? caps.voices : ["cs", "en"]).map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <button type="submit" disabled={busy || !caps?.tts.available}>
+            🎙 Voiceover + titulky
+          </button>
+        </div>
+      </form>
+      <div className="row">
+        <select id="transcribe-asset">
+          {assets
+            .filter((a) => a.kind !== "image")
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+        </select>
+        <button
+          disabled={busy || !caps?.asr.available || assets.length === 0}
+          title="Přepíše řeč z média na titulky (pocketsphinx/en)"
+          onClick={() => {
+            const select = document.getElementById("transcribe-asset") as HTMLSelectElement | null;
+            if (select?.value) onTranscribe(select.value);
+          }}
+        >
+          📝 Přepsat řeč
+        </button>
+      </div>
+    </section>
+  );
+}
+
 // ---------- Jobs ----------
 
 export function JobsPanel({ project }: { project: Project }) {

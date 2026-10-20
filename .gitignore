@@ -6,4 +6,5 @@ apps/desktop/src-tauri/target/
 .DS_Store
 .vedit/
 *.vedit
+.venv-ai/
 coverage/

@@ -200,6 +200,28 @@ input.prompt {
   padding-top: 10px;
 }
 
+.import-form textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.row select {
+  flex: 1;
+  min-width: 0;
+}
+
 .import-form h3 {
   margin: 0;
 }

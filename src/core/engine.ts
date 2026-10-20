@@ -206,6 +206,11 @@ export class VeditEngine {
   }
 
   private commit(label: string, mutate: () => void): void {
+    if (this.txDepth > 0) {
+      // uvnitř transakce: mutuje se, snapshot se zaznamená navenek
+      mutate();
+      return;
+    }
     const before = this.snapshot();
     mutate();
     const after = this.snapshot();
@@ -214,6 +219,41 @@ export class VeditEngine {
     this.redoStack = [];
     this.project.updatedAt = now();
     this.emit({ type: "change", label });
+  }
+
+  private txDepth = 0;
+
+  /**
+   * Více operací jako jeden undo krok (AI workflow: voiceover = asset + klip + titulky).
+   * Při chybě se stav vrátí zpět.
+   */
+  transaction<T>(label: string, fn: () => T): T {
+    if (this.txDepth > 0) {
+      this.txDepth++;
+      try {
+        return fn();
+      } finally {
+        this.txDepth--;
+      }
+    }
+    const before = this.snapshot();
+    this.txDepth = 1;
+    try {
+      const result = fn();
+      this.txDepth = 0;
+      const after = this.snapshot();
+      this.undoStack.push({ label, before, after });
+      if (this.undoStack.length > 200) this.undoStack.shift();
+      this.redoStack = [];
+      this.project.updatedAt = now();
+      this.emit({ type: "change", label });
+      return result;
+    } catch (err) {
+      this.txDepth = 0;
+      this.restore(before);
+      this.emit({ type: "change", label: `rollback: ${label}` });
+      throw err;
+    }
   }
 
   undo(): boolean {

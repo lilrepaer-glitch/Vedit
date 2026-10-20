@@ -246,11 +246,11 @@ Instalátor: ~150 MB (GPU kodeky a ML modely se stahují dle potřeby). Portable
 |---|---|---|
 | **F0 — Kostra** | ✅ hotovo | Datový model `.vedit` (JSON), engine operací (cut/trim/move/ripple…), undo/redo, REST+WS API, **MCP server (40+ tools, stdio + HTTP)**, CLI `vedit`, UI timeline (React) + Tauri scaffold. |
 | **F1 — Střih + render** | ✅ hotovo | **Reálné dekódování médií přes FFmpeg/ffprobe** (npm binárky `@ffmpeg-installer`/`@ffprobe-installer`): probe při importu, JPEG snímky pro preview, waveform, 640p proxy. **Skutečný render export** (trim/concat, overlay s transformacemi a keyframovými animacemi x/y, efekty blur/color/grayscale, burn-in titulků přes libass, audio mix) s průběhem jobu a stažením výstupu. Plná editace: roll/slip/slide. UI náhled ukazuje reálné snímky. |
-| F2 — AI titulky | ⏳ | přepis (Whisper-class), TTS |
+| **F2 — AI titulky** | ✅ hotovo | **TTS voiceover** (espeak-ng přes Python sidecar, cs/en/sk/de/…): skript → reálné audio + klip na timeline + titulky s přesným časováním (per-fráze syntéza), transakční undo. **Přepis řeči**: pocketsphinx (en) + externí Whisper přes `VEDIT_ASR_CMD`, VAD/segmentace. MCP: `gen.audio(kind:voice)`, `captions.transcribe`, `captions.from_script`, `ai.capabilities`. CLI `tts/voiceover/transcribe`, UI panel AI titulků. |
 | F3 — AI střih + animace | ⏳ | highlight/auto-cut, motion tracking |
 | F4 — Generování | ⏳ | napojení gen modelů (Veo, Kling, Seedance, Wan…) místo stubu |
 | F5 — Rozšíření | ⏳ | kolaborace, marketplace, macOS/Linux |
 
 **Poznámka k F0 stacku:** kostra je implementovaná v TypeScriptu (běží jako server/CLI/MCP i UI); nativní Rust/Tauri jádro z plánu §6 zůstává cílem pro F1+ (v sandboxu není Rust toolchain). Rozhraní vrstev je připravené tak, aby jádro šlo vyměnit bez změny API/MCP toolů.
 
-*Stav dokumentu: plán (v1.2, 2026-10-20) — doplněn stav implementace F0 + F1.*
+*Stav dokumentu: plán (v1.3, 2026-10-20) — doplněn stav implementace F0 + F1 + F2.*

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, connectWs, setCurrentId, withToken, type Clip, type Project } from "./api";
-import { Inspector, JobsPanel, MediaPool, Preview, Timeline, fmt } from "./components";
+import { AiPanel, Inspector, JobsPanel, MediaPool, Preview, Timeline, fmt } from "./components";
 
 interface Selection {
   trackId: string;
@@ -17,6 +17,7 @@ export function App() {
   const [presetId, setPresetId] = useState("fade-in");
   const [prompt, setPrompt] = useState("ohňostroj nad Prahou, noční panorama");
   const [busy, setBusy] = useState(false);
+  const [aiCaps, setAiCaps] = useState<Awaited<ReturnType<typeof api.aiCaps>> | null>(null);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -38,6 +39,7 @@ export function App() {
       try {
         await refresh();
         setPresets((await api.presets()).presets);
+        setAiCaps(await api.aiCaps());
       } catch (err) {
         flash(`Chyba: ${(err as Error).message}`);
       }
@@ -185,6 +187,23 @@ export function App() {
       <main className="main">
         <div className="left-col">
           <MediaPool project={project} projectId={project.id} onImported={() => void refresh()} />
+          <AiPanel
+            caps={aiCaps}
+            assets={project.assets}
+            busy={busy}
+            onVoiceover={(script, voice) =>
+              act(async () => {
+                const res = await api.voiceover(script, voice, playhead);
+                flash(`Voiceover job ${res.jobId.slice(0, 8)}… (TTS + titulky)`);
+              })
+            }
+            onTranscribe={(assetId) =>
+              act(async () => {
+                const res = await api.transcribe(assetId);
+                flash(`Přepis job ${res.jobId.slice(0, 8)}…`);
+              })
+            }
+          />
           <JobsPanel project={project} />
         </div>
         <Preview project={project} clip={activeClip} playhead={playhead} frameUrl={frameUrl} />

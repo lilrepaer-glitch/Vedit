@@ -1,0 +1,2 @@
+espeakng-loader>=0.2.3
+pocketsphinx>=5.0.3

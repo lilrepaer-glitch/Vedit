@@ -7,6 +7,8 @@ import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
 import { sequenceDuration } from "../core/types.js";
 import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
+import { speechCapabilities } from "../ai/speech.js";
+import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
 import { runStubGenJob, runRealRenderJob, runProxyJob } from "../server/app.js";
 import { resolve as resolvePath } from "node:path";
 
@@ -533,7 +535,13 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       }),
   );
 
-  // ---- generování (F0 stub) + export ----
+  server.registerTool(
+    "ai.capabilities",
+    { description: "Dostupné AI enginy (TTS/ASR) a hlasy." },
+    async () => wrapTool(() => speechCapabilities()),
+  );
+
+  // ---- generování (gen.video F0 stub) + export ----
   server.registerTool(
     "gen.video",
     {
@@ -560,17 +568,76 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   server.registerTool(
     "gen.audio",
     {
-      description: "Vygeneruje hudbu/SFX/voiceover (F0: simulovaný job).",
+      description:
+        "F2: kind=voice dělá REÁLNÝ voiceover ze skriptu (TTS + klip + titulky); music/sfx zůstávají simulované do F4.",
       inputSchema: {
-        prompt: z.string(),
+        prompt: z.string().describe("Text skriptu (voice) nebo prompt (music/sfx)"),
         kind: z.enum(["music", "sfx", "voice"]).default("music"),
+        voice: z.string().default("cs"),
         duration: z.number().positive().optional(),
+        start: z.number().nonnegative().default(0),
+        gap: z.number().min(0).max(3).optional(),
       },
     },
-    async ({ prompt, kind, duration }) =>
-      wrapTool(() => {
-        const type = kind === "voice" ? "gen.voice" : kind === "sfx" ? "gen.sfx" : "gen.music";
-        return runStubGenJob(engine(), type, { prompt, kind, duration });
+    async ({ prompt, kind, voice, start, gap }) =>
+      wrapTool(async () => {
+        if (kind === "voice") {
+          const caps = await speechCapabilities();
+          if (caps.tts.available) {
+            return generateVoiceover(engine(), { script: prompt, voice, start, gap }, {
+              mediaDir: resolvePath(process.cwd(), ".vedit/media"),
+            });
+          }
+          return runStubGenJob(engine(), "gen.voice", { prompt, kind, simulated: true });
+        }
+        return runStubGenJob(engine(), kind === "sfx" ? "gen.sfx" : "gen.music", { prompt, kind });
+      }),
+  );
+
+  server.registerTool(
+    "captions.transcribe",
+    {
+      description: "F2: přepis řeči z média → titulky (pocketsphinx/externí Whisper přes VEDIT_ASR_CMD).",
+      inputSchema: {
+        assetId: idSchema,
+        language: z.string().default("en"),
+        maxWords: z.number().int().min(1).max(20).default(8),
+      },
+    },
+    async ({ assetId, language, maxWords }) =>
+      wrapTool(() => transcribeToCaptions(engine(), assetId, { language, maxWords })),
+  );
+
+  server.registerTool(
+    "captions.from_script",
+    {
+      description: "F2: titulky ze skriptu — s voiceoverem (přesný čas) nebo odhad časování bez syntézy.",
+      inputSchema: {
+        script: z.string(),
+        start: z.number().nonnegative().default(0),
+        gap: z.number().min(0).max(3).default(0.35),
+        voice: z.string().optional(),
+        withVoiceover: z.boolean().default(false),
+      },
+    },
+    async ({ script, start, gap, voice, withVoiceover }) =>
+      wrapTool(async () => {
+        if (withVoiceover) {
+          return generateVoiceover(engine(), { script, voice: voice ?? "cs", start, gap }, {
+            mediaDir: resolvePath(process.cwd(), ".vedit/media"),
+          });
+        }
+        // odhad časování podle délky textu (~18 znaků/s) bez syntézy
+        const { splitScript } = await import("../ai/speech.js");
+        const phrases = splitScript(script);
+        let t = start;
+        const segments = phrases.map((text) => {
+          const dur = Math.max(0.8, text.length * 0.055);
+          const seg = { text, start: t, end: t + dur };
+          t += dur + gap;
+          return seg;
+        });
+        return { captions: engine().addCaptionsFromSegments(segments), estimated: true };
       }),
   );
 
