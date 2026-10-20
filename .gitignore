@@ -1,0 +1,9 @@
+node_modules/
+dist/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+*.log
+.DS_Store
+.vedit/
+*.vedit
+coverage/
