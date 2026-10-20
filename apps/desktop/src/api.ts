@@ -122,6 +122,17 @@ export const api = {
     req<{ jobId: string }>("POST", `/projects/${currentId}/voiceover`, { script, voice, start }),
   transcribe: (assetId: string, language = "en") =>
     req<{ jobId: string }>("POST", `/projects/${currentId}/assets/${assetId}/transcribe`, { language }),
+  // F3: AI střih
+  removeSilences: (clipId?: string) =>
+    req<{ trackId: string; savedDuration: number }>("POST", `/projects/${currentId}/edit/remove-silences`, clipId ? { clipId } : {}),
+  highlight: (targetDuration = 15) =>
+    req<{ trackId: string; totalDuration: number; clips: unknown[] }>("POST", `/projects/${currentId}/edit/highlight`, { targetDuration }),
+  beatSync: (clipId: string, musicAssetId: string) =>
+    req<{ beats: number[]; splits: unknown[] }>("POST", `/projects/${currentId}/clips/${clipId}/beat-sync`, { musicAssetId }),
+  autoReframe: (clipId: string) =>
+    req<{ keyframes: number }>("POST", `/projects/${currentId}/clips/${clipId}/auto-reframe`, {}),
+  trackMotion: (clipId: string, sourceAssetId: string) =>
+    req<{ keyframes: number }>("POST", `/projects/${currentId}/clips/${clipId}/track-motion`, { sourceAssetId }),
 };
 
 export let currentId = "";

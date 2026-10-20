@@ -227,6 +227,109 @@ transcribe.action(async (assetId: string, opts: { project: string; language: str
   });
 });
 
+const analyze = program.command("analyze").description("F3: analýza média (silences | scenes | beats | motion)");
+analyze.argument("<kind>", "silences | scenes | beats | motion");
+analyze.argument("<media>", "cesta k médiu");
+analyze.option("--noise-db <db>", "práh ticha v dBFS", (v) => parseFloat(v));
+analyze.option("--min-silence <sec>", "minimální délka ticha", (v) => parseFloat(v));
+analyze.option("--threshold <t>", "práh detekce scén 0..1", (v) => parseFloat(v));
+analyze.option("--sensitivity <s>", "citlivost beatů", (v) => parseFloat(v));
+analyze.action(async (kind: string, media: string, opts: { noiseDb?: number; minSilence?: number; threshold?: number; sensitivity?: number }) => {
+  switch (kind) {
+    case "silences": {
+      const { detectSilences } = await import("../ai/analysis.js");
+      console.log(JSON.stringify(await detectSilences(media, { noiseDb: opts.noiseDb, minDuration: opts.minSilence }), null, 2));
+      break;
+    }
+    case "scenes": {
+      const { detectScenes } = await import("../ai/analysis.js");
+      console.log(JSON.stringify(await detectScenes(media, { threshold: opts.threshold }), null, 2));
+      break;
+    }
+    case "beats": {
+      const { detectBeats } = await import("../ai/analysis.js");
+      console.log(JSON.stringify(await detectBeats(media, { sensitivity: opts.sensitivity }), null, 2));
+      break;
+    }
+    case "motion": {
+      const { trackMotion } = await import("../ai/analysis.js");
+      console.log(JSON.stringify(await trackMotion(media, {}), null, 2));
+      break;
+    }
+    default:
+      throw new Error("kind = silences | scenes | beats | motion");
+  }
+});
+
+const cutSilence = program.command("cut-silence").description("F3: vyhoď ticha ze stopy (ripple collapse)");
+projectPathOpt(cutSilence);
+cutSilence.option("--track <id>", "cílová stopa");
+cutSilence.option("--clip <id>", "cílový klip (určí stopu)");
+cutSilence.option("--noise-db <db>", "práh ticha v dBFS", (v) => parseFloat(v));
+cutSilence.option("--min-silence <sec>", "minimální délka ticha", (v) => parseFloat(v));
+cutSilence.action(async (opts: { project: string; track?: string; clip?: string; noiseDb?: number; minSilence?: number }) => {
+  const { removeSilences } = await import("../ai/edit.js");
+  await withEngine(opts, async (engine) => {
+    const result = await removeSilences(engine, {
+      trackId: opts.track,
+      clipId: opts.clip,
+      noiseDb: opts.noiseDb,
+      minSilence: opts.minSilence,
+    });
+    console.log(`ticha vyhozena: −${result.savedDuration.toFixed(2)}s, ${result.clips.length} klipů na stopě ${result.trackId}`);
+  });
+});
+
+const highlight = program.command("highlight").description("F3: sestav highlight reel do nové stopy");
+projectPathOpt(highlight);
+highlight.option("--track <id>", "zdrojová stopa");
+highlight.option("--asset <id>", "zdrojové médium");
+highlight.option("--clip <id>", "zdrojový klip");
+highlight.option("--duration <sec>", "cílová délka vteřin", (v) => parseFloat(v), 15);
+highlight.action(async (opts: { project: string; track?: string; asset?: string; clip?: string; duration: number }) => {
+  const { buildHighlight } = await import("../ai/edit.js");
+  await withEngine(opts, async (engine) => {
+    const result = await buildHighlight(engine, {
+      trackId: opts.track,
+      assetId: opts.asset,
+      clipId: opts.clip,
+      targetDuration: opts.duration,
+    });
+    console.log(`highlight: ${result.totalDuration.toFixed(2)}s v ${result.clips.length} klipech na stopě ${result.trackId}`);
+  });
+});
+
+const beats = program.command("beats").description("F3: rozděl klip na střihy na beaty hudby");
+projectPathOpt(beats);
+beats.argument("<clipId>", "ID klipu");
+beats.argument("<musicAssetId>", "ID hudebního assetu");
+beats.action(async (clipId: string, musicAssetId: string, opts: { project: string }) => {
+  const { beatSync } = await import("../ai/edit.js");
+  await withEngine(opts, async (engine) => {
+    const result = await beatSync(engine, { clipId, musicAssetId });
+    console.log(`beat-sync: ${result.beats.length} beatů → ${result.splits.length} střihů`);
+  });
+});
+
+const track = program.command("track").description("F3: motion tracking — grafika sleduje pohyb");
+projectPathOpt(track);
+track.argument("<targetClipId>", "ID cílového klipu (grafika/text)");
+track.argument("<source>", "ID zdrojového assetu nebo klipu");
+track.option("--strength <s>", "síla 0..2", (v) => parseFloat(v), 1);
+track.action(async (targetClipId: string, source: string, opts: { project: string; strength: number }) => {
+  const { trackMotionTo } = await import("../ai/edit.js");
+  await withEngine(opts, async (engine) => {
+    const byClip = engine.project.sequences.some((s) => s.tracks.some((t) => t.clips.some((c) => c.id === source)));
+    const result = await trackMotionTo(engine, {
+      targetClipId,
+      sourceAssetId: byClip ? undefined : source,
+      sourceClipId: byClip ? source : undefined,
+      strength: opts.strength,
+    });
+    console.log(`tracking: ${result.keyframes} keyframů na klipu ${result.clip.id}`);
+  });
+});
+
 const serve = program.command("serve").description("spustí REST+WS API server");
 serve.option("--port <port>", "port", "47000");
 serve.option("--host <host>", "host", "127.0.0.1");

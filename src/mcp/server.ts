@@ -9,6 +9,8 @@ import { sequenceDuration } from "../core/types.js";
 import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
 import { speechCapabilities } from "../ai/speech.js";
 import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
+import { detectBeats, detectScenes, detectSilences, trackMotion, windowEnergy } from "../ai/analysis.js";
+import { autoReframe, beatSync, buildHighlight, removeSilences, trackMotionTo } from "../ai/edit.js";
 import { runStubGenJob, runRealRenderJob, runProxyJob } from "../server/app.js";
 import { resolve as resolvePath } from "node:path";
 
@@ -539,6 +541,127 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     "ai.capabilities",
     { description: "Dostupné AI enginy (TTS/ASR) a hlasy." },
     async () => wrapTool(() => speechCapabilities()),
+  );
+
+  // ---- F3: analýza (ticha, scény, beaty, pohyb) ----
+  server.registerTool(
+    "analysis.silences",
+    {
+      description: "F3: detekce tich v médiu (pro auto-cut).",
+      inputSchema: {
+        assetId: idSchema,
+        noiseDb: z.number().min(-80).max(0).optional(),
+        minSilence: z.number().min(0.05).max(10).optional(),
+      },
+    },
+    async ({ assetId, noiseDb, minSilence }) =>
+      wrapTool(async () => ({
+        regions: await detectSilences(engine().findAsset(assetId).path, { noiseDb, minDuration: minSilence }),
+      })),
+  );
+
+  server.registerTool(
+    "analysis.scenes",
+    {
+      description: "F3: detekce střihů scén v médiu.",
+      inputSchema: { assetId: idSchema, threshold: z.number().min(0.05).max(0.95).optional() },
+    },
+    async ({ assetId, threshold }) =>
+      wrapTool(async () => ({ scenes: await detectScenes(engine().findAsset(assetId).path, { threshold }) })),
+  );
+
+  server.registerTool(
+    "analysis.beats",
+    {
+      description: "F3: detekce beatů v hudbě (pro beat-sync střih).",
+      inputSchema: {
+        assetId: idSchema,
+        sensitivity: z.number().min(0.5).max(5).optional(),
+        minBeatSec: z.number().min(0.1).max(2).optional(),
+      },
+    },
+    async ({ assetId, sensitivity, minBeatSec }) =>
+      wrapTool(async () => ({
+        beats: await detectBeats(engine().findAsset(assetId).path, { sensitivity, minBeatSec }),
+      })),
+  );
+
+  server.registerTool(
+    "analysis.motion",
+    {
+      description: "F3: motion tracking — těžiště pohybu po snímcích (0..1).",
+      inputSchema: { assetId: idSchema, fps: z.number().min(1).max(30).optional() },
+    },
+    async ({ assetId, fps }) =>
+      wrapTool(async () => ({ track: await trackMotion(engine().findAsset(assetId).path, { fps }) })),
+  );
+
+  // ---- F3: AI střihové operace ----
+  server.registerTool(
+    "edit.remove_silences",
+    {
+      description: "F3: vyhoď ticha — detekuje ticha na stopě a zavře mezery (ripple collapse).",
+      inputSchema: {
+        trackId: idSchema.optional(),
+        clipId: idSchema.optional(),
+        noiseDb: z.number().min(-80).max(0).optional(),
+        minSilence: z.number().min(0.05).max(10).optional(),
+        padding: z.number().min(0).max(1).optional(),
+      },
+    },
+    async (args) => wrapTool(() => removeSilences(engine(), args)),
+  );
+
+  server.registerTool(
+    "edit.highlight",
+    {
+      description: "F3: sestaví highlight reel (pohyb + audio energie + scény) do nové stopy.",
+      inputSchema: {
+        trackId: idSchema.optional(),
+        assetId: idSchema.optional(),
+        clipId: idSchema.optional(),
+        targetDuration: z.number().min(2).max(120).default(15),
+      },
+    },
+    async (args) => wrapTool(() => buildHighlight(engine(), args)),
+  );
+
+  server.registerTool(
+    "edit.beat_sync",
+    {
+      description: "F3: rozdělí klip na střihy přesně na beaty hudby.",
+      inputSchema: {
+        clipId: idSchema,
+        musicAssetId: idSchema,
+        sensitivity: z.number().min(0.5).max(5).optional(),
+        minBeatSec: z.number().min(0.1).max(2).optional(),
+      },
+    },
+    async ({ clipId, musicAssetId, sensitivity, minBeatSec }) =>
+      wrapTool(() => beatSync(engine(), { clipId, musicAssetId, sensitivity, minBeatSec })),
+  );
+
+  server.registerTool(
+    "edit.auto_reframe",
+    {
+      description: "F3: vycentruje pohyb v klipu (pan keyframy) pro výřez na jiný poměr stran (9:16…).",
+      inputSchema: { clipId: idSchema, strength: z.number().min(0).max(2).optional() },
+    },
+    async ({ clipId, strength }) => wrapTool(() => autoReframe(engine(), { clipId, strength })),
+  );
+
+  server.registerTool(
+    "edit.track_motion",
+    {
+      description: "F3: motion tracking — grafika/text sleduje pohyb ve zdroji (keyframy x/y).",
+      inputSchema: {
+        targetClipId: idSchema,
+        sourceAssetId: idSchema.optional(),
+        sourceClipId: idSchema.optional(),
+        strength: z.number().min(0).max(2).optional(),
+      },
+    },
+    async (args) => wrapTool(() => trackMotionTo(engine(), args)),
   );
 
   // ---- generování (gen.video F0 stub) + export ----

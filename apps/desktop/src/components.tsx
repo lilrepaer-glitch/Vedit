@@ -139,15 +139,21 @@ export function AiPanel({
   caps,
   assets,
   busy,
+  selectedClipId,
   onVoiceover,
   onTranscribe,
+  onAiEdit,
 }: {
   caps: { tts: { engine: string; available: boolean }; asr: { engine: string; available: boolean }; voices: string[] } | null;
   assets: Asset[];
   busy: boolean;
+  selectedClipId: string | null;
   onVoiceover: (script: string, voice: string) => void;
   onTranscribe: (assetId: string) => void;
+  onAiEdit: (action: "remove-silences" | "highlight" | "beat-sync" | "auto-reframe" | "track-motion", params: Record<string, string>) => void;
 }) {
+  const audioAssets = assets.filter((a) => a.kind === "audio");
+  const videoAssets = assets.filter((a) => a.kind === "video");
   return (
     <section className="panel">
       <h2>AI titulky &amp; voiceover</h2>
@@ -202,6 +208,71 @@ export function AiPanel({
           }}
         >
           📝 Přepsat řeč
+        </button>
+      </div>
+      <h2>AI střih</h2>
+      <p className="muted">
+        {selectedClipId ? `klip ${selectedClipId.slice(0, 8)}…` : "vyber klip na timeline"}
+      </p>
+      <div className="row">
+        <button
+          disabled={busy || !selectedClipId}
+          title="Detekuje ticha a zavře mezery na stopě vybraného klipu"
+          onClick={() => selectedClipId && onAiEdit("remove-silences", { clipId: selectedClipId })}
+        >
+          ✂️ Vyhoď ticha
+        </button>
+        <button
+          disabled={busy || videoAssets.length === 0}
+          title="Sestaví highlight reel (pohyb + energie + scény) do nové stopy"
+          onClick={() => onAiEdit("highlight", {})}
+        >
+          ⭐ Highlight
+        </button>
+      </div>
+      <div className="row">
+        <select id="beat-music">
+          {audioAssets.map((a) => (
+            <option key={a.id} value={a.id}>
+              🎵 {a.name}
+            </option>
+          ))}
+        </select>
+        <button
+          disabled={busy || !selectedClipId || audioAssets.length === 0}
+          title="Rozdělí vybraný klip na střihy přesně na beaty hudby"
+          onClick={() => {
+            const music = (document.getElementById("beat-music") as HTMLSelectElement | null)?.value;
+            if (selectedClipId && music) onAiEdit("beat-sync", { clipId: selectedClipId, musicAssetId: music });
+          }}
+        >
+          🥁 Beat sync
+        </button>
+      </div>
+      <div className="row">
+        <button
+          disabled={busy || !selectedClipId}
+          title="Vycentruje pohyb v klipu (pan keyframy) — pro výřez 9:16"
+          onClick={() => selectedClipId && onAiEdit("auto-reframe", { clipId: selectedClipId })}
+        >
+          📐 Auto-reframe
+        </button>
+        <select id="motion-source">
+          {videoAssets.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name}
+            </option>
+          ))}
+        </select>
+        <button
+          disabled={busy || !selectedClipId || videoAssets.length === 0}
+          title="Vybraný klip (grafika/text) bude sledovat pohyb ve zdroji"
+          onClick={() => {
+            const src = (document.getElementById("motion-source") as HTMLSelectElement | null)?.value;
+            if (selectedClipId && src) onAiEdit("track-motion", { clipId: selectedClipId, sourceAssetId: src });
+          }}
+        >
+          🎯 Track motion
         </button>
       </div>
     </section>

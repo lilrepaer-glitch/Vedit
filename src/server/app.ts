@@ -9,6 +9,8 @@ import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/m
 import { renderSequence } from "../render/export.js";
 import { speechCapabilities } from "../ai/speech.js";
 import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
+import { detectBeats, detectScenes, detectSilences, trackMotion, windowEnergy } from "../ai/analysis.js";
+import { autoReframe, beatSync, buildHighlight, removeSilences, trackMotionTo } from "../ai/edit.js";
 import type { AssetKind, JobType, TrackKind } from "../core/types.js";
 
 export interface ServerOptions {
@@ -652,6 +654,120 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       maxWords: req.body?.maxWords != null ? Number(req.body.maxWords) : undefined,
     });
     res.status(201).json(result);
+  }, registry));
+
+  // ---- F3: AI střih — analýza ----
+  app.post("/api/v1/projects/:id/analyze/silences", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.body?.assetId ?? ""));
+    const regions = await detectSilences(asset.path, {
+      noiseDb: req.body?.noiseDb != null ? Number(req.body.noiseDb) : undefined,
+      minDuration: req.body?.minSilence != null ? Number(req.body.minSilence) : undefined,
+    });
+    res.json({ regions });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/analyze/scenes", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.body?.assetId ?? ""));
+    const scenes = await detectScenes(asset.path, {
+      threshold: req.body?.threshold != null ? Number(req.body.threshold) : undefined,
+    });
+    res.json({ scenes });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/analyze/beats", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.body?.assetId ?? ""));
+    const beats = await detectBeats(asset.path, {
+      sensitivity: req.body?.sensitivity != null ? Number(req.body.sensitivity) : undefined,
+      minBeatSec: req.body?.minBeatSec != null ? Number(req.body.minBeatSec) : undefined,
+    });
+    res.json({ beats });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/analyze/motion", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.body?.assetId ?? ""));
+    const track = await trackMotion(asset.path, {
+      fps: req.body?.fps != null ? Number(req.body.fps) : undefined,
+    });
+    res.json({ track });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/analyze/energy", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.body?.assetId ?? ""));
+    const windows = await windowEnergy(asset.path, {
+      windowSec: req.body?.windowSec != null ? Number(req.body.windowSec) : undefined,
+      hopSec: req.body?.hopSec != null ? Number(req.body.hopSec) : undefined,
+    });
+    res.json({ windows });
+  }, registry));
+
+  // ---- F3: AI střih — operace ----
+  app.post("/api/v1/projects/:id/edit/remove-silences", wrap(async (req, res, engine) => {
+    try {
+      const result = await removeSilences(engine, {
+        trackId: req.body?.trackId != null ? String(req.body.trackId) : undefined,
+        clipId: req.body?.clipId != null ? String(req.body.clipId) : undefined,
+        noiseDb: req.body?.noiseDb != null ? Number(req.body.noiseDb) : undefined,
+        minSilence: req.body?.minSilence != null ? Number(req.body.minSilence) : undefined,
+        padding: req.body?.padding != null ? Number(req.body.padding) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/edit/highlight", wrap(async (req, res, engine) => {
+    try {
+      const result = await buildHighlight(engine, {
+        trackId: req.body?.trackId != null ? String(req.body.trackId) : undefined,
+        assetId: req.body?.assetId != null ? String(req.body.assetId) : undefined,
+        clipId: req.body?.clipId != null ? String(req.body.clipId) : undefined,
+        targetDuration: req.body?.targetDuration != null ? Number(req.body.targetDuration) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/beat-sync", wrap(async (req, res, engine) => {
+    try {
+      const result = await beatSync(engine, {
+        clipId: String(req.params.clipId),
+        musicAssetId: String(req.body?.musicAssetId ?? ""),
+        sensitivity: req.body?.sensitivity != null ? Number(req.body.sensitivity) : undefined,
+        minBeatSec: req.body?.minBeatSec != null ? Number(req.body.minBeatSec) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/auto-reframe", wrap(async (req, res, engine) => {
+    try {
+      const result = await autoReframe(engine, {
+        clipId: String(req.params.clipId),
+        strength: req.body?.strength != null ? Number(req.body.strength) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/track-motion", wrap(async (req, res, engine) => {
+    try {
+      const result = await trackMotionTo(engine, {
+        targetClipId: String(req.params.clipId),
+        sourceAssetId: req.body?.sourceAssetId != null ? String(req.body.sourceAssetId) : undefined,
+        sourceClipId: req.body?.sourceClipId != null ? String(req.body.sourceClipId) : undefined,
+        strength: req.body?.strength != null ? Number(req.body.strength) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
   }, registry));
 
   // F1: stažení render výstupu
