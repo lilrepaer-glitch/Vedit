@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, connectWs, setCurrentId, type Clip, type Project } from "./api";
-import { Inspector, MediaPool, Preview, Timeline, fmt } from "./components";
+import { api, connectWs, setCurrentId, withToken, type Clip, type Project } from "./api";
+import { Inspector, JobsPanel, MediaPool, Preview, Timeline, fmt } from "./components";
 
 interface Selection {
   trackId: string;
@@ -54,6 +54,26 @@ export function App() {
     }
     return null;
   }, [seq, selection]);
+
+  // F1: aktivní klip pro náhled = vybraný klip pod playheadem, jinak klip pod playheadem
+  const activeClip: Clip | null = useMemo(() => {
+    if (!seq) return null;
+    const inside = (c: Clip) => playhead >= c.start && playhead <= c.start + c.duration;
+    if (selected && inside(selected.clip)) return selected.clip;
+    for (const track of [...seq.tracks].filter((t) => t.kind !== "audio").reverse()) {
+      const c = track.clips.find(inside);
+      if (c) return c;
+    }
+    return selected?.clip ?? null;
+  }, [seq, selected, playhead]);
+
+  const frameUrl = useMemo(() => {
+    if (!project || !activeClip) return null;
+    const t = activeClip.in + Math.min(Math.max(0, playhead - activeClip.start), activeClip.duration);
+    return withToken(
+      `/api/v1/projects/${project.id}/assets/${activeClip.assetId}/frame?t=${t.toFixed(2)}&width=640`,
+    );
+  }, [project, activeClip, playhead]);
 
   const act = useCallback(
     async (fn: () => Promise<unknown>, okMessage?: string) => {
@@ -165,8 +185,9 @@ export function App() {
       <main className="main">
         <div className="left-col">
           <MediaPool project={project} projectId={project.id} onImported={() => void refresh()} />
+          <JobsPanel project={project} />
         </div>
-        <Preview project={project} clip={selected?.clip ?? null} playhead={playhead} />
+        <Preview project={project} clip={activeClip} playhead={playhead} frameUrl={frameUrl} />
         <div className="right-col">
           <Inspector
             clip={selected?.clip ?? null}

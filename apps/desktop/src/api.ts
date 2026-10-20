@@ -61,6 +61,11 @@ export interface Project {
 
 const API_TOKEN = (import.meta as { env?: Record<string, string> }).env?.VITE_API_TOKEN ?? "dev";
 
+/** Přidá ?token= pro <img>/download odkazy (API akceptuje header i query). */
+export function withToken(url: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
+}
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/v1${path}`, {
     method,

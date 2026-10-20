@@ -22,6 +22,11 @@ export const assetSchema = z.object({
   height: z.number().int().positive().optional(),
   fps: z.number().positive().optional(),
   sizeBytes: z.number().nonnegative().optional(),
+  videoCodec: z.string().optional(),
+  audioCodec: z.string().optional(),
+  hasAudio: z.boolean().optional(),
+  bitrate: z.number().optional(),
+  proxyPath: z.string().optional(),
   source: assetSourceSchema.optional(),
   createdAt: z.string(),
 });

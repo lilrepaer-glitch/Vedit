@@ -138,14 +138,77 @@ describe("REST API", () => {
     expect(generated.source.simulated).toBe(true);
   });
 
-  it("export render stub vytvoří job", async () => {
-    const id = await createProject();
+  it("export render běží jako reálný job s výstupem ke stažení", async () => {
+    const id = await createProject(false);
+    // projekt s reálným médiem generovaným přes ffmpeg
+    const { generateTestClip } = await import("../src/core/media.js");
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "vedit-api-"));
+    const clip = join(dir, "t.mp4");
+    await generateTestClip(clip, { seconds: 1, size: "320x240", rate: 25 });
+    const assetRes = await auth(
+      request(app).post(`/api/v1/projects/${id}/assets`).send({ name: "t.mp4", kind: "video", path: clip }),
+    );
+    // auto-probe doplnil reálná metadata
+    expect(assetRes.body.asset.duration).toBeGreaterThan(0.5);
+    expect(assetRes.body.asset.width).toBe(320);
+    const trackRes = await auth(
+      request(app).post(`/api/v1/projects/${id}/tracks`).send({ kind: "video", name: "V1" }),
+    );
+    await auth(
+      request(app)
+        .post(`/api/v1/projects/${id}/clips`)
+        .send({ trackId: body(trackRes).track.id, assetId: assetRes.body.asset.id, start: 0, duration: 1, in: 0, out: 1 }),
+    );
+
     const res = await auth(request(app).post(`/api/v1/projects/${id}/export`).send({ format: "mp4" }));
     expect(res.status).toBe(201);
-    const job = await auth(request(app).get(`/api/v1/jobs/${res.body.jobId}`));
-    expect(job.body.job.type).toBe("render");
-    expect(job.body.job.status).toBe("done");
-  });
+    const { jobId } = res.body;
+
+    // počkej na dokončení renderu
+    let job: Record<string, { status: string; output?: { outPath?: string } }> | null = null;
+    for (let i = 0; i < 60; i++) {
+      const j = await auth(request(app).get(`/api/v1/jobs/${jobId}`));
+      job = j.body.job;
+      if (job!.status === "done" || job!.status === "failed") break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(job!.status).toBe("done");
+    expect(job!.output!.outPath).toBeTruthy();
+
+    const dl = await auth(request(app).get(`/api/v1/jobs/${jobId}/output`));
+    expect(dl.status).toBe(200);
+    expect(dl.body.length).toBeGreaterThan(1000);
+  }, 60000);
+
+  it("frame endpoint vrací reálný JPEG", async () => {
+    const id = await createProject(false);
+    const { generateTestClip } = await import("../src/core/media.js");
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "vedit-api-"));
+    const clip = join(dir, "f.mp4");
+    await generateTestClip(clip, { seconds: 1, size: "320x240", rate: 25 });
+    const assetRes = await auth(
+      request(app).post(`/api/v1/projects/${id}/assets`).send({ name: "f.mp4", kind: "video", path: clip }),
+    );
+    const assetId = assetRes.body.asset.id;
+    const frame = await auth(request(app).get(`/api/v1/projects/${id}/assets/${assetId}/frame?t=0.5&width=160`));
+    expect(frame.status).toBe(200);
+    expect(frame.headers["content-type"]).toContain("image/jpeg");
+    expect(frame.body[0]).toBe(0xff);
+    expect(frame.body[1]).toBe(0xd8);
+
+    const thumbs = await auth(request(app).get(`/api/v1/projects/${id}/assets/${assetId}/thumbs?count=3`));
+    expect(thumbs.body.thumbs).toHaveLength(3);
+    expect(thumbs.body.thumbs[0].url).toContain("/frame?");
+
+    const wave = await auth(request(app).get(`/api/v1/projects/${id}/assets/${assetId}/waveform?samples=50`));
+    expect(wave.body.peaks).toHaveLength(50);
+  }, 60000);
 
   it("validace vrací 400 s chybovou zprávou", async () => {
     const id = await createProject(false);

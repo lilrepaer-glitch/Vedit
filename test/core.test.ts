@@ -122,6 +122,46 @@ describe("VeditEngine — základní operace", () => {
     engine.deleteClip(clip.id, v1.id);
     expect(engine.findTrack(v1.id).clips).toHaveLength(0);
   });
+
+  it("roll posune střih mezi sousedními klipy", () => {
+    const { engine, v1, video } = setup();
+    const left = engine.addClip({ trackId: v1.id, assetId: video.id, start: 0, duration: 4, in: 0, out: 4 });
+    const right = engine.addClip({ trackId: v1.id, assetId: video.id, start: 4, duration: 4, in: 4, out: 8 });
+    engine.rollClip(left.id, 1);
+    expect(left.duration).toBeCloseTo(5);
+    expect(right.start).toBeCloseTo(5);
+    expect(right.duration).toBeCloseTo(3);
+    expect(right.in).toBeCloseTo(5);
+    expect(() => engine.rollClip(left.id, 10)).toThrow(/překračuje/);
+    // bez souseda vpravo to nejde
+    const solo = engine.addClip({ trackId: v1.id, assetId: video.id, start: 20, duration: 2 });
+    expect(() => engine.rollClip(solo.id, 1)).toThrow(/sousední/);
+  });
+
+  it("slip posune obsah bez pohybu na timeline", () => {
+    const { engine, v1, video } = setup();
+    const clip = engine.addClip({ trackId: v1.id, assetId: video.id, start: 2, duration: 4, in: 5, out: 9 });
+    engine.slipClip(clip.id, 1.5);
+    expect(clip.in).toBeCloseTo(6.5);
+    expect(clip.out).toBeCloseTo(10.5);
+    expect(clip.start).toBe(2);
+    expect(clip.duration).toBe(4);
+    expect(() => engine.slipClip(clip.id, -10)).toThrow(/začátek/);
+    expect(() => engine.slipClip(clip.id, 25)).toThrow(/konec/);
+  });
+
+  it("slide posune klip a upraví sousedy", () => {
+    const { engine, v1, video } = setup();
+    const prev = engine.addClip({ trackId: v1.id, assetId: video.id, start: 0, duration: 3, in: 0, out: 3 });
+    const mid = engine.addClip({ trackId: v1.id, assetId: video.id, start: 3, duration: 2, in: 3, out: 5 });
+    const next = engine.addClip({ trackId: v1.id, assetId: video.id, start: 5, duration: 3, in: 5, out: 8 });
+    engine.slideClip(mid.id, 1);
+    expect(mid.start).toBeCloseTo(4);
+    expect(prev.duration).toBeCloseTo(4);
+    expect(next.start).toBeCloseTo(6);
+    expect(next.in).toBeCloseTo(6);
+    expect(next.duration).toBeCloseTo(2);
+  });
 });
 
 describe("animace, titulky, export", () => {

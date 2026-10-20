@@ -1,13 +1,19 @@
 // REST API (PLAN.md §5) — REST na /api/v1 + WebSocket události.
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import { access, mkdir } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
 import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
+import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
+import { renderSequence } from "../render/export.js";
 import type { AssetKind, JobType, TrackKind } from "../core/types.js";
 
 export interface ServerOptions {
   /** Bearer token; when set, all /api routes require Authorization: Bearer <token>. */
   token?: string;
+  /** Adresář pro render/proxy výstupy (výchozí: .vedit) */
+  dataDir?: string;
   /** Called on every engine change (used by the WS layer). */
   onChange?: (projectId: string, label: string, engine: VeditEngine) => void;
   onJob?: (projectId: string, engine: VeditEngine) => void;
@@ -128,20 +134,118 @@ export function runStubGenJob(
   return { jobId: job.id, assetId };
 }
 
+/** Reálný render job (F1) — běží asynchronně přes FFmpeg, hlásí průběh. */
+export function runRealRenderJob(
+  engine: VeditEngine,
+  input: Record<string, unknown>,
+  opts: { renderDir: string },
+): { jobId: string } {
+  const job = engine.createJob("render", { ...input, simulated: false });
+  const outPath = resolvePath(opts.renderDir, `${job.id}.${String(input.format ?? "mp4")}`);
+  void (async () => {
+    try {
+      engine.updateJob(job.id, { status: "running", progress: 1 });
+      const result = await renderSequence(engine.project, {
+        outPath,
+        width: input.width != null ? Number(input.width) : undefined,
+        height: input.height != null ? Number(input.height) : undefined,
+        fps: input.fps != null ? Number(input.fps) : undefined,
+        crf: input.crf != null ? Number(input.crf) : undefined,
+        onProgress: (pct) => engine.updateJob(job.id, { progress: pct }),
+      });
+      engine.updateJob(job.id, {
+        status: "done",
+        progress: 100,
+        output: {
+          outPath: result.outPath,
+          duration: result.duration,
+          width: result.width,
+          height: result.height,
+          fps: result.fps,
+          sizeBytes: result.sizeBytes,
+          warnings: result.warnings,
+        },
+      });
+    } catch (err) {
+      engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
+    }
+  })();
+  return { jobId: job.id };
+}
+
+/** Proxy job (F1) — 640p verze pro plynulý střih. */
+export function runProxyJob(
+  engine: VeditEngine,
+  assetId: string,
+  opts: { proxyDir: string },
+): { jobId: string } {
+  const job = engine.createJob("other", { op: "proxy", assetId });
+  const asset = engine.findAsset(assetId);
+  const outPath = resolvePath(opts.proxyDir, `${assetId}.mp4`);
+  void (async () => {
+    try {
+      engine.updateJob(job.id, { status: "running", progress: 10 });
+      await mkdir(opts.proxyDir, { recursive: true });
+      await generateProxy(asset.path, outPath);
+      engine.updateAsset(assetId, { proxyPath: outPath });
+      engine.updateJob(job.id, {
+        status: "done",
+        progress: 100,
+        output: { proxyPath: outPath, assetId },
+      });
+    } catch (err) {
+      engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
+    }
+  })();
+  return { jobId: job.id };
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Auto-probe: doplní reálná metadata z ffprobe, pokud soubor existuje. */
+async function probeIntoAsset(engine: VeditEngine, assetId: string, path: string): Promise<void> {
+  if (!(await fileExists(path))) return;
+  try {
+    const probe = await probeMedia(path);
+    engine.updateAsset(assetId, {
+      duration: probe.duration,
+      width: probe.width,
+      height: probe.height,
+      fps: probe.fps,
+      sizeBytes: probe.sizeBytes,
+      videoCodec: probe.videoCodec,
+      audioCodec: probe.audioCodec,
+      hasAudio: probe.hasAudio,
+      bitrate: probe.bitrate,
+    });
+  } catch {
+    /* nečitelné médium — metadata zůstanou zadaná */
+  }
+}
+
 export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }): {
   app: Express;
   registry: ProjectRegistry;
 } {
   const registry = opts.registry ?? new ProjectRegistry(opts);
+  const dataDir = opts.dataDir ?? resolvePath(process.cwd(), ".vedit");
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
-  // auth (PLAN.md §5: lokální API token)
+  // auth (PLAN.md §5: lokální API token; ?token= pro <img> a download odkazy)
   if (opts.token) {
     app.use("/api", (req, res, next) => {
       if (req.path === "/v1/health") return next(); // health je veřejný
       const header = req.header("authorization") ?? "";
-      if (header === `Bearer ${opts.token}`) return next();
+      const queryToken = typeof req.query.token === "string" ? req.query.token : "";
+      if (header === `Bearer ${opts.token}` || queryToken === opts.token) return next();
       res.status(401).json({ error: "unauthorized" });
     });
   }
@@ -170,7 +274,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }, registry));
 
   // assets
-  app.post("/api/v1/projects/:id/assets", wrap((req, res, engine) => {
+  app.post("/api/v1/projects/:id/assets", wrap(async (req, res, engine) => {
     const { name, kind, path, duration, width, height, fps, sizeBytes, source } = req.body ?? {};
     if (!name || !kind || !path) return badRequest(res, "name, kind a path jsou povinné");
     const asset = engine.addAsset({
@@ -184,7 +288,47 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       sizeBytes: sizeBytes != null ? Number(sizeBytes) : undefined,
       source,
     });
-    res.status(201).json({ asset });
+    // F1: skutečný probe, pokud soubor existuje
+    if (kind !== "generated") await probeIntoAsset(engine, asset.id, asset.path);
+    res.status(201).json({ asset: engine.findAsset(asset.id) });
+  }, registry));
+
+  // F1: média — reálné snímky, waveform, proxy
+  app.get("/api/v1/projects/:id/assets/:assetId/frame", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.params.assetId));
+    const t = Number(req.query.t ?? 0);
+    const width = Number(req.query.width ?? 640);
+    const jpeg = await extractFrame(asset.path, Number.isFinite(t) ? t : 0, { width });
+    res.type("image/jpeg").send(jpeg);
+  }, registry));
+
+  app.get("/api/v1/projects/:id/assets/:assetId/thumbs", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.params.assetId));
+    const count = Math.min(12, Math.max(1, Number(req.query.count ?? 6)));
+    const width = Math.min(640, Math.max(64, Number(req.query.width ?? 160)));
+    const duration = asset.duration ?? 0;
+    const base = `/api/v1/projects/${req.params.id}/assets/${asset.id}/frame`;
+    const token = typeof req.query.token === "string" ? `&token=${req.query.token}` : "";
+    const thumbs = [];
+    for (let i = 0; i < count; i++) {
+      const t = duration > 0 ? (duration * (i + 0.5)) / count : 0;
+      thumbs.push({ t, url: `${base}?t=${t.toFixed(2)}&width=${width}${token}` });
+    }
+    res.json({ thumbs });
+  }, registry));
+
+  app.get("/api/v1/projects/:id/assets/:assetId/waveform", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.params.assetId));
+    const samples = Math.min(2000, Math.max(10, Number(req.query.samples ?? 400)));
+    const peaks = await extractPeaks(asset.path, samples);
+    res.json({ peaks, samples });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/assets/:assetId/proxy", wrap((req, res, engine) => {
+    const assetId = String(req.params.assetId);
+    engine.findAsset(assetId);
+    const result = runProxyJob(engine, assetId, { proxyDir: resolvePath(dataDir, "proxies") });
+    res.status(201).json(result);
   }, registry));
 
   app.get("/api/v1/projects/:id/assets", wrap((_req, res, engine) => {
@@ -400,12 +544,28 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }, registry));
 
   app.post("/api/v1/projects/:id/export", wrap((req, res, engine) => {
-    const result = runStubGenJob(engine, "render", {
+    const result = runRealRenderJob(engine, {
       format: String(req.body?.format ?? "mp4"),
       ...req.body,
-    });
+    }, { renderDir: resolvePath(dataDir, "renders") });
     res.status(201).json(result);
   }, registry));
+
+  // F1: stažení render výstupu
+  app.get("/api/v1/jobs/:jobId/output", (req, res, next) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const engine = registry.findByJob(jobId);
+      const job = engine.getJob(jobId);
+      const outPath = job.output?.outPath;
+      if (job.status !== "done" || typeof outPath !== "string") {
+        return badRequest(res, `job ${jobId} ještě nemá hotový výstup (stav: ${job.status})`);
+      }
+      res.download(outPath);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   app.get("/api/v1/projects/:id/jobs", wrap((_req, res, engine) => {
     res.json({ jobs: engine.project.jobs });

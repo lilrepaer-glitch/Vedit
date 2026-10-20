@@ -4,7 +4,7 @@
 
 📖 **[PLAN.md](./PLAN.md)** — plán a popis projektu (vize, funkce, architektura, roadmapa).
 
-> **Stav: F0 kostra** — datový model + operační engine (undo/redo), REST/WS API, MCP server (30+ tools), CLI a UI timeline. Render pipeline a reálné AI modely přijdou v dalších fázích (viz roadmapa v PLAN.md).
+> **Stav: F0 + F1 hotovo** — datový model + engine (undo/redo, roll/slip/slide), REST/WS API, MCP server (40+ tools), CLI, UI timeline, **reálné dekódování médií (ffprobe/FFmpeg) a skutečný render export**. AI titulky a generování modelů přijdou v dalších fázích (viz roadmapa v PLAN.md).
 
 ## Struktura repozitáře
 
@@ -69,9 +69,12 @@ Nebo přes HTTP: `npm exec -- tsx src/cli/index.ts mcp-http` → `http://127.0.0
 | `GET/POST /api/v1/projects` | projekty |
 | `POST /api/v1/projects/:id/clips` | přidat klip |
 | `POST .../clips/:clipId/split` | razor / rozdělení klipu |
+| `GET .../assets/:assetId/frame?t=` | reálný JPEG snímek z média |
+| `GET .../assets/:assetId/waveform` | audio waveform peaks |
 | `POST .../captions/from-text` | titulky z segmentů |
 | `POST .../gen/video` | generování videa (F0: simulovaný job) |
-| `POST .../export` | export (F0: simulovaný render) |
+| `POST .../export` | **reálný render přes FFmpeg** (F1) |
+| `GET /api/v1/jobs/:jobId/output` | stažení render výstupu |
 | `POST .../undo` / `redo` | historie |
 
 WebSocket `ws://127.0.0.1:47000/ws` vysílá události `change` a `job`.
