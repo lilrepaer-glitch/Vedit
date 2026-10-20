@@ -253,4 +253,4 @@ Instalátor: ~150 MB (GPU kodeky a ML modely se stahují dle potřeby). Portable
 
 **Poznámka k F0 stacku:** kostra je implementovaná v TypeScriptu (běží jako server/CLI/MCP i UI); nativní Rust/Tauri jádro z plánu §6 zůstává cílem pro F1+ (v sandboxu není Rust toolchain). Rozhraní vrstev je připravené tak, aby jádro šlo vyměnit bez změny API/MCP toolů.
 
-*Stav dokumentu: plán (v1.4, 2026-10-20) — doplněn stav implementace F0 + F1 + F2 + F3.*
+*Stav dokumentu: plán (v1.5, 2026-10-20) — doplněn stav implementace F0 + F1 + F2 + F3; Windows instalátor (Tauri/NSIS) se skládá v CI (`.github/workflows/release.yml` → `Vedit_installer.exe` na GitHub Releases).* 

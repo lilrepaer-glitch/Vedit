@@ -310,6 +310,22 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
+  // CORS — desktopový Tauri webview (http://tauri.localhost) volá API na 127.0.0.1:47000
+  app.use((req, res, next) => {
+    const origin = req.header("origin");
+    if (origin) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    }
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   // auth (PLAN.md §5: lokální API token; ?token= pro <img> a download odkazy)
   if (opts.token) {
     app.use("/api", (req, res, next) => {

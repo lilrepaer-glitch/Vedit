@@ -59,15 +59,30 @@ export interface Project {
   jobs: Array<{ id: string; type: string; status: string; progress: number; output?: Record<string, unknown> }>;
 }
 
-const API_TOKEN = (import.meta as { env?: Record<string, string> }).env?.VITE_API_TOKEN ?? "dev";
+const env = (import.meta as { env?: Record<string, string> }).env;
+
+/**
+ * V desktopu (Tauri webview) běží API na localhost:47000;
+ * v prohlížeči přes Vite proxy na /api.
+ */
+const isDesktop = location.protocol === "tauri:" || location.hostname === "tauri.localhost";
+const API_ORIGIN = env?.VITE_API_BASE ?? (isDesktop ? "http://127.0.0.1:47000" : "");
+
+const API_TOKEN = env?.VITE_API_TOKEN ?? "dev";
+
+/** Plná URL API endpointu (desktop → http://127.0.0.1:47000/api/v1/…). */
+export function apiUrl(path: string): string {
+  return `${API_ORIGIN}/api/v1${path}`;
+}
 
 /** Přidá ?token= pro <img>/download odkazy (API akceptuje header i query). */
 export function withToken(url: string): string {
-  return `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
+  const abs = url.startsWith("/") ? `${API_ORIGIN}${url}` : url;
+  return `${abs}${abs.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api/v1${path}`, {
+  const res = await fetch(apiUrl(path), {
     method,
     headers: {
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
@@ -143,7 +158,8 @@ export function setCurrentId(id: string): void {
 
 export function connectWs(onChange: () => void): () => void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const wsUrl = isDesktop ? "ws://127.0.0.1:47000/ws" : `${proto}://${location.host}/ws`;
+  const ws = new WebSocket(wsUrl);
   ws.onmessage = (event) => {
     const msg = JSON.parse(String(event.data));
     if (msg.type === "change" || msg.type === "job") onChange();

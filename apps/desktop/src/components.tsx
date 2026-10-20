@@ -1,5 +1,5 @@
 import type { Asset, Caption, Clip, Project, Track } from "./api";
-import { withToken } from "./api";
+import { apiUrl, withToken } from "./api";
 
 export function fmt(t: number): string {
   return `${t.toFixed(2)}s`;
@@ -50,7 +50,7 @@ function ImportForm({ projectId, onImported }: { projectId: string; onImported: 
           path: String(data.get("path") || "/media/medium.mp4"),
           duration: Number(data.get("duration") || 10),
         };
-        const res = await fetch(`/api/v1/projects/${projectId}/assets`, {
+        const res = await fetch(apiUrl(`/projects/${projectId}/assets`), {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: "Bearer dev" },
           body: JSON.stringify(body),
