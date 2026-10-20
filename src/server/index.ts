@@ -128,7 +128,7 @@ export function startServer(opts: StartOptions = {}) {
   hub = attachWs(server, registry);
 
   void (async () => {
-    if (opts.sample !== false) {
+    if (opts.sample !== false && registry.list().length === 0) {
       try {
         await seedDemoProject(registry, dataDir);
       } catch (err) {

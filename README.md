@@ -97,7 +97,25 @@ WebSocket `ws://127.0.0.1:47000/ws` vysílá události `change` a `job`.
 
 ## Desktop build (Tauri)
 
-UI běží samostatně přes Vite; finální Windows instalátor (`.exe`/MSI) se skládá přes Tauri 2 (`apps/desktop/src-tauri/`) a vyžaduje Rust toolchain — viz PLAN.md §6.
+UI běží samostatně přes Vite; **Windows instalátor (`Vedit_installer.exe`)** se skládá automaticky v CI přes Tauri 2 (`apps/desktop/src-tauri/`) — viz workflow `.github/workflows/release.yml` a sekce „Windows instalátor". Finální build lokálně vyžaduje Rust toolchain.
+
+## Windows instalátor (Vedit_installer.exe)
+
+Vedit je **desktopová aplikace pro Windows** — instalátor se skládá automaticky v CI (GitHub Actions, `windows-latest`):
+
+1. **Stáhni** `Vedit_installer.exe` z [Releases](https://github.com/lilrepaer-glitch/Vedit/releases) (vydává workflow `.github/workflows/release.yml`)
+2. **Spusť instalátor** (instalace pro aktuálního uživatele, bez admin práv) → Vedit najdeš v Start menu
+3. Po prvním spuštění se vytvoří demo projekt s ukázkovými klipy
+
+Instalátor obsahuje:
+- Tauri shell + React UI (timeline, preview, AI panely)
+- **REST+WS API server** jako sidecar (spouští se automaticky na `127.0.0.1:47000`, token `dev`)
+- **FFmpeg/ffprobe** binárky (dekódování, render export)
+- Node.js runtime — není potřeba nic doinstalovávat
+
+**Volitelné:** TTS/ASR (espeak-ng + pocketsphinx přes Python) se doinstalují zvlášť podle sekce AI titulky — bez nich jsou funkce neviditelné/deaktivované (aplikace hlásí `nedostupný`).
+
+Sestavení lokálně (vyžaduje Rust): `npm ci && npx tauri build` (z adresáře `apps/desktop`) → `src-tauri/target/release/bundle/nsis/Vedit_*_x64-setup.exe`.
 
 ## License
 
