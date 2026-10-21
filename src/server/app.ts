@@ -35,6 +35,7 @@ import {
 import { exportEdl, exportFcpXml } from "../pro/interchange.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { analyzeFrameScopes } from "../pro/scopes.js";
+import { VEDIT_VERSION, checkForUpdates, downloadAndInstallUpdate } from "../pro/updater.js";
 import { runStudioCopilot } from "../ai/orchestrator.js";
 import { sequenceDuration } from "../core/types.js";
 import {
@@ -570,7 +571,28 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.5.2", scope: "F0–F9 Broadcast Studio" });
+    res.json({ ok: true, name: "vedit", version: VEDIT_VERSION, scope: "F0–F9 Broadcast Studio" });
+  });
+
+  // Self-Updater API (GitHub Releases check + one-click NSIS `/P /UPDATE /R` download & launch)
+  app.get("/api/v1/updater/check", async (_req, res) => {
+    try {
+      res.json(await checkForUpdates(VEDIT_VERSION));
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  });
+
+  app.post("/api/v1/updater/install", async (req, res) => {
+    try {
+      const result = await downloadAndInstallUpdate({
+        downloadUrl: req.body?.downloadUrl ? String(req.body.downloadUrl) : undefined,
+        autoLaunch: req.body?.autoLaunch !== false,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
   });
 
   app.get("/api/v1/projects", (_req, res) => {

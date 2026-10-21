@@ -42,6 +42,12 @@ export function App() {
   const [bootStatus, setBootStatus] = useState<string>("Starting local Vedit Studio engine…");
   const [bootNonce, setBootNonce] = useState<number>(0);
   const [windowDragOver, setWindowDragOver] = useState<boolean>(false);
+  const [updateInfo, setUpdateInfo] = useState<{
+    currentVersion: string;
+    latestVersion: string;
+    updateAvailable: boolean;
+    downloadUrl: string | null;
+  } | null>(null);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -84,6 +90,7 @@ export function App() {
             .catch(() => {});
           void api.exportPresets().then((r) => !cancelled && setExportPresets(r.presets)).catch(() => {});
           void api.marketplaceList().then((r) => !cancelled && setPacks(r.packs)).catch(() => {});
+          void api.checkUpdate().then((u) => !cancelled && setUpdateInfo(u)).catch(() => {});
           return;
         } catch (err) {
           if (attempt >= 3) {
@@ -326,6 +333,52 @@ export function App() {
         <div className="brand">
           <span className="logo">Vedit</span>
           <span className="muted">{project.name}</span>
+          <button
+            type="button"
+            disabled={busy}
+            title={
+              updateInfo?.updateAvailable
+                ? `Download & install Vedit v${updateInfo.latestVersion} automatically in place`
+                : "Check GitHub Releases for a newer Vedit version (or repair/re-update current installation)"
+            }
+            style={
+              updateInfo?.updateAvailable
+                ? { background: "#15803d", color: "#fff", fontWeight: 700, fontSize: 11, padding: "2px 8px" }
+                : { fontSize: 11, padding: "2px 8px" }
+            }
+            onClick={() =>
+              act(async () => {
+                const latest = await api.checkUpdate();
+                setUpdateInfo(latest);
+                if (latest.updateAvailable) {
+                  flash(`Downloading Vedit v${latest.latestVersion} installer…`);
+                  const res = await api.installUpdate(latest.downloadUrl ?? undefined);
+                  flash(
+                    res.launched
+                      ? `Launching Vedit v${res.latestVersion} in-place updater — Vedit will restart automatically…`
+                      : `Installer downloaded → ${res.installerPath}`,
+                  );
+                } else if (
+                  latest.downloadUrl &&
+                  window.confirm(
+                    `Vedit v${latest.currentVersion} is already up to date (latest: v${latest.latestVersion}).\n\nDownload and run in-place repair/re-update anyway?`,
+                  )
+                ) {
+                  flash(`Downloading Vedit v${latest.latestVersion} repair installer…`);
+                  const res = await api.installUpdate(latest.downloadUrl);
+                  flash(
+                    res.launched
+                      ? `Launching Vedit v${res.latestVersion} updater — Vedit will restart automatically…`
+                      : `Installer downloaded → ${res.installerPath}`,
+                  );
+                } else {
+                  flash(`Vedit v${latest.currentVersion} is up to date ✓`);
+                }
+              })
+            }
+          >
+            {updateInfo?.updateAvailable ? `⬆ Update v${updateInfo.latestVersion}` : "🔄 Update"}
+          </button>
         </div>
         <div className="toolbar-group">
           <button

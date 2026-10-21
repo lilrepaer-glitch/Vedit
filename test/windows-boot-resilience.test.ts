@@ -5,14 +5,29 @@ import { join, resolve } from "node:path";
 import request from "supertest";
 import { startServer } from "../src/server/index.js";
 import { ffmpegPath, run } from "../src/core/media.js";
+import { compareSemver } from "../src/pro/updater.js";
 
-describe("Windows Desktop Instant-Boot & Drag-and-Drop Resilience (v0.5.2)", () => {
-  it("disables Tauri native OLE drop override (`dragDropEnabled: false`) so HTML5 file & DOM drag-drop work on Windows WebView2", async () => {
+describe("Windows Desktop Instant-Boot, Drag-and-Drop & NSIS Self-Updater Resilience (v0.5.3)", () => {
+  it("configures custom NSIS in-place Update template (`installer.nsi`), `dragDropEnabled: false`, and accurate semver comparison", async () => {
     const tauriConfPath = resolve(process.cwd(), "apps/desktop/src-tauri/tauri.conf.json");
     const conf = JSON.parse(await readFile(tauriConfPath, "utf8")) as {
       app: { windows: Array<{ dragDropEnabled?: boolean }> };
+      bundle: { windows: { allowDowngrades?: boolean; nsis: { template?: string } } };
     };
     expect(conf.app.windows[0]?.dragDropEnabled).toBe(false);
+    expect(conf.bundle.windows.allowDowngrades).toBe(true);
+    expect(conf.bundle.windows.nsis.template).toBe("installer.nsi");
+
+    const nsi = await readFile(resolve(process.cwd(), "apps/desktop/src-tauri/installer.nsi"), "utf8");
+    expect(nsi).toContain("Update ${PRODUCTNAME} in place (Recommended - fast update, keeps all projects & settings)");
+    expect(nsi).toContain("Clean reinstall v${VERSION}");
+    expect(nsi).toContain("SkipIfUpdateOrPassive");
+    expect(nsi).not.toContain("nsExec::");
+
+    expect(compareSemver("0.5.3", "0.5.2")).toBe(1);
+    expect(compareSemver("0.5.3", "0.5.3")).toBe(0);
+    expect(compareSemver("0.5.1", "0.5.3")).toBe(-1);
+    expect(compareSemver("0.1.0", "0.1.0-beta.2")).toBe(1);
   });
 
   it("opens port immediately (<500ms), answers CORS/PNA preflight, and streams dropped media files straight onto a target track & timestamp", async () => {
