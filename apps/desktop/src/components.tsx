@@ -311,6 +311,25 @@ export function Preview({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [showScopes, setShowScopes] = useState(false);
+  const [scopesData, setScopesData] = useState<Awaited<ReturnType<typeof api.getScopes>> | null>(null);
+
+  useEffect(() => {
+    if (!showScopes || playing) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      api
+        .getScopes(playhead)
+        .then((res) => {
+          if (!cancelled) setScopesData(res);
+        })
+        .catch(() => {});
+    }, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [showScopes, playhead, playing, project.id, clip?.id]);
 
   const activeAsset = clip ? project.assets.find((a) => a.id === clip.assetId) ?? null : null;
   const streamSrc =
@@ -506,6 +525,14 @@ export function Preview({
           </button>
           <button
             type="button"
+            title="Toggle Broadcast RGB Histogram & IRE Waveform Scopes"
+            onClick={() => setShowScopes((s) => !s)}
+            style={{ fontWeight: showScopes ? 700 : 400 }}
+          >
+            📊 Scopes
+          </button>
+          <button
+            type="button"
             title="Toggle Fullscreen Monitor"
             onClick={() => {
               if (document.fullscreenElement) {
@@ -523,6 +550,71 @@ export function Preview({
           {playing && shuttleRate !== 1 ? ` (${shuttleRate}×)` : ""}
         </span>
       </div>
+      {showScopes && scopesData && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: 8,
+            borderRadius: 6,
+            background: "#0b0f17",
+            border: "1px solid #1f2a3c",
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 10,
+            fontSize: 11,
+          }}
+        >
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <strong>RGB &amp; Rec.709 Luma Histogram</strong>
+              <span className="muted">
+                R:{scopesData.metrics.rAvg} G:{scopesData.metrics.gAvg} B:{scopesData.metrics.bAvg}
+              </span>
+            </div>
+            <svg viewBox="0 0 256 72" style={{ width: "100%", height: 68, background: "#06080d", borderRadius: 4 }}>
+              {(
+                [
+                  [scopesData.redHistogram, "#ff5252"],
+                  [scopesData.greenHistogram, "#69f0ae"],
+                  [scopesData.blueHistogram, "#40c4ff"],
+                  [scopesData.lumaHistogram, "#ffffff"],
+                ] as const
+              ).map(([arr, stroke]) => {
+                const pts = arr
+                  .map((v, idx) => `${((idx / Math.max(1, arr.length - 1)) * 256).toFixed(1)},${(70 - v * 66).toFixed(1)}`)
+                  .join(" ");
+                return <polyline key={stroke} fill="none" stroke={stroke} strokeWidth="1.4" opacity="0.85" points={pts} />;
+              })}
+            </svg>
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <strong>Broadcast Waveform (0–100 IRE)</strong>
+              <span style={{ color: scopesData.status === "broadcast-legal" ? "#69f0ae" : "#ffb74d" }}>
+                {scopesData.status} • Avg {scopesData.metrics.avgLumaIre} IRE
+              </span>
+            </div>
+            <svg viewBox="0 0 240 72" style={{ width: "100%", height: 68, background: "#06080d", borderRadius: 4 }}>
+              <line x1="0" y1="6" x2="240" y2="6" stroke="#263238" strokeDasharray="3,3" />
+              <line x1="0" y1="36" x2="240" y2="36" stroke="#263238" strokeDasharray="3,3" />
+              <line x1="0" y1="66" x2="240" y2="66" stroke="#263238" strokeDasharray="3,3" />
+              {scopesData.waveform.map((col, idx) => {
+                const x = (idx / Math.max(1, scopesData.waveform.length)) * 240 + 2;
+                const yMax = 68 - (col.max / 100) * 64;
+                const yMin = 68 - (col.min / 100) * 64;
+                const y75 = 68 - (col.p75 / 100) * 64;
+                const y25 = 68 - (col.p25 / 100) * 64;
+                return (
+                  <g key={idx}>
+                    <line x1={x} y1={yMax} x2={x} y2={yMin} stroke="#26a69a" strokeWidth="2" opacity="0.45" />
+                    <line x1={x} y1={y75} x2={x} y2={y25} stroke="#80cbc4" strokeWidth="2.5" opacity="0.95" />
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1387,14 +1479,18 @@ export function Inspector({
   asset,
   onPatch,
   onProAction,
+  playhead,
   captions,
 }: {
   clip: Clip | null;
   asset: Asset | null;
+  playhead: number;
   onPatch: (patch: Record<string, unknown>) => void;
   onProAction: (
     action:
       | "speed"
+      | "reverse"
+      | "freeze"
       | "color-grade"
       | "chroma-key"
       | "fade"
@@ -1408,6 +1504,8 @@ export function Inspector({
   ) => void;
   captions: Caption[];
 }) {
+  const [kfProp, setKfProp] = useState<"opacity" | "x" | "y">("opacity");
+  const [kfEasing, setKfEasing] = useState<"linear" | "ease-in" | "ease-out" | "ease-in-out" | "hold">("ease-in-out");
   if (!clip) {
     return (
       <section className="panel">
@@ -1448,7 +1546,7 @@ export function Inspector({
         {field("opacity", "transform.opacity", clip.transform.opacity)}
       </div>
 
-      <h3>Speed Control ({currentSpeed}×)</h3>
+      <h3>Speed &amp; Time Remap ({currentSpeed}×)</h3>
       <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
         {[0.5, 1, 1.5, 2, 4].map((s) => (
           <button
@@ -1460,6 +1558,12 @@ export function Inspector({
             {s}×
           </button>
         ))}
+        <button type="button" title="Reverse clip video & audio playback" onClick={() => onProAction("reverse")}>
+          ⏪ Reverse
+        </button>
+        <button type="button" title="Insert 1.5s ripple freeze-frame hold at playhead" onClick={() => onProAction("freeze")}>
+          ❄ Freeze 1.5s
+        </button>
       </div>
 
       <h3>Color Grading, Chroma Key &amp; Transitions</h3>
@@ -1592,12 +1696,114 @@ export function Inspector({
           </div>
         </>
       )}
-      <h3>Keyframes ({clip.keyframes.length})</h3>
+      <h3>Keyframe Curve Editor ({clip.keyframes.length})</h3>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
+        <select value={kfProp} onChange={(e) => setKfProp(e.target.value as "opacity" | "x" | "y")}>
+          <option value="opacity">Opacity (0..1)</option>
+          <option value="x">Position X (px)</option>
+          <option value="y">Position Y (px)</option>
+        </select>
+        <select
+          value={kfEasing}
+          onChange={(e) => setKfEasing(e.target.value as "linear" | "ease-in" | "ease-out" | "ease-in-out" | "hold")}
+        >
+          <option value="ease-in-out">Ease In-Out (Smooth)</option>
+          <option value="ease-out">Ease Out</option>
+          <option value="ease-in">Ease In</option>
+          <option value="linear">Linear</option>
+          <option value="hold">Hold Step</option>
+        </select>
+        <button
+          type="button"
+          onClick={() => {
+            const relT = Number(Math.max(0, Math.min(clip.duration, playhead - clip.start)).toFixed(2));
+            const curVal =
+              kfProp === "opacity" ? clip.transform.opacity : kfProp === "x" ? clip.transform.x : clip.transform.y;
+            const next = [
+              ...clip.keyframes.filter((k) => !(k.property === kfProp && Math.abs(k.time - relT) < 0.02)),
+              { time: relT, property: kfProp, value: curVal, easing: kfEasing },
+            ].sort((a, b) => a.time - b.time);
+            onPatch({ keyframes: next });
+          }}
+        >
+          ◆ + Key @ Playhead
+        </button>
+      </div>
+      {clip.keyframes.filter((k) => k.property === kfProp).length >= 2 && (
+        <svg
+          viewBox="0 0 220 54"
+          style={{ width: "100%", height: 52, background: "#080b12", borderRadius: 4, marginBottom: 6 }}
+        >
+          {(() => {
+            const pks = clip.keyframes
+              .filter((k) => k.property === kfProp && typeof k.value === "number")
+              .sort((a, b) => a.time - b.time);
+            const vals = pks.map((k) => Number(k.value));
+            const minV = Math.min(...vals);
+            const maxV = Math.max(...vals);
+            const span = Math.max(0.001, maxV - minV);
+            const dur = Math.max(0.1, clip.duration);
+            const sample = (t: number) => {
+              if (t <= pks[0]!.time) return Number(pks[0]!.value);
+              const last = pks[pks.length - 1]!;
+              if (t >= last.time) return Number(last.value);
+              for (let i = 0; i < pks.length - 1; i++) {
+                const a = pks[i]!;
+                const b = pks[i + 1]!;
+                if (t >= a.time && t <= b.time) {
+                  const u = (t - a.time) / Math.max(1e-4, b.time - a.time);
+                  const av = Number(a.value);
+                  const bv = Number(b.value);
+                  if (a.easing === "hold") return av;
+                  if (a.easing === "ease-in") return av + (bv - av) * u * u;
+                  if (a.easing === "ease-out") return av + (bv - av) * (1 - (1 - u) * (1 - u));
+                  if (a.easing === "ease-in-out") return av + (bv - av) * u * u * (3 - 2 * u);
+                  return av + (bv - av) * u;
+                }
+              }
+              return Number(last.value);
+            };
+            const pts = Array.from({ length: 45 }, (_, idx) => {
+              const t = (idx / 44) * dur;
+              const x = (idx / 44) * 212 + 4;
+              const y = 48 - ((sample(t) - minV) / span) * 40;
+              return `${x.toFixed(1)},${y.toFixed(1)}`;
+            }).join(" ");
+            return <polyline fill="none" stroke="#4fc3f7" strokeWidth="2" points={pts} />;
+          })()}
+        </svg>
+      )}
       <ul className="kf-list">
         {clip.keyframes.map((k, i) => (
-          <li key={i}>
-            {fmt(k.time)} • {k.property} = {String(k.value)}
-            {k.easing ? ` (${k.easing})` : ""}
+          <li key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
+            <span>
+              {fmt(k.time)} • {k.property} = {String(k.value)}
+            </span>
+            <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <select
+                value={k.easing ?? "linear"}
+                style={{ fontSize: 10, padding: "1px 3px" }}
+                onChange={(e) => {
+                  const next = clip.keyframes.map((item, idx) =>
+                    idx === i ? { ...item, easing: e.target.value } : item,
+                  );
+                  onPatch({ keyframes: next });
+                }}
+              >
+                <option value="linear">linear</option>
+                <option value="ease-in">ease-in</option>
+                <option value="ease-out">ease-out</option>
+                <option value="ease-in-out">ease-in-out</option>
+                <option value="hold">hold</option>
+              </select>
+              <button
+                type="button"
+                style={{ padding: "0 4px", fontSize: 10 }}
+                onClick={() => onPatch({ keyframes: clip.keyframes.filter((_, idx) => idx !== i) })}
+              >
+                ✕
+              </button>
+            </span>
           </li>
         ))}
       </ul>

@@ -477,12 +477,13 @@ export class VeditEngine {
     });
   }
 
-  updateClip(clipId: ID, patch: Partial<Pick<Clip, "name" | "start" | "duration" | "in" | "out">> & {
+  updateClip(clipId: ID, patch: Partial<Pick<Clip, "assetId" | "name" | "start" | "duration" | "in" | "out" | "keyframes">> & {
     transform?: Partial<Clip["transform"]>;
   }, trackId?: ID): Clip {
     const { track, clip } = trackId ? this.findClip(trackId, clipId) : this.findClipAnywhere(clipId);
     if (track.locked) throw new Error(`track is locked: ${track.name}`);
     this.commit(`clip.update "${clip.name}"`, () => {
+      if (patch.assetId != null) clip.assetId = patch.assetId;
       if (patch.name != null) clip.name = patch.name;
       if (patch.start != null) clip.start = Math.max(0, patch.start);
       if (patch.duration != null) {
@@ -493,6 +494,9 @@ export class VeditEngine {
       if (patch.in != null) clip.in = Math.max(0, patch.in);
       if (patch.out != null) clip.out = patch.out;
       if (patch.transform) Object.assign(clip.transform, patch.transform);
+      if (Array.isArray(patch.keyframes)) {
+        clip.keyframes = patch.keyframes.map((k) => ({ ...k })).sort((a, b) => a.time - b.time);
+      }
     });
     return clip;
   }

@@ -283,3 +283,125 @@ export function applyLayoutPreset(engine: VeditEngine, clipId: ID, layout: Layou
     },
   });
 }
+
+/**
+ * F9: Reverses video (and audio when present) on a clip via FFmpeg `reverse` + `areverse`,
+ * registers the reversed asset with `#reversed`, and links it to the clip.
+ */
+export async function reverseClip(
+  engine: VeditEngine,
+  clipId: ID,
+  opts: { outDir?: string } = {},
+): Promise<{ clip: Clip; reversedAsset: Asset; outPath: string }> {
+  const { clip } = engine.findClipAnywhere(clipId);
+  const srcAsset = engine.findAsset(clip.assetId);
+  const dir = resolvePath(opts.outDir ?? join(process.cwd(), ".vedit-data", "reversed"));
+  await mkdir(dir, { recursive: true });
+
+  const base = basename(srcAsset.path, extname(srcAsset.path));
+  const outPath = join(dir, `${base}-rev-${clip.id.slice(0, 6)}.mp4`);
+
+  const args = ["-hide_banner", "-loglevel", "error", "-y", "-i", srcAsset.path, "-vf", "reverse"];
+  if (srcAsset.hasAudio || srcAsset.kind === "audio") {
+    args.push("-af", "areverse", "-c:a", "aac", "-b:a", "160k");
+  } else {
+    args.push("-an");
+  }
+  args.push("-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", outPath);
+
+  const res = await run(ffmpegPath(), args);
+  if (res.code !== 0) {
+    throw new Error(`Reverse clip failed: ${res.stderr}`);
+  }
+
+  const info = await probeMedia(outPath);
+  const reversedAsset = engine.addAsset({
+    name: `${srcAsset.name} (Reversed)`,
+    kind: srcAsset.kind,
+    path: outPath,
+    duration: info.duration ?? srcAsset.duration,
+    width: info.width ?? srcAsset.width,
+    height: info.height ?? srcAsset.height,
+    fps: info.fps ?? srcAsset.fps,
+    hasAudio: info.hasAudio,
+    tags: Array.from(new Set([...(srcAsset.tags ?? []), "reversed"])),
+  });
+
+  const updated = engine.updateClip(clipId, { assetId: reversedAsset.id });
+  return { clip: updated, reversedAsset, outPath };
+}
+
+/**
+ * F9: Captures a sharp full-resolution PNG still frame from `clipId` at timeline time `at`,
+ * splits the clip if needed, ripples later clips forward, and inserts a `holdDuration` freeze-frame clip.
+ */
+export async function freezeFrameClip(
+  engine: VeditEngine,
+  clipId: ID,
+  opts: { at?: number; holdDuration?: number; outDir?: string } = {},
+): Promise<{ freezeClip: Clip; stillAsset: Asset; outPath: string }> {
+  const { track, clip } = engine.findClipAnywhere(clipId);
+  const srcAsset = engine.findAsset(clip.assetId);
+  const holdDuration = Math.max(0.2, Math.min(30, Number(opts.holdDuration ?? 1.5)));
+  const relOffset = opts.at != null
+    ? Math.max(0, Math.min(clip.duration, opts.at - clip.start))
+    : clip.duration / 2;
+  const sourceTime = Math.max(0, clip.in + relOffset);
+
+  const dir = resolvePath(opts.outDir ?? join(process.cwd(), ".vedit-data", "freezes"));
+  await mkdir(dir, { recursive: true });
+  const outPath = join(dir, `freeze-${clip.id.slice(0, 6)}-${Math.round(sourceTime * 1000)}ms.png`);
+
+  const res = await run(ffmpegPath(), [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-ss",
+    sourceTime.toFixed(3),
+    "-i",
+    srcAsset.path,
+    "-frames:v",
+    "1",
+    outPath,
+  ]);
+  if (res.code !== 0) {
+    throw new Error(`Freeze frame extraction failed: ${res.stderr}`);
+  }
+
+  const stillAsset = engine.addAsset({
+    name: `Freeze @ ${sourceTime.toFixed(2)}s (${srcAsset.name})`,
+    kind: "image",
+    path: outPath,
+    width: srcAsset.width,
+    height: srcAsset.height,
+    tags: ["freeze-frame"],
+  });
+
+  const insertAt = Number((clip.start + relOffset).toFixed(4));
+  // Split target clip cleanly if freeze occurs strictly inside clip body
+  if (relOffset > 0.05 && relOffset < clip.duration - 0.05) {
+    engine.splitClip(clip.id, insertAt, track.id);
+  }
+
+  // Shift all clips on `track` starting at or after `insertAt - 1e-4` forward by `holdDuration`
+  const currentTrack = engine.findTrack(track.id);
+  const downstream = [...currentTrack.clips]
+    .filter((c) => c.start >= insertAt - 1e-3)
+    .sort((a, b) => b.start - a.start);
+  for (const c of downstream) {
+    engine.moveClip(c.id, Number((c.start + holdDuration).toFixed(4)), track.id, track.id);
+  }
+
+  const freezeClip = engine.addClip({
+    trackId: track.id,
+    assetId: stillAsset.id,
+    start: insertAt,
+    duration: holdDuration,
+    in: 0,
+    out: holdDuration,
+    name: `❄ Freeze (${holdDuration.toFixed(1)}s)`,
+  });
+
+  return { freezeClip, stillAsset, outPath };
+}

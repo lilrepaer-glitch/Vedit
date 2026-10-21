@@ -7,9 +7,11 @@ import { saveSnapshot, recordAudit } from "../ext/collab.js";
 import { applyTemplate } from "../ext/marketplace.js";
 import { applyChromaKey, applyColorGrade, applyFadeTransition, setClipSpeed } from "../pro/fx.js";
 import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
-import { applyCubeLut, applyLayoutPreset, stabilizeClip } from "../pro/cinema.js";
+import { applyCubeLut, applyLayoutPreset, freezeFrameClip, reverseClip, stabilizeClip } from "../pro/cinema.js";
 import { addGraphicOverlay } from "../pro/graphics.js";
 import { generateProjectThumbnail } from "../pro/capture.js";
+import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
+import { analyzeFrameScopes } from "../pro/scopes.js";
 
 export interface CopilotStepResult {
   step: string;
@@ -135,6 +137,31 @@ export async function runStudioCopilot(
   if (clipForLook && /\bfade\b|\bdissolve\b/.test(lower)) {
     applyFadeTransition(engine, clipForLook.id, { fadeIn: 0.4, fadeOut: 0.4 });
     steps.push({ step: "transition.fade", detail: "Added 0.4s smooth fade in/out transition" });
+  }
+
+  // 7c. Reverse playback & Freeze-frame hold (F9)
+  if (clipForLook && /\breverse\b|\bbackwards?\b/.test(lower)) {
+    const rev = await reverseClip(engine, clipForLook.id, {
+      outDir: opts.dataDir ? `${opts.dataDir}/reversed` : undefined,
+    });
+    steps.push({ step: "cinema.reverse", detail: `Reversed clip → ${rev.reversedAsset.name}` });
+  }
+  if (clipForLook && /\bfreeze\b|\bhold frame\b/.test(lower)) {
+    const frz = await freezeFrameClip(engine, clipForLook.id, {
+      holdDuration: 1.5,
+      outDir: opts.dataDir ? `${opts.dataDir}/freezes` : undefined,
+    });
+    steps.push({ step: "cinema.freeze_frame", detail: `Inserted 1.5s freeze-frame hold (${frz.stillAsset.name})` });
+  }
+
+  // 7d. Multicam sync & angle switching (F9)
+  if (/\bmulticam\b|\bsync\s+cam|\bcamera\s+angles?\b/.test(lower)) {
+    if (engine.project.assets.filter((a) => a.kind === "video" || a.kind === "audio").length >= 2) {
+      const synced = await syncMulticamClips(engine);
+      steps.push({ step: "multicam.sync", detail: `Synced ${synced.angles.length} camera angles acoustically` });
+    }
+    const switched = applyMulticamCuts(engine, { autoIntervalSec: 2.0 });
+    steps.push({ step: "multicam.cuts", detail: `Switched ${switched.segmentCount} program camera segments` });
   }
 
   // 8. Picture-in-Picture / Split layout
