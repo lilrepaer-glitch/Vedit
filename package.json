@@ -18,7 +18,8 @@
     "test:watch": "vitest",
     "dev:api": "tsx src/cli/index.ts serve",
     "dev:mcp": "tsx src/cli/index.ts mcp",
-    "dev:ui": "npm run dev -w @vedit/desktop"
+    "dev:ui": "npm run dev -w @vedit/desktop",
+    "dist:desktop": "node scripts/build-desktop.mjs"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",

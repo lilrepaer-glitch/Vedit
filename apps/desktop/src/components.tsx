@@ -6,6 +6,7 @@ import type {
   Clip,
   GenProviderInfo,
   GenerateMediaRequest,
+  MarketplacePackInfo,
   Project,
   Track,
 } from "./api";
@@ -295,6 +296,153 @@ export function GenPanel({
           ✨ Generate {kind.toUpperCase()}
         </button>
       </form>
+    </section>
+  );
+}
+
+// ---------- Marketplace, Collaboration Checkpoints & Review Notes (F5) ----------
+
+export function StudioPanel({
+  packs,
+  project,
+  playhead,
+  busy,
+  onApplyTemplate,
+  onRunPlugin,
+  onSaveSnapshot,
+  onRestoreSnapshot,
+  onAddComment,
+  onResolveComment,
+  onSeek,
+}: {
+  packs: MarketplacePackInfo[];
+  project: Project;
+  playhead: number;
+  busy: boolean;
+  onApplyTemplate: (templateId: string, title?: string) => void;
+  onRunPlugin: (pluginId: string) => void;
+  onSaveSnapshot: (label: string) => void;
+  onRestoreSnapshot: (snapshotId: string) => void;
+  onAddComment: (text: string, timecode: number) => void;
+  onResolveComment: (commentId: string, resolved: boolean) => void;
+  onSeek: (t: number) => void;
+}) {
+  const templates = packs.filter((p) => p.kind === "template");
+  const plugins = packs.filter((p) => p.kind === "plugin");
+  const [tplId, setTplId] = useState(templates[0]?.id ?? "tpl-youtube-intro");
+  const [tplTitle, setTplTitle] = useState("");
+  const [pluginId, setPluginId] = useState(plugins[0]?.id ?? "plg-auto-chapters");
+  const [snapLabel, setSnapLabel] = useState("");
+  const [noteText, setNoteText] = useState("");
+
+  useEffect(() => {
+    if (templates[0] && !templates.some((t) => t.id === tplId)) setTplId(templates[0].id);
+  }, [templates, tplId]);
+
+  useEffect(() => {
+    if (plugins[0] && !plugins.some((p) => p.id === pluginId)) setPluginId(plugins[0].id);
+  }, [plugins, pluginId]);
+
+  return (
+    <section className="panel">
+      <h2>Marketplace &amp; Team Studio</h2>
+      <div className="import-form">
+        <h3>Templates &amp; Plugins</h3>
+        <select value={tplId} onChange={(e) => setTplId(e.target.value)}>
+          {templates.map((t) => (
+            <option key={t.id} value={t.id}>
+              🎞 {t.name}
+            </option>
+          ))}
+        </select>
+        <div className="row">
+          <input
+            value={tplTitle}
+            onChange={(e) => setTplTitle(e.target.value)}
+            placeholder="Custom title override (optional)…"
+          />
+          <button disabled={busy} onClick={() => onApplyTemplate(tplId, tplTitle || undefined)}>
+            Apply
+          </button>
+        </div>
+        <div className="row">
+          <select value={pluginId} onChange={(e) => setPluginId(e.target.value)}>
+            {plugins.map((p) => (
+              <option key={p.id} value={p.id}>
+                🧩 {p.name}
+              </option>
+            ))}
+          </select>
+          <button disabled={busy} onClick={() => onRunPlugin(pluginId)}>
+            Run Plugin
+          </button>
+        </div>
+
+        <h3>Version Checkpoints ({project.snapshots?.length ?? 0})</h3>
+        <div className="row">
+          <input
+            value={snapLabel}
+            onChange={(e) => setSnapLabel(e.target.value)}
+            placeholder="Checkpoint label (e.g. Rough Cut v1)…"
+          />
+          <button
+            disabled={busy}
+            onClick={() => {
+              onSaveSnapshot(snapLabel || `Cut @ ${fmt(playhead)}`);
+              setSnapLabel("");
+            }}
+          >
+            💾 Save
+          </button>
+        </div>
+        {(project.snapshots ?? []).slice(-3).reverse().map((s) => (
+          <div key={s.id} className="row" style={{ fontSize: 12 }}>
+            <span className="muted" style={{ flex: 1 }}>
+              {s.label} ({s.clipCount} clips)
+            </span>
+            <button disabled={busy} onClick={() => onRestoreSnapshot(s.id)}>
+              Restore
+            </button>
+          </div>
+        ))}
+
+        <h3>Review Notes ({project.comments?.length ?? 0})</h3>
+        <div className="row">
+          <input
+            value={noteText}
+            onChange={(e) => setNoteText(e.target.value)}
+            placeholder={`Note @ ${fmt(playhead)}…`}
+          />
+          <button
+            disabled={busy || !noteText.trim()}
+            onClick={() => {
+              onAddComment(noteText.trim(), playhead);
+              setNoteText("");
+            }}
+          >
+            + Note
+          </button>
+        </div>
+        {(project.comments ?? []).slice(-4).map((c) => (
+          <div key={c.id} className="row" style={{ fontSize: 12 }}>
+            <span
+              style={{
+                flex: 1,
+                cursor: "pointer",
+                textDecoration: c.resolved ? "line-through" : "none",
+                opacity: c.resolved ? 0.6 : 1,
+              }}
+              onClick={() => onSeek(c.timecode)}
+              title="Click to jump playhead to note"
+            >
+              <strong>[{fmt(c.timecode)}]</strong> {c.text}
+            </span>
+            <button disabled={busy} onClick={() => onResolveComment(c.id, !c.resolved)}>
+              {c.resolved ? "Reopen" : "✓"}
+            </button>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

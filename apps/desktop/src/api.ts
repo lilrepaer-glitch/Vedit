@@ -51,6 +51,50 @@ export interface Caption {
   end: number;
 }
 
+export interface ReviewComment {
+  id: string;
+  author: string;
+  text: string;
+  timecode: number;
+  resolved: boolean;
+  createdAt: string;
+}
+
+export interface TimelineMarker {
+  id: string;
+  time: string | number;
+  label: string;
+  color?: string;
+}
+
+export interface SnapshotInfo {
+  id: string;
+  label: string;
+  author?: string;
+  createdAt: string;
+  sequenceDuration: number;
+  clipCount: number;
+}
+
+export interface MarketplacePackInfo {
+  id: string;
+  kind: "template" | "plugin";
+  name: string;
+  author: string;
+  version: string;
+  category: string;
+  description: string;
+  installed: boolean;
+}
+
+export interface ExportPresetInfo {
+  id: string;
+  label: string;
+  platform: string;
+  format: "mp4" | "mov" | "webm";
+  codec: "h264" | "h265" | "prores" | "vp9";
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -66,6 +110,9 @@ export interface Project {
   }>;
   activeSequenceId: string;
   jobs: Array<{ id: string; type: string; status: string; progress: number; error?: string; output?: Record<string, unknown> }>;
+  comments?: ReviewComment[];
+  markers?: TimelineMarker[];
+  snapshots?: SnapshotInfo[];
 }
 
 export interface GenProviderInfo {
@@ -173,7 +220,28 @@ export const api = {
       duration,
       real: true,
     }),
-  exportRender: () => req<{ jobId: string }>("POST", `/projects/${currentId}/export`, { format: "mp4" }),
+  exportRender: (preset?: string) =>
+    req<{ jobId: string }>("POST", `/projects/${currentId}/export`, preset ? { preset } : { format: "mp4" }),
+  exportPresets: () => req<{ presets: ExportPresetInfo[] }>("GET", "/export/presets"),
+  batchExport: (presets: string[]) =>
+    req<{ batchId: string; jobIds: string[] }>("POST", `/projects/${currentId}/export/batch`, { presets }),
+  marketplaceList: () => req<{ packs: MarketplacePackInfo[] }>("GET", `/marketplace?projectId=${currentId}`),
+  applyTemplate: (templateId: string, params: Record<string, string> = {}) =>
+    req<{ appliedName: string; captionsAdded: number }>(
+      "POST",
+      `/projects/${currentId}/marketplace/apply-template`,
+      { templateId, params },
+    ),
+  runPlugin: (pluginId: string, params: Record<string, string> = {}) =>
+    req<Record<string, unknown>>("POST", `/projects/${currentId}/marketplace/run-plugin`, { pluginId, params }),
+  saveSnapshot: (label: string) =>
+    req<{ snapshot: SnapshotInfo }>("POST", `/projects/${currentId}/snapshots`, { label, author: "Desktop Editor" }),
+  restoreSnapshot: (snapshotId: string) =>
+    req<{ restored: SnapshotInfo }>(`POST`, `/projects/${currentId}/snapshots/${snapshotId}/restore`),
+  addComment: (text: string, timecode: number) =>
+    req<{ comment: ReviewComment }>("POST", `/projects/${currentId}/comments`, { text, timecode }),
+  resolveComment: (commentId: string, resolved: boolean) =>
+    req<{ comment: ReviewComment }>(`PATCH`, `/projects/${currentId}/comments/${commentId}`, { resolved }),
   presets: () => req<{ presets: Array<{ id: string; label: string }> }>("GET", "/animation/presets"),
   aiCaps: () =>
     req<{ tts: { engine: string; available: boolean }; asr: { engine: string; available: boolean }; voices: string[] }>(
