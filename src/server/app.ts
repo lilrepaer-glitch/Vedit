@@ -11,7 +11,19 @@ import { speechCapabilities } from "../ai/speech.js";
 import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
 import { detectBeats, detectScenes, detectSilences, trackMotion, windowEnergy } from "../ai/analysis.js";
 import { autoReframe, beatSync, buildHighlight, removeSilences, trackMotionTo } from "../ai/edit.js";
-import { callProvider, providerAvailability, resolveProvider, type GenInput } from "../ai/gen.js";
+import {
+  CAMERA_MOVES,
+  buildDirectedPrompt,
+  callProvider,
+  genJobType,
+  insertGeneratedAsset,
+  isProviderConfigured,
+  prepareContinuityContext,
+  providerAvailability,
+  resolveProvider,
+  type GenInput,
+  type GenKind,
+} from "../ai/gen.js";
 import type { AssetKind, JobType, TrackKind } from "../core/types.js";
 
 export interface ServerOptions {
@@ -103,94 +115,184 @@ export function runStubGenJob(
   engine: VeditEngine,
   type: JobType,
   input: Record<string, unknown>,
-): { jobId: string; assetId?: string } {
-  const job = engine.createJob(type, { ...input, simulated: !input.provider || input.provider === "stub" });
+): { jobId: string; assetId?: string; clipId?: string; trackId?: string } {
+  const job = engine.createJob(type, { ...input, simulated: true });
   engine.updateJob(job.id, { status: "running", progress: 50 });
+  const prompt = String(input.prompt ?? "without prompt");
+  const provider = String(input.provider ?? "stub");
+  const model = String(input.model ?? "stub-v0");
+  const cameraMove = typeof input.cameraMove === "string" ? input.cameraMove : undefined;
+  const kind: GenKind =
+    type === "gen.image"
+      ? "image"
+      : type === "gen.music"
+        ? "music"
+        : type === "gen.sfx"
+          ? "sfx"
+          : type === "gen.voice"
+            ? "voice"
+            : "video";
+  const directedPrompt = buildDirectedPrompt({ prompt, kind, cameraMove });
+
   let assetId: string | undefined;
-  if (type === "gen.video" || type === "gen.image") {
-    const prompt = String(input.prompt ?? "without prompt");
-    const provider = String(input.provider ?? "stub");
-    const model = String(input.model ?? "stub-v0");
+  let clipId: string | undefined;
+  let trackId: string | undefined;
+
+  if (type === "gen.video" || type === "gen.image" || input.insertToTimeline) {
+    const ext = type === "gen.video" ? "mp4" : type === "gen.image" ? "png" : "wav";
+    const dur = Number(input.duration ?? (type === "gen.image" ? 4 : 5));
     const asset = engine.addAsset({
-      name: `generated-${prompt.slice(0, 24).replace(/\s+/g, "_")}.${type === "gen.video" ? "mp4" : "png"}`,
-      kind: "generated",
+      name: `generated-${prompt.slice(0, 24).replace(/\s+/g, "_")}.${ext}`,
+      kind: type === "gen.video" || type === "gen.image" ? "generated" : "audio",
       path: `/generated/${job.id}`,
-      duration: type === "gen.video" ? Number(input.duration ?? 5) : undefined,
-      width: Number(input.width ?? 1920),
-      height: Number(input.height ?? 1080),
+      duration: type === "gen.image" ? undefined : dur,
+      width: type === "gen.video" || type === "gen.image" ? Number(input.width ?? 1920) : undefined,
+      height: type === "gen.video" || type === "gen.image" ? Number(input.height ?? 1080) : undefined,
       fps: type === "gen.video" ? Number(input.fps ?? 30) : undefined,
       source: {
         provider,
         model,
         prompt,
-        simulated: !input.provider || provider === "stub",
+        directedPrompt,
+        cameraMove,
+        simulated: true,
       },
     });
     assetId = asset.id;
+
+    if (input.insertToTimeline) {
+      const targetKind: TrackKind = type === "gen.video" || type === "gen.image" ? "video" : "audio";
+      const seq = engine.activeSequence();
+      const track = seq.tracks.find((t) => t.kind === targetKind) ?? engine.addTrack(targetKind, targetKind === "video" ? "V1" : "A1");
+      const trackEnd = track.clips.reduce((m, c) => Math.max(m, c.start + c.duration), 0);
+      const start = input.start != null ? Number(input.start) : trackEnd;
+      const clip = engine.addClip({
+        trackId: track.id,
+        assetId: asset.id,
+        name: asset.name,
+        start,
+        duration: dur,
+        in: 0,
+        out: dur,
+      });
+      clipId = clip.id;
+      trackId = track.id;
+    }
+
     engine.updateJob(job.id, {
       status: "done",
       progress: 100,
-      output: { assetId: asset.id, note: "F4 Vedit Gen — stub placeholder (set FAL_KEY / GOOGLE_API_KEY etc. for real models)" },
+      output: {
+        assetId: asset.id,
+        clipId,
+        trackId,
+        note: "F0/F4 Vedit Gen — stub placeholder (set FAL_KEY / GOOGLE_API_KEY / VEDIT_WAN_URL for real models)",
+      },
     });
   } else {
     engine.updateJob(job.id, {
       status: "done",
       progress: 100,
-      output: { note: "F4 Vedit Gen — stub placeholder (set provider env keys for real models)" },
+      output: { note: "F0/F4 Vedit Gen — stub placeholder (set provider env keys for real models)" },
     });
   }
-  return { jobId: job.id, assetId };
+  return { jobId: job.id, assetId, clipId, trackId };
 }
 
-/** Async Vedit Gen job (F4) — queued → running → done with real provider or FFmpeg placeholder. */
+/** Async Vedit Gen job (F4) — queued → running → done with cloud/local provider or real FFmpeg synth + timeline insertion. */
 export function runGenJob(
   engine: VeditEngine,
-  kind: "video" | "image" | "music" | "sfx" | "voice",
+  kind: GenKind,
   rawInput: Record<string, unknown>,
-  opts: { dataDir: string; onUpdate?: () => void },
+  opts: {
+    dataDir: string;
+    onUpdate?: () => void;
+    fetchImpl?: typeof fetch;
+    pollIntervalMs?: number;
+  },
 ): { jobId: string } {
-  const input: import("../ai/gen.js").GenInput = {
+  const input: GenInput = {
     prompt: String(rawInput.prompt ?? ""),
     kind,
-    provider: rawInput.provider as any,
-    model: rawInput.model as string | undefined,
-    duration: rawInput.duration as number | undefined,
-    width: rawInput.width as number | undefined,
-    height: rawInput.height as number | undefined,
-    fps: rawInput.fps as number | undefined,
-    imageAssetId: rawInput.imageAssetId as string | undefined,
-    videoAssetId: rawInput.videoAssetId as string | undefined,
+    provider: rawInput.provider as GenInput["provider"],
+    model: rawInput.model != null ? String(rawInput.model) : undefined,
+    duration: rawInput.duration != null ? Number(rawInput.duration) : undefined,
+    width: rawInput.width != null ? Number(rawInput.width) : undefined,
+    height: rawInput.height != null ? Number(rawInput.height) : undefined,
+    fps: rawInput.fps != null ? Number(rawInput.fps) : undefined,
+    aspectRatio: rawInput.aspectRatio as GenInput["aspectRatio"],
+    negativePrompt: rawInput.negativePrompt != null ? String(rawInput.negativePrompt) : undefined,
+    style: rawInput.style != null ? String(rawInput.style) : undefined,
+    seed: rawInput.seed != null ? Number(rawInput.seed) : undefined,
+    cameraMove: rawInput.cameraMove != null ? String(rawInput.cameraMove) : undefined,
+    promptKeyframes: Array.isArray(rawInput.promptKeyframes) ? (rawInput.promptKeyframes as GenInput["promptKeyframes"]) : undefined,
+    imageAssetId: rawInput.imageAssetId != null ? String(rawInput.imageAssetId) : undefined,
+    videoAssetId: rawInput.videoAssetId != null ? String(rawInput.videoAssetId) : undefined,
+    continuityFromClipId: rawInput.continuityFromClipId != null ? String(rawInput.continuityFromClipId) : undefined,
+    continuityFromAssetId: rawInput.continuityFromAssetId != null ? String(rawInput.continuityFromAssetId) : undefined,
+    insertToTimeline: rawInput.insertToTimeline !== false,
+    start: rawInput.start != null ? Number(rawInput.start) : undefined,
+    trackId: rawInput.trackId != null ? String(rawInput.trackId) : undefined,
     params: rawInput.params as Record<string, unknown> | undefined,
   };
-  if (!input.prompt) throw new Error("prompt is required");
-  const provider = (globalThis as any).__veditResolveProvider ? (globalThis as any).__veditResolveProvider(input) : null;
-  // Lazy import to avoid circular deps — will be overridden in createApp below
-  const jobType: JobType = kind === "video" ? "gen.video" : kind === "image" ? "gen.image" : kind === "music" ? "gen.music" : kind === "sfx" ? "gen.sfx" : "gen.voice";
-  const job = engine.createJob(jobType, { ...rawInput, provider: input.provider ?? "stub", model: input.model ?? "stub-v0" });
+  if (!input.prompt.trim()) throw new Error("prompt is required");
+
+  const prov = resolveProvider(input);
+  const model = input.model ?? prov.defaultModel;
+  const simulated = prov.id === "stub" || !isProviderConfigured(prov);
+  const job = engine.createJob(genJobType(kind), {
+    ...rawInput,
+    provider: prov.id,
+    model,
+    simulated,
+  });
+
   void (async () => {
     try {
-      const { resolveProvider, callProvider } = await import("../ai/gen.js");
-      const prov = resolveProvider(input);
-      engine.updateJob(job.id, { status: "running", progress: 10 });
+      engine.updateJob(job.id, { status: "running", progress: 8 });
       opts.onUpdate?.();
-      const outPath = await callProvider(prov, { ...input, model: input.model ?? prov.defaultModel }, job.id, opts.dataDir);
-      engine.updateJob(job.id, { status: "running", progress: 80 });
+      const continuity = await prepareContinuityContext(engine, input, resolvePath(opts.dataDir, "gen", job.id));
+      const directedPrompt = buildDirectedPrompt(input, continuity);
+      const outPath = await callProvider(
+        prov,
+        { ...input, model },
+        job.id,
+        opts.dataDir,
+        {
+          continuity,
+          fetchImpl: opts.fetchImpl,
+          pollIntervalMs: opts.pollIntervalMs,
+          onProgress: (pct) => {
+            engine.updateJob(job.id, { progress: pct });
+            opts.onUpdate?.();
+          },
+        },
+      );
+      engine.updateJob(job.id, { status: "running", progress: 92 });
       opts.onUpdate?.();
-      let assetId: string | undefined;
-      if (kind === "video" || kind === "image") {
-        const asset = engine.addAsset({
-          name: `gen-${input.prompt.slice(0, 24).replace(/\s+/g, "_")}.${kind === "video" ? "mp4" : kind === "image" ? "png" : "mp4"}`,
-          kind: "generated",
+      const inserted = await insertGeneratedAsset(engine, input, {
+        path: outPath,
+        provider: prov.id,
+        model,
+        directedPrompt,
+        simulated,
+        continuity,
+      });
+      engine.updateJob(job.id, {
+        status: "done",
+        progress: 100,
+        output: {
+          assetId: inserted.asset.id,
+          clipId: inserted.clip?.id,
+          trackId: inserted.trackId,
           path: outPath,
-          duration: kind === "video" ? Number(input.duration ?? 5) : undefined,
-          width: Number(input.width ?? 1920),
-          height: Number(input.height ?? 1080),
-          fps: Number(input.fps ?? 24),
-          source: { provider: prov.id, model: input.model ?? prov.defaultModel, prompt: input.prompt },
-        });
-        assetId = asset.id;
-      }
-      engine.updateJob(job.id, { status: "done", progress: 100, output: { assetId, path: outPath, provider: prov.id, model: input.model ?? prov.defaultModel } });
+          outPath,
+          provider: prov.id,
+          model,
+          directedPrompt,
+          simulated,
+        },
+      });
       opts.onUpdate?.();
     } catch (err) {
       engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
@@ -676,42 +778,52 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
 
   // generation (F4 — Vedit Gen, see src/ai/gen.ts)
   app.get("/api/v1/gen/providers", (_req, res) => {
-    res.json({ providers: providerAvailability() });
+    res.json({ providers: providerAvailability(), cameraMoves: CAMERA_MOVES });
   });
 
-  app.post("/api/v1/projects/:id/gen/video", wrap((req, res, engine) => {
-    const body = req.body ?? {};
-    // Use async provider-aware job when a cloud provider is requested; otherwise keep sync stub for tests
-    if (body.provider && body.provider !== "stub") {
-      const result = runGenJob(engine, "video", body, { dataDir, onUpdate: () => opts.onJob?.(req.params.id!, engine) });
-      res.status(201).json(result);
-    } else {
-      const result = runStubGenJob(engine, "gen.video", body);
-      res.status(201).json(result);
-    }
-  }, registry));
+  const handleGen = (kind: GenKind) =>
+    wrap((req, res, engine) => {
+      const body = req.body ?? {};
+      const wantsReal = Boolean(body.real) || (body.provider && body.provider !== "stub");
+      if (wantsReal) {
+        try {
+          const result = runGenJob(engine, kind, body, {
+            dataDir,
+            onUpdate: () => opts.onJob?.(req.params.id!, engine),
+          });
+          res.status(201).json(result);
+        } catch (err) {
+          badRequest(res, (err as Error).message);
+        }
+      } else {
+        const result = runStubGenJob(engine, genJobType(kind), body);
+        res.status(201).json(result);
+      }
+    }, registry);
 
-  app.post("/api/v1/projects/:id/gen/image", wrap((req, res, engine) => {
-    const body = req.body ?? {};
-    if (body.provider && body.provider !== "stub") {
-      const result = runGenJob(engine, "image", body, { dataDir, onUpdate: () => opts.onJob?.(req.params.id!, engine) });
-      res.status(201).json(result);
-    } else {
-      const result = runStubGenJob(engine, "gen.image", body);
-      res.status(201).json(result);
-    }
-  }, registry));
+  app.post("/api/v1/projects/:id/gen/video", handleGen("video"));
+  app.post("/api/v1/projects/:id/gen/image", handleGen("image"));
+  app.post("/api/v1/projects/:id/gen/music", handleGen("music"));
+  app.post("/api/v1/projects/:id/gen/sfx", handleGen("sfx"));
+  app.post("/api/v1/projects/:id/gen/voice", handleGen("voice"));
 
   app.post("/api/v1/projects/:id/gen/audio", wrap((req, res, engine) => {
     const body = req.body ?? {};
-    const kind = String(body?.kind ?? "music");
-    if (body.provider && body.provider !== "stub") {
-      const k = (kind === "voice" ? "voice" : kind === "sfx" ? "sfx" : "music") as "voice" | "sfx" | "music";
-      const result = runGenJob(engine, k, body, { dataDir, onUpdate: () => opts.onJob?.(req.params.id!, engine) });
-      res.status(201).json(result);
+    const kindStr = String(body?.kind ?? "music");
+    const k: GenKind = kindStr === "voice" ? "voice" : kindStr === "sfx" ? "sfx" : "music";
+    const wantsReal = Boolean(body.real) || (body.provider && body.provider !== "stub");
+    if (wantsReal) {
+      try {
+        const result = runGenJob(engine, k, body, {
+          dataDir,
+          onUpdate: () => opts.onJob?.(req.params.id!, engine),
+        });
+        res.status(201).json(result);
+      } catch (err) {
+        badRequest(res, (err as Error).message);
+      }
     } else {
-      const type: JobType = kind === "voice" ? "gen.voice" : kind === "sfx" ? "gen.sfx" : "gen.music";
-      const result = runStubGenJob(engine, type, body);
+      const result = runStubGenJob(engine, genJobType(k), body);
       res.status(201).json(result);
     }
   }, registry));

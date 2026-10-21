@@ -1,4 +1,4 @@
-// Klient pro Vedit REST API (PLAN.md §5) — běží přes Vite proxy na /api.
+// Client for the Vedit REST & WebSocket API (PLAN.md §5).
 
 export interface Clip {
   id: string;
@@ -32,7 +32,16 @@ export interface Asset {
   width?: number;
   height?: number;
   fps?: number;
-  source?: { provider?: string; model?: string; prompt?: string; simulated?: boolean };
+  source?: {
+    provider?: string;
+    model?: string;
+    prompt?: string;
+    directedPrompt?: string;
+    cameraMove?: string;
+    seed?: number;
+    continuityFrom?: string;
+    simulated?: boolean;
+  };
 }
 
 export interface Caption {
@@ -56,26 +65,41 @@ export interface Project {
     captions: Caption[];
   }>;
   activeSequenceId: string;
-  jobs: Array<{ id: string; type: string; status: string; progress: number; output?: Record<string, unknown> }>;
+  jobs: Array<{ id: string; type: string; status: string; progress: number; error?: string; output?: Record<string, unknown> }>;
+}
+
+export interface GenProviderInfo {
+  id: string;
+  label: string;
+  available: boolean;
+  cloud: boolean;
+  reason?: string;
+  kinds: Array<"video" | "image" | "music" | "sfx" | "voice">;
+  defaultModel: string;
+  models: string[];
+}
+
+export interface CameraMoveInfo {
+  id: string;
+  label: string;
+  directive: string;
 }
 
 const env = (import.meta as { env?: Record<string, string> }).env;
 
 /**
- * V desktopu (Tauri webview) běží API na localhost:47000;
- * v prohlížeči přes Vite proxy na /api.
+ * In desktop Tauri webview (http://tauri.localhost or tauri://localhost), sidecar runs at 127.0.0.1:47000;
+ * in browser dev mode Vite proxies /api and /ws.
  */
 const isDesktop = location.protocol === "tauri:" || location.hostname === "tauri.localhost";
 const API_ORIGIN = env?.VITE_API_BASE ?? (isDesktop ? "http://127.0.0.1:47000" : "");
 
 const API_TOKEN = env?.VITE_API_TOKEN ?? "dev";
 
-/** Plná URL API endpointu (desktop → http://127.0.0.1:47000/api/v1/…). */
 export function apiUrl(path: string): string {
   return `${API_ORIGIN}/api/v1${path}`;
 }
 
-/** Přidá ?token= pro <img>/download odkazy (API akceptuje header i query). */
 export function withToken(url: string): string {
   const abs = url.startsWith("/") ? `${API_ORIGIN}${url}` : url;
   return `${abs}${abs.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
@@ -102,10 +126,22 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return res.json() as Promise<T>;
 }
 
+export interface GenerateMediaRequest {
+  kind: "video" | "image" | "music" | "sfx" | "voice";
+  prompt: string;
+  provider?: string;
+  model?: string;
+  duration?: number;
+  cameraMove?: string;
+  continuityFromClipId?: string;
+  insertToTimeline?: boolean;
+  start?: number;
+}
+
 export const api = {
   listProjects: () => req<{ projects: Array<{ id: string; name: string }> }>("GET", "/projects"),
   getProject: (id: string) => req<{ project: Project }>("GET", `/projects/${id}`),
-  createProject: (name: string) => req<{ project: Project }>("POST", "/projects", { name }),
+  createProject: (name: string, sample = true) => req<{ project: Project }>("POST", "/projects", { name, sample }),
   addAsset: (input: Partial<Asset> & { name: string; path: string }) =>
     req<{ asset: Asset }>("POST", `/projects/${currentId}/assets`, input),
   addTrack: (kind: string, name?: string) =>
@@ -124,8 +160,19 @@ export const api = {
     req<{ caption: Caption }>("POST", `/projects/${currentId}/captions`, input),
   undo: () => req<{ ok: boolean }>("POST", `/projects/${currentId}/undo`),
   redo: () => req<{ ok: boolean }>("POST", `/projects/${currentId}/redo`),
+  genProviders: () => req<{ providers: GenProviderInfo[]; cameraMoves: CameraMoveInfo[] }>("GET", "/gen/providers"),
+  generateMedia: (input: GenerateMediaRequest) =>
+    req<{ jobId: string; assetId?: string; clipId?: string }>(
+      "POST",
+      `/projects/${currentId}/gen/${input.kind}`,
+      { ...input, real: true },
+    ),
   genVideo: (prompt: string, duration = 5) =>
-    req<{ jobId: string; assetId?: string }>("POST", `/projects/${currentId}/gen/video`, { prompt, duration }),
+    req<{ jobId: string; assetId?: string }>("POST", `/projects/${currentId}/gen/video`, {
+      prompt,
+      duration,
+      real: true,
+    }),
   exportRender: () => req<{ jobId: string }>("POST", `/projects/${currentId}/export`, { format: "mp4" }),
   presets: () => req<{ presets: Array<{ id: string; label: string }> }>("GET", "/animation/presets"),
   aiCaps: () =>
@@ -137,13 +184,20 @@ export const api = {
     req<{ jobId: string }>("POST", `/projects/${currentId}/voiceover`, { script, voice, start }),
   transcribe: (assetId: string, language = "en") =>
     req<{ jobId: string }>("POST", `/projects/${currentId}/assets/${assetId}/transcribe`, { language }),
-  // F3: AI střih
   removeSilences: (clipId?: string) =>
-    req<{ trackId: string; savedDuration: number }>("POST", `/projects/${currentId}/edit/remove-silences`, clipId ? { clipId } : {}),
+    req<{ trackId: string; savedDuration: number }>(
+      "POST",
+      `/projects/${currentId}/edit/remove-silences`,
+      clipId ? { clipId } : {},
+    ),
   highlight: (targetDuration = 15) =>
-    req<{ trackId: string; totalDuration: number; clips: unknown[] }>("POST", `/projects/${currentId}/edit/highlight`, { targetDuration }),
+    req<{ trackId: string; totalDuration: number; clips: unknown[] }>("POST", `/projects/${currentId}/edit/highlight`, {
+      targetDuration,
+    }),
   beatSync: (clipId: string, musicAssetId: string) =>
-    req<{ beats: number[]; splits: unknown[] }>("POST", `/projects/${currentId}/clips/${clipId}/beat-sync`, { musicAssetId }),
+    req<{ beats: number[]; splits: unknown[] }>(`POST`, `/projects/${currentId}/clips/${clipId}/beat-sync`, {
+      musicAssetId,
+    }),
   autoReframe: (clipId: string) =>
     req<{ keyframes: number }>("POST", `/projects/${currentId}/clips/${clipId}/auto-reframe`, {}),
   trackMotion: (clipId: string, sourceAssetId: string) =>
@@ -159,14 +213,46 @@ export function setCurrentId(id: string): void {
 export function connectWs(onChange: () => void): () => void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const wsUrl = isDesktop ? "ws://127.0.0.1:47000/ws" : `${proto}://${location.host}/ws`;
-  const ws = new WebSocket(wsUrl);
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(String(event.data));
-    if (msg.type === "change" || msg.type === "job") onChange();
+  let ws: WebSocket | null = null;
+  let closed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const open = () => {
+    if (closed) return;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(String(event.data));
+          if (msg.type === "change" || msg.type === "job") onChange();
+        } catch {
+          /* ignore malformed frame */
+        }
+      };
+      ws.onclose = () => {
+        if (!closed) {
+          timer = setTimeout(() => {
+            onChange();
+            open();
+          }, 1000);
+        }
+      };
+      ws.onerror = () => {
+        try {
+          ws?.close();
+        } catch {
+          /* ignore */
+        }
+      };
+    } catch {
+      if (!closed) timer = setTimeout(open, 1000);
+    }
   };
-  ws.onclose = () => {
-    // reconnect for dev convenience
-    setTimeout(onChange, 1000);
+
+  open();
+  return () => {
+    closed = true;
+    if (timer) clearTimeout(timer);
+    ws?.close();
   };
-  return () => ws.close();
 }

@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, connectWs, setCurrentId, withToken, type Clip, type Project } from "./api";
-import { AiPanel, Inspector, JobsPanel, MediaPool, Preview, Timeline, fmt } from "./components";
+import {
+  api,
+  connectWs,
+  setCurrentId,
+  withToken,
+  type CameraMoveInfo,
+  type Clip,
+  type GenProviderInfo,
+  type Project,
+} from "./api";
+import { AiPanel, GenPanel, Inspector, JobsPanel, MediaPool, Preview, Timeline, fmt } from "./components";
 
 interface Selection {
   trackId: string;
@@ -18,6 +27,8 @@ export function App() {
   const [prompt, setPrompt] = useState("fireworks over Prague, night skyline");
   const [busy, setBusy] = useState(false);
   const [aiCaps, setAiCaps] = useState<Awaited<ReturnType<typeof api.aiCaps>> | null>(null);
+  const [genProviders, setGenProviders] = useState<GenProviderInfo[]>([]);
+  const [cameraMoves, setCameraMoves] = useState<CameraMoveInfo[]>([]);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -26,8 +37,11 @@ export function App() {
 
   const refresh = useCallback(async () => {
     const { projects } = await api.listProjects();
-    const id = projects[0]?.id;
-    if (!id) return;
+    let id = projects[0]?.id;
+    if (!id) {
+      const created = await api.createProject("My Vedit Project", true);
+      id = created.project.id;
+    }
     setCurrentId(id);
     const { project } = await api.getProject(id);
     setProject(project);
@@ -35,16 +49,33 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      try {
-        await refresh();
-        setPresets((await api.presets()).presets);
-        setAiCaps(await api.aiCaps());
-      } catch (err) {
-        flash(`Error: ${(err as Error).message}`);
+      for (let attempt = 0; !cancelled && attempt < 40; attempt++) {
+        try {
+          await refresh();
+          const [presetRes, capsRes, genRes] = await Promise.all([
+            api.presets(),
+            api.aiCaps(),
+            api.genProviders(),
+          ]);
+          if (cancelled) return;
+          setPresets(presetRes.presets);
+          setAiCaps(capsRes);
+          setGenProviders(genRes.providers);
+          setCameraMoves(genRes.cameraMoves);
+          return;
+        } catch (err) {
+          if (attempt === 39) flash(`Error: ${(err as Error).message}`);
+          await new Promise((r) => setTimeout(r, 300));
+        }
       }
     })();
-    return connectWs(() => void refresh());
+    const disconnect = connectWs(() => void refresh().catch(() => undefined));
+    return () => {
+      cancelled = true;
+      disconnect();
+    };
   }, [refresh, flash]);
 
   const seq = project?.sequences.find((s) => s.id === project.activeSequenceId) ?? null;
@@ -57,7 +88,11 @@ export function App() {
     return null;
   }, [seq, selection]);
 
-  // F1: aktivní klip pro náhled = vybraný klip pod playheadem, jinak klip pod playheadem
+  const selectedAsset = useMemo(() => {
+    if (!project || !selected) return null;
+    return project.assets.find((a) => a.id === selected.clip.assetId) ?? null;
+  }, [project, selected]);
+
   const activeClip: Clip | null = useMemo(() => {
     if (!seq) return null;
     const inside = (c: Clip) => playhead >= c.start && playhead <= c.start + c.duration;
@@ -94,7 +129,7 @@ export function App() {
   );
 
   if (!project || !seq) {
-    return <div className="app loading">Connecting to Vedit API…</div>;
+    return <div className="app loading">Connecting to Vedit Engine…</div>;
   }
 
   const clipId = selection?.clipId;
@@ -130,7 +165,7 @@ export function App() {
             disabled={busy || !clipId}
             onClick={() => clipId && act(() => api.deleteClip(clipId, true), "Clip deleted (ripple)")}
           >
-             ripple delete
+            Ripple delete
           </button>
         </div>
         <div className="toolbar-group">
@@ -146,7 +181,6 @@ export function App() {
             onClick={() => clipId && act(() => api.applyPreset(clipId, presetId), `Animation ${presetId}`)}
           >
             ✨ Animation
-
           </button>
           <button
             disabled={busy}
@@ -158,25 +192,25 @@ export function App() {
           </button>
         </div>
         <div className="toolbar-group">
-          <input className="prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="AI prompt…" />
+          <input className="prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Quick AI shot prompt…" />
           <button
             disabled={busy}
-            title="F0: simulated generation (real models in F4)"
+            title="Generate AI video shot & insert onto timeline"
             onClick={() =>
               act(async () => {
                 const res = await api.genVideo(prompt, 5);
-                flash(`Gen video job ${res.jobId.slice(0, 8)}… (F0 stub)`);
+                flash(`Vedit Gen job ${res.jobId.slice(0, 8)}… queued`);
               })
             }
           >
-            🎬 Gen video
+            🎬 Gen Video
           </button>
           <button
             disabled={busy}
             onClick={() =>
               act(async () => {
                 const res = await api.exportRender();
-                flash(`Export job ${res.jobId.slice(0, 8)}… (F0 stub)`);
+                flash(`Export MP4 job ${res.jobId.slice(0, 8)}… started`);
               })
             }
           >
@@ -241,12 +275,24 @@ export function App() {
         </div>
         <Preview project={project} clip={activeClip} playhead={playhead} frameUrl={frameUrl} />
         <div className="right-col">
+          <GenPanel
+            providers={genProviders}
+            cameraMoves={cameraMoves}
+            selectedClipId={selection?.clipId ?? null}
+            busy={busy}
+            onGenerate={(req) =>
+              act(async () => {
+                const res = await api.generateMedia(req);
+                flash(`Vedit Gen (${req.kind}): job ${res.jobId.slice(0, 8)}…`);
+              })
+            }
+          />
           <Inspector
             clip={selected?.clip ?? null}
+            asset={selectedAsset}
             captions={seq.captions}
             onPatch={(patch) => {
               if (!clipId) return;
-              // transform.x → nested patch
               const nested: Record<string, unknown> = {};
               for (const [key, value] of Object.entries(patch)) {
                 if (key.startsWith("transform.")) {
@@ -256,7 +302,7 @@ export function App() {
                   nested[key] = value;
                 }
               }
-              void act(() => api.updateClip(clipId, nested), "Klip upraven");
+              void act(() => api.updateClip(clipId, nested), "Clip updated");
             }}
           />
         </div>

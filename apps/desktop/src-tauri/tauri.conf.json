@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev --prefix ..",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build --prefix ..",
+    "beforeBuildCommand": "node prebuild.cjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -25,10 +25,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "category": "Video",
     "shortDescription": "Vedit — AI-powered video editor",
-    "longDescription": "Desktop video editor with built-in MCP server and direct API for AI agents.",
+    "longDescription": "Desktop video editor with built-in MCP server, Vedit Gen AI studio, and direct API for AI agents.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

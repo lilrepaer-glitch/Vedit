@@ -11,7 +11,8 @@ import { speechCapabilities } from "../ai/speech.js";
 import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
 import { detectBeats, detectScenes, detectSilences, trackMotion, windowEnergy } from "../ai/analysis.js";
 import { autoReframe, beatSync, buildHighlight, removeSilences, trackMotionTo } from "../ai/edit.js";
-import { runStubGenJob, runRealRenderJob, runProxyJob } from "../server/app.js";
+import { runGenJob, runStubGenJob, runRealRenderJob, runProxyJob } from "../server/app.js";
+import { CAMERA_MOVES, providerAvailability } from "../ai/gen.js";
 import { resolve as resolvePath } from "node:path";
 
 export interface McpContext {
@@ -664,46 +665,199 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     async (args) => wrapTool(() => trackMotionTo(engine(), args)),
   );
 
-  // ---- generování (gen.video F0 stub) + export ----
+  // ---- generování (F4 Vedit Gen — cloud + local + offline synth) + export ----
+  const genDataDir = () => resolvePath(process.cwd(), ".vedit");
+  const awaitJobIfNeeded = async (jobId: string, wait?: boolean) => {
+    if (!wait) return { jobId };
+    for (let i = 0; i < 600; i++) {
+      const job = engine().getJob(jobId);
+      if (job.status === "done") {
+        return { jobId, job, assetId: job.output?.assetId, clipId: job.output?.clipId, trackId: job.output?.trackId };
+      }
+      if (job.status === "failed") {
+        throw new Error(job.error ?? "generation job failed");
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return { jobId, job: engine().getJob(jobId) };
+  };
+
+  server.registerTool(
+    "gen.providers",
+    {
+      description: "F4: seznam poskytovatelů Vedit Gen (fal.ai, Replicate, Veo 3.1, Kling 3.0, Wan Local, Hunyuan…), stav klíčů a pohyby kamery.",
+    },
+    async () => ok({ providers: providerAvailability(), cameraMoves: CAMERA_MOVES }),
+  );
+
   server.registerTool(
     "gen.video",
     {
-      description: "Vygeneruje video z promptu (F0: simulovaný job vrací asset; reálné modely ve F4).",
+      description: "F4 Vedit Gen: vygeneruje video z promptu (cloud / lokální GPU / offline FFmpeg) a volitelně ho vloží na timeline s návazností záběrů.",
       inputSchema: {
         prompt: z.string(),
         duration: z.number().positive().default(5),
         model: z.string().optional(),
         provider: z.string().optional(),
+        cameraMove: z.string().optional(),
+        continuityFromClipId: z.string().optional(),
+        continuityFromAssetId: z.string().optional(),
+        imageAssetId: z.string().optional(),
+        insertToTimeline: z.boolean().optional(),
+        start: z.number().nonnegative().optional(),
+        real: z.boolean().optional(),
+        wait: z.boolean().optional(),
       },
     },
-    async (args) => wrapTool(() => runStubGenJob(engine(), "gen.video", { ...args })),
+    async (args) =>
+      wrapTool(async () => {
+        if (args.real || (args.provider && args.provider !== "stub")) {
+          const { jobId } = runGenJob(engine(), "video", { ...args }, { dataDir: genDataDir() });
+          return awaitJobIfNeeded(jobId, args.wait);
+        }
+        return runStubGenJob(engine(), "gen.video", { ...args });
+      }),
   );
 
   server.registerTool(
     "gen.image",
     {
-      description: "Vygeneruje obrázek z promptu (F0: simulovaný job).",
-      inputSchema: { prompt: z.string(), model: z.string().optional() },
+      description: "F4 Vedit Gen: vygeneruje obrázek/keyframe z promptu a volitelně ho vloží na timeline.",
+      inputSchema: {
+        prompt: z.string(),
+        model: z.string().optional(),
+        provider: z.string().optional(),
+        duration: z.number().positive().optional(),
+        insertToTimeline: z.boolean().optional(),
+        start: z.number().nonnegative().optional(),
+        real: z.boolean().optional(),
+        wait: z.boolean().optional(),
+      },
     },
-    async (args) => wrapTool(() => runStubGenJob(engine(), "gen.image", { ...args })),
+    async (args) =>
+      wrapTool(async () => {
+        if (args.real || (args.provider && args.provider !== "stub")) {
+          const { jobId } = runGenJob(engine(), "image", { ...args }, { dataDir: genDataDir() });
+          return awaitJobIfNeeded(jobId, args.wait);
+        }
+        return runStubGenJob(engine(), "gen.image", { ...args });
+      }),
+  );
+
+  server.registerTool(
+    "gen.music",
+    {
+      description: "F4 Vedit Gen: vygeneruje hudební podkres z promptu.",
+      inputSchema: {
+        prompt: z.string(),
+        duration: z.number().positive().default(10),
+        provider: z.string().optional(),
+        model: z.string().optional(),
+        insertToTimeline: z.boolean().optional(),
+        start: z.number().nonnegative().optional(),
+        real: z.boolean().optional(),
+        wait: z.boolean().optional(),
+      },
+    },
+    async (args) =>
+      wrapTool(async () => {
+        if (args.real || (args.provider && args.provider !== "stub")) {
+          const { jobId } = runGenJob(engine(), "music", { ...args }, { dataDir: genDataDir() });
+          return awaitJobIfNeeded(jobId, args.wait);
+        }
+        return runStubGenJob(engine(), "gen.music", { ...args });
+      }),
+  );
+
+  server.registerTool(
+    "gen.sfx",
+    {
+      description: "F4 Vedit Gen: vygeneruje zvukový efekt (SFX) z promptu.",
+      inputSchema: {
+        prompt: z.string(),
+        duration: z.number().positive().default(3),
+        provider: z.string().optional(),
+        model: z.string().optional(),
+        insertToTimeline: z.boolean().optional(),
+        start: z.number().nonnegative().optional(),
+        real: z.boolean().optional(),
+        wait: z.boolean().optional(),
+      },
+    },
+    async (args) =>
+      wrapTool(async () => {
+        if (args.real || (args.provider && args.provider !== "stub")) {
+          const { jobId } = runGenJob(engine(), "sfx", { ...args }, { dataDir: genDataDir() });
+          return awaitJobIfNeeded(jobId, args.wait);
+        }
+        return runStubGenJob(engine(), "gen.sfx", { ...args });
+      }),
+  );
+
+  server.registerTool(
+    "gen.voice",
+    {
+      description: "F4 Vedit Gen: vygeneruje voiceover ze skriptu (TTS nebo cloud model) a vloží klip + titulky.",
+      inputSchema: {
+        prompt: z.string(),
+        voice: z.string().default("en"),
+        provider: z.string().optional(),
+        model: z.string().optional(),
+        start: z.number().nonnegative().default(0),
+        gap: z.number().min(0).max(3).optional(),
+        real: z.boolean().optional(),
+        wait: z.boolean().optional(),
+      },
+    },
+    async ({ prompt, voice, provider, model, start, gap, real, wait }) =>
+      wrapTool(async () => {
+        if (provider && provider !== "stub") {
+          const { jobId } = runGenJob(engine(), "voice", { prompt, provider, model, start }, { dataDir: genDataDir() });
+          return awaitJobIfNeeded(jobId, wait);
+        }
+        const caps = await speechCapabilities();
+        if (caps.tts.available) {
+          return generateVoiceover(engine(), { script: prompt, voice, start, gap }, {
+            mediaDir: resolvePath(process.cwd(), ".vedit/media"),
+          });
+        }
+        if (real) {
+          const { jobId } = runGenJob(engine(), "voice", { prompt, start, real: true }, { dataDir: genDataDir() });
+          return awaitJobIfNeeded(jobId, wait);
+        }
+        return runStubGenJob(engine(), "gen.voice", { prompt, kind: "voice", simulated: true });
+      }),
   );
 
   server.registerTool(
     "gen.audio",
     {
       description:
-        "F2: kind=voice dělá REÁLNÝ voiceover ze skriptu (TTS + klip + titulky); music/sfx zůstávají simulované do F4.",
+        "F2/F4: kind=voice dělá REÁLNÝ voiceover ze skriptu (TTS + klip + titulky); music/sfx podporují Vedit Gen providery.",
       inputSchema: {
         prompt: z.string().describe("Text skriptu (voice) nebo prompt (music/sfx)"),
         kind: z.enum(["music", "sfx", "voice"]).default("music"),
         voice: z.string().default("cs"),
+        provider: z.string().optional(),
+        model: z.string().optional(),
         duration: z.number().positive().optional(),
         start: z.number().nonnegative().default(0),
         gap: z.number().min(0).max(3).optional(),
+        real: z.boolean().optional(),
+        wait: z.boolean().optional(),
       },
     },
-    async ({ prompt, kind, voice, start, gap }) =>
+    async ({ prompt, kind, voice, provider, model, duration, start, gap, real, wait }) =>
       wrapTool(async () => {
+        if (real || (provider && provider !== "stub")) {
+          const { jobId } = runGenJob(
+            engine(),
+            kind,
+            { prompt, kind, provider, model, duration, start },
+            { dataDir: genDataDir() },
+          );
+          return awaitJobIfNeeded(jobId, wait);
+        }
         if (kind === "voice") {
           const caps = await speechCapabilities();
           if (caps.tts.available) {

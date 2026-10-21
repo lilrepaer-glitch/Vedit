@@ -1,4 +1,14 @@
-import type { Asset, Caption, Clip, Project, Track } from "./api";
+import { useEffect, useState } from "react";
+import type {
+  Asset,
+  CameraMoveInfo,
+  Caption,
+  Clip,
+  GenProviderInfo,
+  GenerateMediaRequest,
+  Project,
+  Track,
+} from "./api";
 import { apiUrl, withToken } from "./api";
 
 export function fmt(t: number): string {
@@ -23,11 +33,22 @@ export function MediaPool({
         {project.assets.map((a) => (
           <li key={a.id} className="asset">
             <span className={`badge badge-${a.kind}`}>{a.kind}</span>
-            <span className="asset-name" title={a.path}>
+            <span
+              className="asset-name"
+              title={
+                a.source?.prompt
+                  ? `${a.name} — ${a.source.provider ?? "gen"}/${a.source.model ?? ""}: "${a.source.prompt}"`
+                  : a.path
+              }
+            >
               {a.name}
             </span>
             <span className="muted">{a.duration != null ? fmt(a.duration) : "—"}</span>
-            {a.source?.simulated && <span className="badge badge-stub">AI stub</span>}
+            {a.source?.model && (
+              <span className="badge badge-stub" title={a.source.directedPrompt ?? a.source.prompt}>
+                {a.source.simulated ? "offline" : a.source.provider ?? "AI"}
+              </span>
+            )}
           </li>
         ))}
       </ul>
@@ -65,7 +86,7 @@ function ImportForm({ projectId, onImported }: { projectId: string; onImported: 
     >
       <h3>Import Media</h3>
       <input name="name" placeholder="name.mp4" required />
-      <input name="path" placeholder="/media/file.mp4" required />
+      <input name="path" placeholder="C:\\Videos\\clip.mp4" required />
       <select name="kind" defaultValue="video">
         <option value="video">video</option>
         <option value="audio">audio</option>
@@ -95,7 +116,7 @@ export function Preview({
   return (
     <section className="panel preview-panel">
       <h2>
-        Preview <span className="muted">— F1: real frame from media (FFmpeg)</span>
+        Preview <span className="muted">— live frame decoder (FFmpeg)</span>
       </h2>
       <div className="preview-stage" style={{ aspectRatio: `${seq.width} / ${seq.height}` }}>
         {clip && frameUrl ? (
@@ -133,7 +154,152 @@ export function Preview({
   );
 }
 
-// ---------- AI captions (F2) ----------
+// ---------- Vedit Gen Studio (F4) ----------
+
+export function GenPanel({
+  providers,
+  cameraMoves,
+  selectedClipId,
+  busy,
+  onGenerate,
+}: {
+  providers: GenProviderInfo[];
+  cameraMoves: CameraMoveInfo[];
+  selectedClipId: string | null;
+  busy: boolean;
+  onGenerate: (req: GenerateMediaRequest) => void;
+}) {
+  const [kind, setKind] = useState<GenerateMediaRequest["kind"]>("video");
+  const compatible = providers.filter((p) => p.kinds.includes(kind));
+  const [providerId, setProviderId] = useState<string>("stub");
+  const activeProvider = compatible.find((p) => p.id === providerId) ?? compatible[0];
+  const [model, setModel] = useState<string>(activeProvider?.defaultModel ?? "stub-v0");
+  const [prompt, setPrompt] = useState("cinematic drone shot over Prague Castle at golden hour");
+  const [duration, setDuration] = useState(5);
+  const [cameraMove, setCameraMove] = useState("push-in");
+  const [useContinuity, setUseContinuity] = useState(false);
+  const [insertToTimeline, setInsertToTimeline] = useState(true);
+
+  useEffect(() => {
+    if (!compatible.some((p) => p.id === providerId) && compatible[0]) {
+      setProviderId(compatible[0].id);
+      setModel(compatible[0].defaultModel);
+    }
+  }, [kind, compatible, providerId]);
+
+  useEffect(() => {
+    if (activeProvider && !activeProvider.models.includes(model)) {
+      setModel(activeProvider.defaultModel);
+    }
+  }, [activeProvider, model]);
+
+  return (
+    <section className="panel">
+      <h2>Vedit Gen (AI Video / Image / Audio)</h2>
+      <form
+        className="import-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onGenerate({
+            kind,
+            prompt,
+            provider: activeProvider?.id ?? "stub",
+            model,
+            duration,
+            cameraMove: kind === "video" || kind === "image" ? cameraMove : undefined,
+            continuityFromClipId: useContinuity && selectedClipId ? selectedClipId : undefined,
+            insertToTimeline,
+          });
+        }}
+      >
+        <div className="row">
+          <select value={kind} onChange={(e) => setKind(e.target.value as GenerateMediaRequest["kind"])}>
+            <option value="video">🎬 Video</option>
+            <option value="image">🖼 Image</option>
+            <option value="music">🎵 Music</option>
+            <option value="sfx">🔊 Sound Effect</option>
+          </select>
+          <input
+            type="number"
+            min={1}
+            max={60}
+            step={1}
+            value={duration}
+            onChange={(e) => setDuration(Number(e.target.value) || 5)}
+            title="Duration (seconds)"
+          />
+        </div>
+        <select
+          value={activeProvider?.id ?? "stub"}
+          onChange={(e) => {
+            const next = compatible.find((p) => p.id === e.target.value);
+            setProviderId(e.target.value);
+            if (next) setModel(next.defaultModel);
+          }}
+          title={activeProvider?.reason ?? "Ready"}
+        >
+          {compatible.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.available ? "●" : "○"} {p.label}
+            </option>
+          ))}
+        </select>
+        {activeProvider && (
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            {activeProvider.models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        )}
+        {(kind === "video" || kind === "image") && (
+          <select value={cameraMove} onChange={(e) => setCameraMove(e.target.value)} title="Camera movement">
+            {cameraMoves.map((c) => (
+              <option key={c.id} value={c.id}>
+                🎥 {c.label}
+              </option>
+            ))}
+          </select>
+        )}
+        <textarea
+          rows={2}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Describe your shot, lighting, action, or soundtrack…"
+          required
+        />
+        <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={insertToTimeline}
+            onChange={(e) => setInsertToTimeline(e.target.checked)}
+          />
+          Insert directly onto timeline
+        </label>
+        <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={useContinuity}
+            disabled={!selectedClipId}
+            onChange={(e) => setUseContinuity(e.target.checked)}
+          />
+          Shot continuity from selected clip
+        </label>
+        {activeProvider && !activeProvider.available && (
+          <div className="muted" style={{ fontSize: 11 }}>
+            {activeProvider.reason} — falls back to offline FFmpeg synth
+          </div>
+        )}
+        <button type="submit" disabled={busy || !prompt.trim()}>
+          ✨ Generate {kind.toUpperCase()}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+// ---------- AI captions & editing (F2/F3) ----------
 
 export function AiPanel({
   caps,
@@ -150,10 +316,13 @@ export function AiPanel({
   selectedClipId: string | null;
   onVoiceover: (script: string, voice: string) => void;
   onTranscribe: (assetId: string) => void;
-  onAiEdit: (action: "remove-silences" | "highlight" | "beat-sync" | "auto-reframe" | "track-motion", params: Record<string, string>) => void;
+  onAiEdit: (
+    action: "remove-silences" | "highlight" | "beat-sync" | "auto-reframe" | "track-motion",
+    params: Record<string, string>,
+  ) => void;
 }) {
   const audioAssets = assets.filter((a) => a.kind === "audio");
-  const videoAssets = assets.filter((a) => a.kind === "video");
+  const videoAssets = assets.filter((a) => a.kind === "video" || a.kind === "generated");
   return (
     <section className="panel">
       <h2>AI Captions &amp; Voiceover</h2>
@@ -167,18 +336,13 @@ export function AiPanel({
           e.preventDefault();
           const form = e.currentTarget;
           const data = new FormData(form);
-          onVoiceover(String(data.get("script") || ""), String(data.get("voice") || "cs"));
+          onVoiceover(String(data.get("script") || ""), String(data.get("voice") || "en"));
         }}
       >
-        <textarea
-          name="script"
-          rows={3}
-          placeholder="Script — each sentence will be a caption…"
-          required
-        />
+        <textarea name="script" rows={3} placeholder="Script — each sentence becomes a caption…" required />
         <div className="row">
-          <select name="voice" defaultValue="cs">
-            {(caps?.voices.length ? caps.voices : ["cs", "en"]).map((v) => (
+          <select name="voice" defaultValue="en">
+            {(caps?.voices.length ? caps.voices : ["en", "cs"]).map((v) => (
               <option key={v} value={v}>
                 {v}
               </option>
@@ -201,7 +365,7 @@ export function AiPanel({
         </select>
         <button
           disabled={busy || !caps?.asr.available || assets.length === 0}
-          title="Transcribe speech from media to captions (pocketsphinx/en)"
+          title="Transcribe speech from media to captions"
           onClick={() => {
             const select = document.getElementById("transcribe-asset") as HTMLSelectElement | null;
             if (select?.value) onTranscribe(select.value);
@@ -240,13 +404,13 @@ export function AiPanel({
         </select>
         <button
           disabled={busy || !selectedClipId || audioAssets.length === 0}
-          title="Split selected clip exactly on music beats"
+          title="Split selected clip on music beats"
           onClick={() => {
             const music = (document.getElementById("beat-music") as HTMLSelectElement | null)?.value;
             if (selectedClipId && music) onAiEdit("beat-sync", { clipId: selectedClipId, musicAssetId: music });
           }}
         >
-          🥁 Beat sync
+          🥁 Beat Sync
         </button>
       </div>
       <div className="row">
@@ -272,7 +436,7 @@ export function AiPanel({
             if (selectedClipId && src) onAiEdit("track-motion", { clipId: selectedClipId, sourceAssetId: src });
           }}
         >
-          🎯 Track motion
+          🎯 Track Motion
         </button>
       </div>
     </section>
@@ -297,12 +461,9 @@ export function JobsPanel({ project }: { project: Project }) {
             <div className="job-bar">
               <div className="job-fill" style={{ width: `${j.status === "done" ? 100 : j.progress}%` }} />
             </div>
+            {j.error && <div className="muted" style={{ fontSize: 11 }}>{j.error}</div>}
             {j.status === "done" && (j.output as { outPath?: string } | undefined)?.outPath && (
-              <a
-                className="job-dl"
-                href={withToken(`/api/v1/jobs/${j.id}/output`)}
-                download
-              >
+              <a className="job-dl" href={withToken(`/api/v1/jobs/${j.id}/output`)} download>
                 ⬇ download output
               </a>
             )}
@@ -340,10 +501,7 @@ export function Timeline({
   onZoom: (z: number) => void;
 }) {
   const seq = project.sequences.find((s) => s.id === project.activeSequenceId)!;
-  const duration = Math.max(
-    20,
-    ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)),
-  );
+  const duration = Math.max(20, ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)));
   const width = duration * zoom + 80;
   const ticks = Array.from({ length: Math.ceil(duration) + 1 }, (_, i) => i);
 
@@ -416,10 +574,12 @@ export function Timeline({
 
 export function Inspector({
   clip,
+  asset,
   onPatch,
   captions,
 }: {
   clip: Clip | null;
+  asset: Asset | null;
   onPatch: (patch: Record<string, unknown>) => void;
   captions: Caption[];
 }) {
@@ -461,6 +621,24 @@ export function Inspector({
         {field("rotation", "transform.rotation", clip.transform.rotation, 1)}
         {field("opacity", "transform.opacity", clip.transform.opacity)}
       </div>
+      {asset?.source?.prompt && (
+        <>
+          <h3>Generation Metadata</h3>
+          <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
+            <div>
+              <strong>Model:</strong> {asset.source.provider ?? "gen"} / {asset.source.model ?? "default"}
+            </div>
+            {asset.source.cameraMove && (
+              <div>
+                <strong>Camera:</strong> {asset.source.cameraMove}
+              </div>
+            )}
+            <div>
+              <strong>Prompt:</strong> {asset.source.prompt}
+            </div>
+          </div>
+        </>
+      )}
       <h3>Keyframes ({clip.keyframes.length})</h3>
       <ul className="kf-list">
         {clip.keyframes.map((k, i) => (
