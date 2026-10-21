@@ -1,16 +1,119 @@
-// Reálný render pipeline F1 — timeline → FFmpeg → video soubor
-// (PLAN.md §3.6, §13: F1 — reálný export)
+// Reálný render pipeline F1 + F5 — timeline → FFmpeg → multi-codec export & platform presets
+// (PLAN.md §3.6, §13: H.264 / H.265 / ProRes / WebM, YouTube / TikTok / Reels / LinkedIn presets)
 
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import type { Asset, Clip, Project, Sequence } from "../core/types.js";
 import { clipEnd, sequenceDuration } from "../core/types.js";
 import { captionsToSrt } from "../core/presets.js";
 import { ffmpegPath, run } from "../core/media.js";
 
+export type VideoCodecId = "h264" | "h265" | "prores" | "vp9";
+export type ContainerFormat = "mp4" | "mov" | "webm";
+
+export interface ExportPreset {
+  id: string;
+  label: string;
+  platform: string;
+  format: ContainerFormat;
+  codec: VideoCodecId;
+  width?: number;
+  height?: number;
+  fps?: number;
+  crf?: number;
+  audioBitrate?: string;
+}
+
+export const EXPORT_PRESETS: ExportPreset[] = [
+  {
+    id: "youtube-1080p",
+    label: "YouTube 1080p HD (16:9 H.264)",
+    platform: "YouTube",
+    format: "mp4",
+    codec: "h264",
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    crf: 19,
+    audioBitrate: "192k",
+  },
+  {
+    id: "youtube-4k",
+    label: "YouTube 4K UHD (16:9 H.265/HEVC)",
+    platform: "YouTube",
+    format: "mp4",
+    codec: "h265",
+    width: 3840,
+    height: 2160,
+    fps: 60,
+    crf: 22,
+    audioBitrate: "256k",
+  },
+  {
+    id: "tiktok-reels",
+    label: "TikTok / Reels / Shorts (9:16 Vertical)",
+    platform: "TikTok / Reels",
+    format: "mp4",
+    codec: "h264",
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    crf: 20,
+    audioBitrate: "192k",
+  },
+  {
+    id: "instagram-square",
+    label: "Instagram / Feed Square (1:1)",
+    platform: "Instagram",
+    format: "mp4",
+    codec: "h264",
+    width: 1080,
+    height: 1080,
+    fps: 30,
+    crf: 20,
+    audioBitrate: "160k",
+  },
+  {
+    id: "linkedin-hd",
+    label: "LinkedIn Business HD (16:9)",
+    platform: "LinkedIn",
+    format: "mp4",
+    codec: "h264",
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    crf: 20,
+    audioBitrate: "192k",
+  },
+  {
+    id: "prores-master",
+    label: "Apple ProRes 422 Studio Master (.mov)",
+    platform: "Broadcast / NLE Master",
+    format: "mov",
+    codec: "prores",
+  },
+  {
+    id: "webm-vp9",
+    label: "WebM VP9 + Opus (.webm)",
+    platform: "Web / Open Codec",
+    format: "webm",
+    codec: "vp9",
+    crf: 30,
+    audioBitrate: "160k",
+  },
+];
+
+export function resolveExportPreset(presetId?: string): ExportPreset | undefined {
+  if (!presetId) return undefined;
+  return EXPORT_PRESETS.find((p) => p.id === presetId);
+}
+
 export interface RenderOptions {
   outPath: string;
+  preset?: string;
+  codec?: VideoCodecId;
+  format?: ContainerFormat;
   width?: number;
   height?: number;
   fps?: number;
@@ -26,6 +129,8 @@ export interface RenderResult {
   width: number;
   height: number;
   fps: number;
+  codec: VideoCodecId;
+  preset?: string;
   sizeBytes: number;
   warnings: string[];
   args: string[];
@@ -37,6 +142,7 @@ export interface RenderPlan {
   width: number;
   height: number;
   fps: number;
+  codec: VideoCodecId;
   warnings: string[];
   /** titulky se před renderem zapíší do tohoto souboru */
   srt?: { path: string; content: string };
@@ -114,14 +220,70 @@ function clipVideoFilters(clip: Clip, warnings: string[]): string[] {
   return f;
 }
 
+function codecArgsFor(codec: VideoCodecId, fps: number, crf?: number, audioBitrate = "160k"): string[] {
+  switch (codec) {
+    case "h265":
+      return [
+        "-c:v", "libx265",
+        "-preset", "veryfast",
+        "-crf", String(crf ?? 22),
+        "-tag:v", "hvc1",
+        "-pix_fmt", "yuv420p",
+        "-r", String(fps),
+        "-c:a", "aac",
+        "-b:a", audioBitrate,
+        "-movflags", "+faststart",
+      ];
+    case "prores":
+      return [
+        "-c:v", "prores_ks",
+        "-profile:v", "2",
+        "-pix_fmt", "yuv422p10le",
+        "-r", String(fps),
+        "-c:a", "pcm_s16le",
+        "-ar", "48000",
+      ];
+    case "vp9":
+      return [
+        "-c:v", "libvpx-vp9",
+        "-b:v", "0",
+        "-crf", String(crf ?? 30),
+        "-deadline", "realtime",
+        "-cpu-used", "5",
+        "-pix_fmt", "yuv420p",
+        "-r", String(fps),
+        "-ar", "48000",
+        "-c:a", "libopus",
+        "-b:a", audioBitrate,
+      ];
+    case "h264":
+    default:
+      return [
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", String(crf ?? 20),
+        "-pix_fmt", "yuv420p",
+        "-r", String(fps),
+        "-c:a", "aac",
+        "-b:a", audioBitrate,
+        "-movflags", "+faststart",
+      ];
+  }
+}
+
 /** Sestaví kompletní ffmpeg argumenty pro render timeline (bez spuštění). */
 export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPlan {
+  const preset = resolveExportPreset(opts.preset);
   const seq: Sequence =
     (opts.sequenceId && project.sequences.find((s) => s.id === opts.sequenceId)) ||
     project.sequences.find((s) => s.id === project.activeSequenceId)!;
-  const width = opts.width ?? seq.width;
-  const height = opts.height ?? seq.height;
-  const fps = opts.fps ?? seq.fps;
+  const width = opts.width ?? preset?.width ?? seq.width;
+  const height = opts.height ?? preset?.height ?? seq.height;
+  const fps = opts.fps ?? preset?.fps ?? seq.fps;
+  const ext = extname(opts.outPath).toLowerCase();
+  const inferredCodec: VideoCodecId =
+    ext === ".webm" ? "vp9" : "h264";
+  const codec: VideoCodecId = opts.codec ?? preset?.codec ?? inferredCodec;
   const warnings: string[] = [];
 
   const duration = Math.max(sequenceDuration(seq), ...seq.captions.map((c) => c.end), 1);
@@ -137,6 +299,7 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
   let inputIndex = 1;
 
   for (const track of seq.tracks) {
+    if (track.muted) continue;
     const isAudioTrack = track.kind === "audio";
     for (const clip of [...track.clips].sort((a, b) => a.start - b.start)) {
       const asset = assetOf(clip);
@@ -165,7 +328,6 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
         }
         visual.push(rc);
         inputIndex++;
-        // video se zvukem míchá i audio ze stejného vstupu
         if (asset.hasAudio) audioClips.push(rc);
       }
     }
@@ -180,7 +342,6 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
     filters.push(`[${rc.inputIndex}:v:0]${vf.join(",")}[v${n}]`);
     const xExpr = keyframeExpr(clip, "x", clipStaticValue(clip, "x", 0));
     const yExpr = keyframeExpr(clip, "y", clipStaticValue(clip, "y", 0));
-    // x/y hodnoty se musí quoteovat — obsahují čárky v if() výrazech
     const x = `'(W-w)/2+${xExpr}'`;
     const y = `'(H-h)/2+${yExpr}'`;
     const out = `ov${n}`;
@@ -230,16 +391,13 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
     "-filter_complex", filters.join(";"),
     "-map", `[${videoOut}]`,
     "-map", "[aout]",
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", String(opts.crf ?? 20),
-    "-pix_fmt", "yuv420p", "-r", String(fps),
-    "-c:a", "aac", "-b:a", "160k",
+    ...codecArgsFor(codec, fps, opts.crf ?? preset?.crf, preset?.audioBitrate ?? "160k"),
     "-t", duration.toFixed(3),
-    "-movflags", "+faststart",
     "-progress", "pipe:1", "-nostats",
     opts.outPath,
   );
 
-  return { args, duration, width, height, fps, warnings, srt };
+  return { args, duration, width, height, fps, codec, warnings, srt };
 }
 
 /** Spustí reálný render timeline přes FFmpeg. */
@@ -277,6 +435,8 @@ export async function renderSequence(project: Project, opts: RenderOptions): Pro
     width: plan.width,
     height: plan.height,
     fps: plan.fps,
+    codec: plan.codec,
+    preset: opts.preset,
     sizeBytes,
     warnings: plan.warnings,
     args: plan.args,

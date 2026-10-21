@@ -6,10 +6,12 @@ import {
   withToken,
   type CameraMoveInfo,
   type Clip,
+  type ExportPresetInfo,
   type GenProviderInfo,
+  type MarketplacePackInfo,
   type Project,
 } from "./api";
-import { AiPanel, GenPanel, Inspector, JobsPanel, MediaPool, Preview, Timeline, fmt } from "./components";
+import { AiPanel, GenPanel, Inspector, JobsPanel, MediaPool, Preview, StudioPanel, Timeline, fmt } from "./components";
 
 interface Selection {
   trackId: string;
@@ -29,6 +31,9 @@ export function App() {
   const [aiCaps, setAiCaps] = useState<Awaited<ReturnType<typeof api.aiCaps>> | null>(null);
   const [genProviders, setGenProviders] = useState<GenProviderInfo[]>([]);
   const [cameraMoves, setCameraMoves] = useState<CameraMoveInfo[]>([]);
+  const [exportPresets, setExportPresets] = useState<ExportPresetInfo[]>([]);
+  const [exportPresetId, setExportPresetId] = useState("youtube-1080p");
+  const [packs, setPacks] = useState<MarketplacePackInfo[]>([]);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -54,16 +59,20 @@ export function App() {
       for (let attempt = 0; !cancelled && attempt < 40; attempt++) {
         try {
           await refresh();
-          const [presetRes, capsRes, genRes] = await Promise.all([
+          const [presetRes, capsRes, genRes, expRes, marketRes] = await Promise.all([
             api.presets(),
             api.aiCaps(),
             api.genProviders(),
+            api.exportPresets(),
+            api.marketplaceList(),
           ]);
           if (cancelled) return;
           setPresets(presetRes.presets);
           setAiCaps(capsRes);
           setGenProviders(genRes.providers);
           setCameraMoves(genRes.cameraMoves);
+          setExportPresets(expRes.presets);
+          setPacks(marketRes.packs);
           return;
         } catch (err) {
           if (attempt === 39) flash(`Error: ${(err as Error).message}`);
@@ -192,7 +201,12 @@ export function App() {
           </button>
         </div>
         <div className="toolbar-group">
-          <input className="prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Quick AI shot prompt…" />
+          <input
+            className="prompt"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Quick AI shot prompt…"
+          />
           <button
             disabled={busy}
             title="Generate AI video shot & insert onto timeline"
@@ -205,16 +219,35 @@ export function App() {
           >
             🎬 Gen Video
           </button>
+          <select value={exportPresetId} onChange={(e) => setExportPresetId(e.target.value)} title="Export preset">
+            {exportPresets.map((ep) => (
+              <option key={ep.id} value={ep.id}>
+                {ep.label}
+              </option>
+            ))}
+          </select>
           <button
             disabled={busy}
             onClick={() =>
               act(async () => {
-                const res = await api.exportRender();
-                flash(`Export MP4 job ${res.jobId.slice(0, 8)}… started`);
+                const res = await api.exportRender(exportPresetId);
+                flash(`Export (${exportPresetId}) job ${res.jobId.slice(0, 8)}…`);
               })
             }
           >
             📤 Export
+          </button>
+          <button
+            disabled={busy}
+            title="Render YouTube 16:9 + TikTok 9:16 + WebM simultaneously"
+            onClick={() =>
+              act(async () => {
+                const res = await api.batchExport(["youtube-1080p", "tiktok-reels", "webm-vp9"]);
+                flash(`Batch export queued (${res.jobIds.length} targets)`);
+              })
+            }
+          >
+            📦 Batch
           </button>
         </div>
       </header>
@@ -286,6 +319,24 @@ export function App() {
                 flash(`Vedit Gen (${req.kind}): job ${res.jobId.slice(0, 8)}…`);
               })
             }
+          />
+          <StudioPanel
+            packs={packs}
+            project={project}
+            playhead={playhead}
+            busy={busy}
+            onApplyTemplate={(templateId, title) =>
+              act(
+                () => api.applyTemplate(templateId, title ? { title } : {}),
+                "Template applied",
+              )
+            }
+            onRunPlugin={(pluginId) => act(() => api.runPlugin(pluginId), `Plugin ${pluginId} finished`)}
+            onSaveSnapshot={(label) => act(() => api.saveSnapshot(label), `Checkpoint "${label}" saved`)}
+            onRestoreSnapshot={(snapshotId) => act(() => api.restoreSnapshot(snapshotId), "Checkpoint restored")}
+            onAddComment={(text, timecode) => act(() => api.addComment(text, timecode), "Review note added")}
+            onResolveComment={(id, resolved) => act(() => api.resolveComment(id, resolved))}
+            onSeek={setPlayhead}
           />
           <Inspector
             clip={selected?.clip ?? null}

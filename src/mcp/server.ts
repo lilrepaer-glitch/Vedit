@@ -13,6 +13,26 @@ import { detectBeats, detectScenes, detectSilences, trackMotion, windowEnergy } 
 import { autoReframe, beatSync, buildHighlight, removeSilences, trackMotionTo } from "../ai/edit.js";
 import { runGenJob, runStubGenJob, runRealRenderJob, runProxyJob } from "../server/app.js";
 import { CAMERA_MOVES, providerAvailability } from "../ai/gen.js";
+import {
+  addReviewComment,
+  addTimelineMarker,
+  diffProjects,
+  exportYouTubeChapters,
+  listAuditLog,
+  listSnapshots,
+  mergeProjectChanges,
+  resolveReviewComment,
+  restoreSnapshot,
+  saveSnapshot,
+} from "../ext/collab.js";
+import {
+  applyTemplate,
+  installPack,
+  installPackFromFile,
+  listMarketplacePacks,
+  runPlugin,
+} from "../ext/marketplace.js";
+import { getQueueStatus, listExportPresets, runBatchExport, WatchFolderManager } from "../ext/delivery.js";
 import { resolve as resolvePath } from "node:path";
 
 export interface McpContext {
@@ -930,9 +950,11 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   server.registerTool(
     "export.render",
     {
-      description: "Reálný export videa přes FFmpeg (F1) — asynchronní render job, stav přes gen.job_status.",
+      description: "Reálný export videa přes FFmpeg (F1/F5) — H.264 / H.265 / ProRes / WebM + platformní presety, stav přes gen.job_status.",
       inputSchema: {
-        format: z.enum(["mp4", "mov"]).default("mp4"),
+        preset: z.string().optional(),
+        codec: z.enum(["h264", "h265", "prores", "vp9"]).optional(),
+        format: z.enum(["mp4", "mov", "webm"]).default("mp4"),
         width: z.number().int().positive().optional(),
         height: z.number().int().positive().optional(),
         fps: z.number().positive().optional(),
@@ -946,13 +968,45 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           engine(),
           {
             ...args,
-            width: args.width ?? seq.width,
-            height: args.height ?? seq.height,
+            width: args.preset ? args.width : (args.width ?? seq.width),
+            height: args.preset ? args.height : (args.height ?? seq.height),
             duration: sequenceDuration(seq),
           },
           { renderDir: resolvePath(process.cwd(), ".vedit/renders") },
         );
       }),
+  );
+
+  server.registerTool(
+    "export.presets",
+    {
+      description: "F5: dostupné exportní presety (YouTube 1080p/4K, TikTok/Reels, Instagram, LinkedIn, ProRes, WebM).",
+    },
+    async () => ok({ presets: listExportPresets() }),
+  );
+
+  server.registerTool(
+    "export.batch",
+    {
+      description: "F5: hromadný multi-formátový export sekvence pro více platforem najednou.",
+      inputSchema: {
+        presets: z.array(z.string()).min(1),
+      },
+    },
+    async ({ presets }) =>
+      wrapTool(() =>
+        runBatchExport(engine(), presets, {
+          renderDir: resolvePath(process.cwd(), ".vedit/renders"),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "export.queue_status",
+    {
+      description: "F5: přehled fronty renderů a generování (PLAN §4.1).",
+    },
+    async () => ok(getQueueStatus(engine())),
   );
 
   server.registerTool(
@@ -970,6 +1024,381 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           note: "soubor je na disku tohoto stroje; MCP klient si ho může přečíst",
         };
       }),
+  );
+
+  // ---- F5: Collaboration, Checkpoints, Diff, Marketplace & Watch Folders ----
+  const mcpWatchManager = new WatchFolderManager();
+
+  server.registerTool(
+    "project.snapshot",
+    {
+      description: "F5: uloží pojmenovaný checkpoint verze projektu.",
+      inputSchema: {
+        label: z.string().default(""),
+        author: z.string().default("mcp-agent"),
+      },
+    },
+    async ({ label, author }) => wrapTool(() => ({ snapshot: saveSnapshot(engine(), label, author) })),
+  );
+
+  server.registerTool(
+    "project.snapshots",
+    { description: "F5: vypíše uložené checkpointy verze projektu." },
+    async () => ok({ snapshots: listSnapshots(engine()) }),
+  );
+
+  server.registerTool(
+    "project.restore_snapshot",
+    {
+      description: "F5: vrátí projekt do zvoleného checkpointu (jako undo krok).",
+      inputSchema: { snapshotId: idSchema },
+    },
+    async ({ snapshotId }) => wrapTool(() => ({ restored: restoreSnapshot(engine(), snapshotId) })),
+  );
+
+  server.registerTool(
+    "project.diff",
+    {
+      description: "F5: strukturální porovnání aktuálního projektu s uloženým checkpointem nebo jiným .vedit souborem (PLAN §4.1).",
+      inputSchema: {
+        snapshotId: z.string().optional(),
+        otherProjectPath: z.string().optional(),
+      },
+    },
+    async ({ snapshotId, otherProjectPath }) =>
+      wrapTool(async () => {
+        if (snapshotId) {
+          const snap = (engine().project.snapshots ?? []).find((s) => s.id === snapshotId);
+          if (!snap) throw new Error(`snapshot not found: ${snapshotId}`);
+          return { diff: diffProjects(snap.snapshot, engine().project) };
+        }
+        if (otherProjectPath) {
+          const { readFile } = await import("node:fs/promises");
+          const other = JSON.parse(await readFile(resolvePath(otherProjectPath), "utf8"));
+          return { diff: diffProjects(other, engine().project) };
+        }
+        const snaps = engine().project.snapshots ?? [];
+        if (snaps.length > 0) {
+          return { diff: diffProjects(snaps[snaps.length - 1]!.snapshot, engine().project) };
+        }
+        return { diff: diffProjects(engine().project, engine().project) };
+      }),
+  );
+
+  server.registerTool(
+    "collab.merge",
+    {
+      description: "F5: sloučí změny (stopy, klipy, titulky, komentáře) z .vedit souboru spolupracovníka.",
+      inputSchema: {
+        projectPath: z.string(),
+        author: z.string().default("collaborator"),
+      },
+    },
+    async ({ projectPath, author }) =>
+      wrapTool(async () => {
+        const { readFile } = await import("node:fs/promises");
+        const other = JSON.parse(await readFile(resolvePath(projectPath), "utf8"));
+        return { merged: mergeProjectChanges(engine(), other, author) };
+      }),
+  );
+
+  server.registerTool(
+    "collab.add_comment",
+    {
+      description: "F5: přidá časově ukotvený revizní komentář na timeline.",
+      inputSchema: {
+        text: z.string().min(1),
+        timecode: z.number().nonnegative().default(0),
+        author: z.string().default("Reviewer"),
+      },
+    },
+    async (args) => wrapTool(() => ({ comment: addReviewComment(engine(), args) })),
+  );
+
+  server.registerTool(
+    "collab.list_comments",
+    { description: "F5: vypíše revizní komentáře a markery projektu." },
+    async () => ok({ comments: engine().project.comments ?? [], markers: engine().project.markers ?? [] }),
+  );
+
+  server.registerTool(
+    "collab.resolve_comment",
+    {
+      description: "F5: označí revizní komentář jako vyřešený.",
+      inputSchema: { commentId: idSchema, resolved: z.boolean().default(true) },
+    },
+    async ({ commentId, resolved }) =>
+      wrapTool(() => ({ comment: resolveReviewComment(engine(), commentId, resolved) })),
+  );
+
+  server.registerTool(
+    "collab.chapters",
+    {
+      description: "F5: vyexportuje kapitolové značky projektu pro YouTube popis.",
+      inputSchema: {
+        addMarkerTime: z.number().nonnegative().optional(),
+        addMarkerLabel: z.string().optional(),
+      },
+    },
+    async ({ addMarkerTime, addMarkerLabel }) =>
+      wrapTool(() => {
+        if (addMarkerTime != null && addMarkerLabel) {
+          addTimelineMarker(engine(), { time: addMarkerTime, label: addMarkerLabel });
+        }
+        return exportYouTubeChapters(engine().project);
+      }),
+  );
+
+  server.registerTool(
+    "marketplace.list",
+    { description: "F5: katalog šablon motion grafiky a pluginů ve Vedit Marketplace." },
+    async () => ok({ packs: listMarketplacePacks(engine()) }),
+  );
+
+  server.registerTool(
+    "marketplace.install",
+    {
+      description: "F5: nainstaluje šablonu/plugin z Marketplace ID nebo lokálního .veditpack.json souboru.",
+      inputSchema: {
+        packId: z.string().optional(),
+        filePath: z.string().optional(),
+      },
+    },
+    async ({ packId, filePath }) =>
+      wrapTool(async () => {
+        if (filePath) return { pack: await installPackFromFile(engine(), resolvePath(filePath)) };
+        if (!packId) throw new Error("provide packId or filePath");
+        return { pack: installPack(engine(), packId) };
+      }),
+  );
+
+  server.registerTool(
+    "marketplace.apply_template",
+    {
+      description: "F5: aplikuje parametrickou šablonu z Marketplace na aktivní sekvenci.",
+      inputSchema: {
+        templateId: z.string(),
+        params: z.record(z.string()).optional(),
+      },
+    },
+    async ({ templateId, params }) => wrapTool(() => applyTemplate(engine(), templateId, params ?? {})),
+  );
+
+  server.registerTool(
+    "marketplace.run_plugin",
+    {
+      description: "F5: spustí plugin z Marketplace nad aktivním projektem.",
+      inputSchema: {
+        pluginId: z.string(),
+        params: z.record(z.string()).optional(),
+      },
+    },
+    async ({ pluginId, params }) => wrapTool(() => runPlugin(engine(), pluginId, params ?? {})),
+  );
+
+  server.registerTool(
+    "watch.start",
+    {
+      description: "F5: spustí automatický watch-folder render při přidání videa do složky.",
+      inputSchema: {
+        inboxDir: z.string(),
+        outputDir: z.string(),
+        preset: z.string().default("youtube-1080p"),
+        templateId: z.string().optional(),
+      },
+    },
+    async (args) => wrapTool(() => mcpWatchManager.start(args)),
+  );
+
+  server.registerTool(
+    "watch.list",
+    { description: "F5: seznam běžících watch-folderů a zpracovaných souborů." },
+    async () => ok({ watchers: mcpWatchManager.list() }),
+  );
+
+  server.registerTool(
+    "watch.stop",
+    {
+      description: "F5: zastaví watch-folder.",
+      inputSchema: { watchId: idSchema },
+    },
+    async ({ watchId }) => wrapTool(() => ({ stopped: mcpWatchManager.stop(watchId) })),
+  );
+
+  server.registerTool(
+    "audit.list",
+    {
+      description: "F5: vypíše auditní záznam AI a pluginových operací (guardrails).",
+      inputSchema: { limit: z.number().int().positive().max(200).default(50) },
+    },
+    async ({ limit }) => ok({ entries: listAuditLog(engine().project, limit) }),
+  );
+
+  // ---- F5: MCP Resources (PLAN.md §4.2) ----
+  server.registerResource(
+    "project-state",
+    "vedit://project/state",
+    {
+      title: "Active Vedit Project State",
+      description: "Full JSON project document including assets, sequences, comments, markers, and jobs.",
+      mimeType: "application/json",
+    },
+    async (uri) => ({
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(engine().project, null, 2) }],
+    }),
+  );
+
+  server.registerResource(
+    "project-timeline",
+    "vedit://project/timeline",
+    {
+      title: "Active Sequence Timeline",
+      description: "Tracks, clips, keyframes, and total sequence duration.",
+      mimeType: "application/json",
+    },
+    async (uri) => ({
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(engine().timeline(), null, 2) }],
+    }),
+  );
+
+  server.registerResource(
+    "project-captions",
+    "vedit://project/captions",
+    {
+      title: "Sequence Captions (SRT)",
+      description: "Current captions exported in SubRip (.srt) format.",
+      mimeType: "text/plain",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "text/plain",
+          text: captionsToSrt(engine().activeSequence().captions),
+        },
+      ],
+    }),
+  );
+
+  server.registerResource(
+    "project-jobs",
+    "vedit://project/jobs",
+    {
+      title: "Render & AI Generation Queue",
+      description: "Live queue summary of render and generation jobs.",
+      mimeType: "application/json",
+    },
+    async (uri) => ({
+      contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(getQueueStatus(engine()), null, 2) }],
+    }),
+  );
+
+  server.registerResource(
+    "marketplace-catalog",
+    "vedit://marketplace/catalog",
+    {
+      title: "Vedit Template & Plugin Marketplace",
+      description: "Installed and built-in motion templates and workflow plugins.",
+      mimeType: "application/json",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(listMarketplacePacks(engine()), null, 2),
+        },
+      ],
+    }),
+  );
+
+  // ---- F5: MCP Workflow Prompts (PLAN.md §4.2) ----
+  server.registerPrompt(
+    "highlight-reel",
+    {
+      title: "Build Highlight Reel",
+      description: "Analyze footage energy/motion/scenes and assemble a punchy highlight cut.",
+      argsSchema: {
+        targetDuration: z.string().optional().describe("Target duration in seconds (default 20)"),
+      },
+    },
+    ({ targetDuration }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Create a ${targetDuration ?? "20"}s highlight reel from the active Vedit project: save a checkpoint first with project.snapshot, run edit.highlight, apply plg-cinematic-lut via marketplace.run_plugin, and queue export.render with preset "youtube-1080p".`,
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "shorts-from-longform",
+    {
+      title: "Vertical Shorts / Reels from Long Video",
+      description: "Cut silences, reframe to 9:16 vertical, generate captions, and export for TikTok/Reels.",
+      argsSchema: {
+        hookTitle: z.string().optional().describe("Opening hook headline"),
+      },
+    },
+    ({ hookTitle }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Turn the active long-form video into a vertical 9:16 Short: save a project.snapshot, run edit.remove_silences, apply marketplace.apply_template "tpl-tiktok-shorts" with title "${hookTitle ?? "Best Moment"}", run edit.auto_reframe on the lead clip, and export with preset "tiktok-reels".`,
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "promo-spot",
+    {
+      title: "Product Promo Spot with Motion Graphics",
+      description: "Generate hero AI B-roll, apply promo motion graphics template, voiceover, and multi-format export.",
+      argsSchema: {
+        productName: z.string().optional(),
+      },
+    },
+    ({ productName }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Produce a commercial promo spot for "${productName ?? "Vedit Desktop"}": generate two consecutive AI shots using gen.video with cameraMove "push-in" and shot continuity, apply marketplace.apply_template "tpl-promo-spot", add voiceover via gen.voice, and batch export for "youtube-1080p" and "linkedin-hd".`,
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "captions-translate-export",
+    {
+      title: "Transcribe, Translate Captions & Export",
+      description: "Transcribe spoken audio into captions, translate them to target language, and render MP4 + SRT.",
+      argsSchema: {
+        targetLanguage: z.string().optional().describe("Target language code (e.g. cs, de, es, en)"),
+      },
+    },
+    ({ targetLanguage }) => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Transcribe the main speech track using captions.transcribe, translate all caption segments cleanly into "${targetLanguage ?? "en"}" via captions.translate (replace=true), export standalone SRT via captions.export, and render burned-in video with export.render.`,
+          },
+        },
+      ],
+    }),
   );
 
   return server;

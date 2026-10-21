@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // prebuild.cjs — builds backend + frontend and stages sidecar runtime into apps/desktop/src-tauri/resources/
-// Called automatically by Tauri beforeBuildCommand regardless of working directory.
+// Cross-platform (Windows NSIS, macOS DMG/App, Linux AppImage/DEB).
 
 const fs = require('fs');
 const path = require('path');
@@ -12,16 +12,23 @@ const desktopDir = path.resolve(srcTauri, '..');
 const root = path.resolve(desktopDir, '..', '..');
 const resources = path.join(srcTauri, 'resources');
 const rootRequire = createRequire(path.join(root, 'package.json'));
+const isWin = process.platform === 'win32';
+const exeSuffix = isWin ? '.exe' : '';
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
-function copyFile(src, dst) {
+function copyExecutable(src, dst) {
   if (fs.existsSync(src)) {
     ensureDir(path.dirname(dst));
     fs.copyFileSync(src, dst);
-    console.log(`[prebuild] copied ${src} -> ${dst}`);
+    if (!isWin) {
+      try {
+        fs.chmodSync(dst, 0o755);
+      } catch {}
+    }
+    console.log(`[prebuild] staged executable ${src} -> ${dst}`);
     return true;
   }
   return false;
@@ -40,18 +47,18 @@ function copyDir(src, dst) {
   return true;
 }
 
-console.log('[prebuild] building Vedit backend & desktop UI...');
+console.log(`[prebuild] building Vedit backend & desktop UI (${process.platform}/${process.arch})...`);
 execSync('npm run build', { cwd: root, stdio: 'inherit' });
 execSync('npm run build', { cwd: desktopDir, stdio: 'inherit' });
 
-console.log('[prebuild] staging resources for Tauri NSIS bundle...');
+console.log('[prebuild] staging resources for Tauri bundle...');
 ensureDir(resources);
 
-// Ensure empty target/release/bundle/msi exists so workflow scripts checking bundle/msi/*.msi
+// Ensure empty target/release/bundle/msi exists so Windows release scripts checking bundle/msi/*.msi
 // when building NSIS-only releases cleanly receive empty match instead of missing-directory error.
 ensureDir(path.join(srcTauri, 'target', 'release', 'bundle', 'msi'));
 
-// 1) Standalone sidecar server (no workspace symlinks, no duplicate 180 MB ffmpeg npm packages)
+// 1) Standalone sidecar server (no workspace symlinks, no duplicate ffmpeg npm packages)
 const serverDir = path.join(resources, 'server');
 ensureDir(serverDir);
 copyDir(path.join(root, 'dist'), path.join(serverDir, 'dist'));
@@ -83,18 +90,18 @@ execSync('npm install --omit=dev --no-audit --no-fund', {
   timeout: 180000,
 });
 
-// 2) FFmpeg & ffprobe binaries
+// 2) FFmpeg & ffprobe binaries (native name on macOS/Linux, .exe on Windows)
 const binDir = path.join(resources, 'bin');
 ensureDir(binDir);
 try {
   const ffmpegPath = rootRequire('@ffmpeg-installer/ffmpeg').path;
-  copyFile(ffmpegPath, path.join(binDir, 'ffmpeg.exe'));
+  copyExecutable(ffmpegPath, path.join(binDir, `ffmpeg${exeSuffix}`));
 } catch (e) {
   console.warn('[prebuild] ffmpeg staging warning:', e.message);
 }
 try {
   const ffprobePath = rootRequire('@ffprobe-installer/ffprobe').path;
-  copyFile(ffprobePath, path.join(binDir, 'ffprobe.exe'));
+  copyExecutable(ffprobePath, path.join(binDir, `ffprobe${exeSuffix}`));
 } catch (e) {
   console.warn('[prebuild] ffprobe staging warning:', e.message);
 }
@@ -102,8 +109,8 @@ try {
 // 3) Embedded Node.js runtime
 const nodeDir = path.join(resources, 'node');
 ensureDir(nodeDir);
-const stagedNode = path.join(nodeDir, 'node.exe');
-copyFile(process.execPath, stagedNode);
+const stagedNode = path.join(nodeDir, `node${exeSuffix}`);
+copyExecutable(process.execPath, stagedNode);
 
 // 4) Smoke-verify packaged sidecar entry executes cleanly
 execFileSync(stagedNode, [path.join(serverDir, 'dist', 'cli', 'index.js'), '--help'], {

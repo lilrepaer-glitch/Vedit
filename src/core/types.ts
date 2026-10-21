@@ -131,6 +131,42 @@ export interface Job {
   updatedAt: string;
 }
 
+export interface ReviewComment {
+  id: ID;
+  author: string;
+  text: string;
+  /** timeline position in seconds */
+  timecode: number;
+  resolved: boolean;
+  createdAt: string;
+}
+
+export interface TimelineMarker {
+  id: ID;
+  time: number;
+  label: string;
+  color?: string;
+}
+
+export interface AuditEntry {
+  id: ID;
+  timestamp: string;
+  actor: "ui" | "api" | "mcp" | "plugin" | "watch";
+  action: string;
+  summary: string;
+}
+
+export interface ProjectSnapshotMeta {
+  id: ID;
+  label: string;
+  author?: string;
+  createdAt: string;
+  sequenceDuration: number;
+  clipCount: number;
+  /** serialized clean copy of project state (without nested snapshots) */
+  snapshot: Omit<Project, "snapshots" | "auditLog">;
+}
+
 export interface Project {
   format: "vedit-project";
   formatVersion: 1;
@@ -142,6 +178,12 @@ export interface Project {
   sequences: Sequence[];
   activeSequenceId: ID;
   jobs: Job[];
+  /** F5: collaboration review notes, chapter markers, checkpoints, marketplace & audit */
+  comments?: ReviewComment[];
+  markers?: TimelineMarker[];
+  snapshots?: ProjectSnapshotMeta[];
+  auditLog?: AuditEntry[];
+  installedPacks?: string[];
 }
 
 export function clipEnd(clip: Clip): number {

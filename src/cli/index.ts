@@ -359,6 +359,89 @@ mcpHttp.action(async (opts: { port: string }) => {
   startMcpHttp({ port: Number(opts.port) });
 });
 
+// ---- F5: Export Presets, Watch Folders, Marketplace & Checkpoints CLI ----
+program
+  .command("export-presets")
+  .description("F5: vypíše dostupné exportní presety a kodeky")
+  .action(async () => {
+    const { listExportPresets } = await import("../ext/delivery.js");
+    for (const p of listExportPresets()) {
+      console.log(`${p.id.padEnd(18)} ${p.codec.toUpperCase().padEnd(7)} .${p.format.padEnd(5)} ${p.label}`);
+    }
+  });
+
+const batchCmd = program.command("batch-export").description("F5: vyrenderuje sekvenci do více presetů najednou");
+projectPathOpt(batchCmd);
+batchCmd.requiredOption("--presets <list>", "seznam presetů oddělený čárkou (např. youtube-1080p,tiktok-reels)");
+batchCmd.option("--out-dir <dir>", "výstupní složka", ".vedit/renders");
+batchCmd.action(async (opts: { project: string; presets: string; outDir: string }) => {
+  const { renderSequence, resolveExportPreset } = await import("../render/export.js");
+  const { join } = await import("node:path");
+  const engine = await loadOrInitEngine(resolve(opts.project));
+  const ids = opts.presets.split(",").map((s) => s.trim()).filter(Boolean);
+  for (const id of ids) {
+    const preset = resolveExportPreset(id);
+    if (!preset) throw new Error(`neznámý preset: ${id}`);
+    const outPath = join(resolve(opts.outDir), `${id}.${preset.format}`);
+    const r = await renderSequence(engine.project, { outPath, preset: id });
+    console.log(`✓ ${id} → ${r.outPath} (${r.codec}, ${r.width}×${r.height}, ${r.sizeBytes} B)`);
+  }
+});
+
+const watchCmd = program.command("watch").description("F5: watch-folder — automatický render nově přidaných videí");
+watchCmd.requiredOption("--in <dir>", "vstupní složka");
+watchCmd.requiredOption("--out <dir>", "výstupní složka");
+watchCmd.option("--preset <id>", "exportní preset", "youtube-1080p");
+watchCmd.option("--template <id>", "volitelná šablona z Marketplace");
+watchCmd.action(async (opts: { in: string; out: string; preset: string; template?: string }) => {
+  const { WatchFolderManager } = await import("../ext/delivery.js");
+  const mgr = new WatchFolderManager();
+  await mgr.start(
+    { inboxDir: opts.in, outputDir: opts.out, preset: opts.preset, templateId: opts.template },
+    (item) => console.log(`[watch] hotovo → ${item.outPath} (${item.sizeBytes} B)`),
+  );
+  console.log(`Sleduji ${resolve(opts.in)} → ${resolve(opts.out)} (preset: ${opts.preset})…`);
+});
+
+program
+  .command("marketplace")
+  .description("F5: vypíše šablony a pluginy ve Vedit Marketplace")
+  .action(async () => {
+    const { listMarketplacePacks } = await import("../ext/marketplace.js");
+    for (const p of listMarketplacePacks()) {
+      console.log(`[${p.kind.padEnd(8)}] ${p.id.padEnd(22)} ${p.name} (${p.category})`);
+    }
+  });
+
+const applyTplCmd = program.command("apply-template").description("F5: aplikuje šablonu z Marketplace na projekt");
+projectPathOpt(applyTplCmd);
+applyTplCmd.argument("<templateId>", "ID šablony (např. tpl-youtube-intro)");
+applyTplCmd.option("--title <text>", "hlavní titulek");
+applyTplCmd.option("--subtitle <text>", "podtitulek");
+applyTplCmd.option("--cta <text>", "CTA text");
+applyTplCmd.action(async (templateId: string, opts: { project: string; title?: string; subtitle?: string; cta?: string }) => {
+  const { applyTemplate } = await import("../ext/marketplace.js");
+  await withEngine(opts, (engine) => {
+    const res = applyTemplate(engine, templateId, {
+      ...(opts.title ? { title: opts.title } : {}),
+      ...(opts.subtitle ? { subtitle: opts.subtitle } : {}),
+      ...(opts.cta ? { cta: opts.cta } : {}),
+    });
+    console.log(`aplikováno "${res.appliedName}" (+${res.captionsAdded} titulků, ${res.sequence.width}×${res.sequence.height})`);
+  });
+});
+
+const diffCmd = program.command("diff").description("F5: porovná dva .vedit soubory projektu");
+diffCmd.argument("<baseFile>", "původní .vedit soubor");
+diffCmd.argument("<targetFile>", "nový .vedit soubor");
+diffCmd.action(async (baseFile: string, targetFile: string) => {
+  const { readFile } = await import("node:fs/promises");
+  const { diffProjects } = await import("../ext/collab.js");
+  const a = JSON.parse(await readFile(resolve(baseFile), "utf8"));
+  const b = JSON.parse(await readFile(resolve(targetFile), "utf8"));
+  console.log(JSON.stringify(diffProjects(a, b), null, 2));
+});
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(`chyba: ${(err as Error).message}`);
   process.exit(1);

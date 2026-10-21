@@ -6,7 +6,30 @@ import { resolve as resolvePath } from "node:path";
 import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
 import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
-import { renderSequence } from "../render/export.js";
+import { renderSequence, resolveExportPreset, type VideoCodecId } from "../render/export.js";
+import {
+  addReviewComment,
+  addTimelineMarker,
+  deleteReviewComment,
+  diffProjects,
+  exportYouTubeChapters,
+  listAuditLog,
+  listSnapshots,
+  mergeProjectChanges,
+  resolveReviewComment,
+  restoreSnapshot,
+  saveSnapshot,
+} from "../ext/collab.js";
+import {
+  applyTemplate,
+  installPack,
+  installPackFromFile,
+  listMarketplacePacks,
+  registerPack,
+  runPlugin,
+  uninstallPack,
+} from "../ext/marketplace.js";
+import { getQueueStatus, listExportPresets, runBatchExport, WatchFolderManager } from "../ext/delivery.js";
 import { speechCapabilities } from "../ai/speech.js";
 import { generateVoiceover, transcribeToCaptions } from "../ai/voiceover.js";
 import { detectBeats, detectScenes, detectSilences, trackMotion, windowEnergy } from "../ai/analysis.js";
@@ -306,20 +329,28 @@ export function runGenJob(
 export function runRealRenderJob(
   engine: VeditEngine,
   input: Record<string, unknown>,
-  opts: { renderDir: string },
+  opts: { renderDir: string; onUpdate?: () => void },
 ): { jobId: string } {
-  const job = engine.createJob("render", { ...input, simulated: false });
-  const outPath = resolvePath(opts.renderDir, `${job.id}.${String(input.format ?? "mp4")}`);
+  const presetObj = typeof input.preset === "string" ? resolveExportPreset(input.preset) : undefined;
+  const format = String(presetObj?.format ?? input.format ?? "mp4");
+  const job = engine.createJob("render", { ...input, format, simulated: false });
+  const outPath = resolvePath(opts.renderDir, `${job.id}.${format}`);
   void (async () => {
     try {
       engine.updateJob(job.id, { status: "running", progress: 1 });
+      opts.onUpdate?.();
       const result = await renderSequence(engine.project, {
         outPath,
+        preset: presetObj?.id,
+        codec: input.codec != null ? (String(input.codec) as VideoCodecId) : presetObj?.codec,
         width: input.width != null ? Number(input.width) : undefined,
         height: input.height != null ? Number(input.height) : undefined,
         fps: input.fps != null ? Number(input.fps) : undefined,
         crf: input.crf != null ? Number(input.crf) : undefined,
-        onProgress: (pct) => engine.updateJob(job.id, { progress: pct }),
+        onProgress: (pct) => {
+          engine.updateJob(job.id, { progress: pct });
+          opts.onUpdate?.();
+        },
       });
       engine.updateJob(job.id, {
         status: "done",
@@ -330,12 +361,16 @@ export function runRealRenderJob(
           width: result.width,
           height: result.height,
           fps: result.fps,
+          codec: result.codec,
+          preset: result.preset,
           sizeBytes: result.sizeBytes,
           warnings: result.warnings,
         },
       });
+      opts.onUpdate?.();
     } catch (err) {
       engine.updateJob(job.id, { status: "failed", error: (err as Error).message });
+      opts.onUpdate?.();
     }
   })();
   return { jobId: job.id };
@@ -1012,6 +1047,206 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
     } catch (err) {
       next(err);
     }
+  });
+
+  // ---- F5: Export Presets, Batch Queue, Watch Folders, Marketplace & Collaboration ----
+  const watchManager = new WatchFolderManager();
+
+  app.get("/api/v1/export/presets", (_req, res) => {
+    res.json({ presets: listExportPresets() });
+  });
+
+  app.post("/api/v1/projects/:id/export/batch", wrap((req, res, engine) => {
+    try {
+      const presets = Array.isArray(req.body?.presets) ? req.body.presets.map(String) : [];
+      const result = runBatchExport(engine, presets, {
+        renderDir: resolvePath(dataDir, "renders"),
+        onUpdate: () => opts.onJob?.(req.params.id!, engine),
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.get("/api/v1/projects/:id/export/queue", wrap((_req, res, engine) => {
+    res.json(getQueueStatus(engine));
+  }, registry));
+
+  // Snapshots / Checkpoints / Diff / Merge
+  app.get("/api/v1/projects/:id/snapshots", wrap((_req, res, engine) => {
+    res.json({ snapshots: listSnapshots(engine) });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/snapshots", wrap((req, res, engine) => {
+    const label = String(req.body?.label ?? "");
+    const author = req.body?.author != null ? String(req.body.author) : "editor";
+    res.status(201).json({ snapshot: saveSnapshot(engine, label, author) });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/snapshots/:snapId/restore", wrap((req, res, engine) => {
+    try {
+      res.json({ restored: restoreSnapshot(engine, String(req.params.snapId)) });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/diff", wrap((req, res, engine) => {
+    const snapId = req.body?.snapshotId != null ? String(req.body.snapshotId) : undefined;
+    if (snapId) {
+      const found = (engine.project.snapshots ?? []).find((s) => s.id === snapId);
+      if (!found) return badRequest(res, `snapshot not found: ${snapId}`);
+      res.json({ diff: diffProjects(found.snapshot, engine.project) });
+      return;
+    }
+    if (req.body?.otherProject) {
+      res.json({ diff: diffProjects(engine.project, req.body.otherProject) });
+      return;
+    }
+    badRequest(res, "provide snapshotId or otherProject");
+  }, registry));
+
+  app.post("/api/v1/projects/:id/merge", wrap((req, res, engine) => {
+    if (!req.body?.project) return badRequest(res, "project payload is required");
+    const merged = mergeProjectChanges(engine, req.body.project, String(req.body.author ?? "collaborator"));
+    res.json({ merged });
+  }, registry));
+
+  // Timecoded Review Comments, Markers & Chapters
+  app.get("/api/v1/projects/:id/comments", wrap((_req, res, engine) => {
+    res.json({ comments: engine.project.comments ?? [] });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/comments", wrap((req, res, engine) => {
+    try {
+      const comment = addReviewComment(engine, {
+        author: req.body?.author != null ? String(req.body.author) : undefined,
+        text: String(req.body?.text ?? ""),
+        timecode: Number(req.body?.timecode ?? 0),
+      });
+      res.status(201).json({ comment });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.patch("/api/v1/projects/:id/comments/:commentId", wrap((req, res, engine) => {
+    try {
+      const resolved = req.body?.resolved !== false;
+      res.json({ comment: resolveReviewComment(engine, String(req.params.commentId), Boolean(resolved)) });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.delete("/api/v1/projects/:id/comments/:commentId", wrap((req, res, engine) => {
+    deleteReviewComment(engine, String(req.params.commentId));
+    res.json({ ok: true });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/markers", wrap((req, res, engine) => {
+    const marker = addTimelineMarker(engine, {
+      time: Number(req.body?.time ?? 0),
+      label: String(req.body?.label ?? "Marker"),
+      color: req.body?.color != null ? String(req.body.color) : undefined,
+    });
+    res.status(201).json({ marker });
+  }, registry));
+
+  app.get("/api/v1/projects/:id/chapters", wrap((_req, res, engine) => {
+    res.json(exportYouTubeChapters(engine.project));
+  }, registry));
+
+  app.get("/api/v1/projects/:id/audit", wrap((req, res, engine) => {
+    const limit = req.query.limit ? Number(req.query.limit) : 50;
+    res.json({ entries: listAuditLog(engine.project, limit) });
+  }, registry));
+
+  // Marketplace (Templates & Plugins)
+  app.get("/api/v1/marketplace", (req, res) => {
+    const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+    const engine = projectId && registry.has(projectId) ? registry.get(projectId) : undefined;
+    res.json({ packs: listMarketplacePacks(engine) });
+  });
+
+  app.post("/api/v1/projects/:id/marketplace/install", wrap(async (req, res, engine) => {
+    try {
+      if (req.body?.filePath) {
+        const pack = await installPackFromFile(engine, String(req.body.filePath));
+        res.status(201).json({ pack });
+        return;
+      }
+      if (req.body?.manifest) {
+        const registered = registerPack(req.body.manifest);
+        const pack = installPack(engine, registered.id);
+        res.status(201).json({ pack });
+        return;
+      }
+      const pack = installPack(engine, String(req.body?.packId ?? ""));
+      res.status(201).json({ pack });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.delete("/api/v1/projects/:id/marketplace/:packId", wrap((req, res, engine) => {
+    uninstallPack(engine, String(req.params.packId));
+    res.json({ ok: true });
+  }, registry));
+
+  app.post("/api/v1/projects/:id/marketplace/apply-template", wrap((req, res, engine) => {
+    try {
+      const result = applyTemplate(
+        engine,
+        String(req.body?.templateId ?? ""),
+        (req.body?.params as Record<string, string> | undefined) ?? {},
+      );
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/marketplace/run-plugin", wrap((req, res, engine) => {
+    try {
+      const result = runPlugin(
+        engine,
+        String(req.body?.pluginId ?? ""),
+        (req.body?.params as Record<string, string> | undefined) ?? {},
+      );
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  // Watch Folders
+  app.get("/api/v1/watch-folders", (_req, res) => {
+    res.json({ watchers: watchManager.list() });
+  });
+
+  app.post("/api/v1/watch-folders", async (req, res) => {
+    try {
+      if (!req.body?.inboxDir || !req.body?.outputDir) {
+        return badRequest(res, "inboxDir and outputDir are required");
+      }
+      const watcher = await watchManager.start({
+        id: req.body.id != null ? String(req.body.id) : undefined,
+        inboxDir: String(req.body.inboxDir),
+        outputDir: String(req.body.outputDir),
+        preset: req.body.preset != null ? String(req.body.preset) : undefined,
+        templateId: req.body.templateId != null ? String(req.body.templateId) : undefined,
+        pollMs: req.body.pollMs != null ? Number(req.body.pollMs) : undefined,
+      });
+      res.status(201).json({ watcher });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  });
+
+  app.delete("/api/v1/watch-folders/:watchId", (req, res) => {
+    res.json({ ok: watchManager.stop(String(req.params.watchId)) });
   });
 
   // error handler → JSON
