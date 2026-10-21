@@ -39,7 +39,7 @@ export async function generateVoiceover(
 ): Promise<VoiceoverResult> {
   const caps = await speechCapabilities();
   if (!caps.tts.available) {
-    throw new Error("TTS engine není k dispozici (nainstaluj python/requirements.txt do .venv-ai)");
+    throw new Error("TTS engine is not available (install python/requirements.txt into .venv-ai)");
   }
   const scriptTts = await ttsScript(input.script, {
     voice: input.voice ?? "cs",
@@ -114,7 +114,7 @@ export async function transcribeToCaptions(
   const caps = await speechCapabilities();
   const external = Boolean(process.env.VEDIT_ASR_CMD);
   if (!caps.asr.available && !external) {
-    throw new Error("ASR engine není k dispozici (pocketsphinx nebo VEDIT_ASR_CMD)");
+    throw new Error("ASR engine is not available (install pocketsphinx or set VEDIT_ASR_CMD)");
   }
   const asset = engine.findAsset(assetId);
   const workDir = await mkdtemp(join(tmpdir(), "vedit-asr-"));

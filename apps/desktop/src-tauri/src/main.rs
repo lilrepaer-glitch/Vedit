@@ -61,12 +61,16 @@ fn default_user_data_dir(fallback: &Path) -> PathBuf {
     fallback.join("data")
 }
 
-fn wait_for_port(port: u16, timeout_ms: u64) {
+fn is_port_open(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(80)).is_ok()
+}
+
+fn wait_for_port(port: u16, timeout_ms: u64) {
     let step = Duration::from_millis(80);
     let max_tries = (timeout_ms / 80).max(1);
     for _ in 0..max_tries {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(80)).is_ok() {
+        if is_port_open(port) {
             return;
         }
         std::thread::sleep(step);
@@ -77,6 +81,10 @@ fn main() {
     tauri::Builder::default()
         .manage(Sidecar(std::sync::Mutex::new(None)))
         .setup(|app| {
+            if is_port_open(47000) {
+                return Ok(());
+            }
+
             let res = app
                 .path()
                 .resource_dir()
@@ -124,7 +132,7 @@ fn main() {
 
             let child = cmd.spawn().map_err(|e| format!("start API server: {e}"))?;
             *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
-            wait_for_port(47000, 3500);
+            wait_for_port(47000, 8000);
             Ok(())
         })
         .build(tauri::generate_context!())

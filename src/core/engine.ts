@@ -585,11 +585,11 @@ export class VeditEngine {
     if (track.locked) throw new Error(`track is locked: ${track.name}`);
     const end = clipEnd(left);
     const right = track.clips.find((c) => Math.abs(c.start - end) < 0.02);
-    if (!right) throw new Error("roll potřebuje sousední klip vpravo (bez mezery)");
+    if (!right) throw new Error("roll requires an adjacent clip on the right (no gap)");
     const maxRight = right.duration - 0.01;
     const maxLeft = -(left.duration - 0.01);
-    if (delta > maxRight) throw new Error(`roll delta překračuje délku souseda (max ${maxRight.toFixed(2)}s)`);
-    if (delta < maxLeft) throw new Error(`roll delta překračuje délku klipu (min ${maxLeft.toFixed(2)}s)`);
+    if (delta > maxRight) throw new Error(`roll delta exceeds right neighbor duration (max ${maxRight.toFixed(2)}s)`);
+    if (delta < maxLeft) throw new Error(`roll delta exceeds clip duration (min ${maxLeft.toFixed(2)}s)`);
     this.commit(`clip.roll "${left.name}" ${delta > 0 ? "+" : ""}${delta.toFixed(2)}s`, () => {
       left.duration += delta;
       left.out = left.in + left.duration;
@@ -600,16 +600,16 @@ export class VeditEngine {
     return { left, right };
   }
 
-  /** Slip edit: posune obsah klipu (in/out) bez pohybu na timeline. */
+  /** Slip edit: shifts clip media in/out points without moving timeline position. */
   slipClip(clipId: ID, delta: number, trackId?: ID): Clip {
     const { track, clip } = trackId ? this.findClip(trackId, clipId) : this.findClipAnywhere(clipId);
     if (track.locked) throw new Error(`track is locked: ${track.name}`);
     const newIn = clip.in + delta;
     const newOut = clip.out + delta;
-    if (newIn < 0) throw new Error("slip by přetáhl začátek zdroje (in < 0)");
+    if (newIn < 0) throw new Error("slip would go before media start (in < 0)");
     const asset = this.project.assets.find((a) => a.id === clip.assetId);
     if (asset?.duration != null && newOut > asset.duration + 0.01) {
-      throw new Error(`slip by přetáhl konec zdroje (out > ${asset.duration.toFixed(2)}s)`);
+      throw new Error(`slip would exceed media end (out > ${asset.duration.toFixed(2)}s)`);
     }
     this.commit(`clip.slip "${clip.name}" ${delta > 0 ? "+" : ""}${delta.toFixed(2)}s`, () => {
       clip.in = newIn;

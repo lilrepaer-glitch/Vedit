@@ -64,10 +64,10 @@ export async function removeSilences(
     track = engine.findTrack(opts.trackId);
   } else {
     track = seq.tracks.find((t) => t.kind === "video" || t.kind === "audio")!;
-    if (!track) throw new Error("žádná stopa k analýze");
+    if (!track) throw new Error("No track found for analysis");
   }
   const clips = [...track.clips].sort((a, b) => a.start - b.start);
-  if (clips.length === 0) throw new Error(`stopa ${track.name} nemá klipy`);
+  if (clips.length === 0) throw new Error(`Track ${track.name} has no clips`);
 
   interface Plan {
     clip: Clip;
@@ -193,7 +193,7 @@ export async function buildHighlight(
     });
   } else {
     const track = opts.trackId ? engine.findTrack(opts.trackId) : seq.tracks.find((t) => t.kind === "video");
-    if (!track || track.clips.length === 0) throw new Error("žádný zdroj pro highlight");
+    if (!track || track.clips.length === 0) throw new Error("No source clips available for highlight");
     for (const clip of [...track.clips].sort((a, b) => a.start - b.start)) {
       sources.push({
         assetId: clip.assetId,
@@ -231,7 +231,7 @@ export async function buildHighlight(
       });
     }
   }
-  if (scored.length === 0) throw new Error("nepodařilo se naskórovat žádné okno");
+  if (scored.length === 0) throw new Error("Could not score any highlight windows");
 
   // výběr nejlepších nepřekrývajících se oken do targetDuration
   const picked: typeof scored = [];
@@ -246,7 +246,7 @@ export async function buildHighlight(
     total += w.end - w.start;
     if (total >= targetDuration) break;
   }
-  if (picked.length === 0) throw new Error("žádné okno se nevešlo do cílové délky");
+  if (picked.length === 0) throw new Error("No highlight window fit within target duration");
 
   // sestavení na novou stopu Highlights (podle času v assetu)
   picked.sort((a, b) => (a.assetId === b.assetId ? a.start - b.start : a.assetId.localeCompare(b.assetId)));
@@ -383,7 +383,7 @@ export async function trackMotionTo(
       easing: "linear",
     });
   }
-  if (keyframes.length === 0) throw new Error("žádný pohyb v dosahu cílového klipu");
+  if (keyframes.length === 0) throw new Error("No motion detected in target clip range");
 
   engine.transaction("ai.trackMotion", () => {
     engine.addKeyframes(target.id, keyframes);
