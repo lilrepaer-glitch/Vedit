@@ -110,11 +110,13 @@ export function MediaPool({
       <div
         onDragOver={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setDragging(true);
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setDragging(false);
           void handleFiles(e.dataTransfer.files);
         }}
@@ -187,7 +189,20 @@ export function MediaPool({
             );
           })
           .map((a) => (
-            <li key={a.id} className="asset" style={{ flexWrap: "wrap", gap: 4 }}>
+            <li
+              key={a.id}
+              className="asset"
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData("application/x-vedit-asset-id", a.id);
+                e.dataTransfer.effectAllowed = "copy";
+              }}
+              style={{ flexWrap: "wrap", gap: 4, cursor: "grab" }}
+              title="Drag onto any timeline track or click + Add"
+            >
+              <span className="muted" style={{ userSelect: "none", fontSize: 12 }}>
+                ⠿
+              </span>
               <span className={`badge badge-${a.kind}`}>{a.kind}</span>
               <span
                 className="asset-name"
@@ -1145,6 +1160,7 @@ export function Timeline({
   onAddTrack,
   onUpdateTrack,
   onClipEdit,
+  onDropOnTrack,
 }: {
   project: Project;
   selection: { trackId: string; clipId: string } | null;
@@ -1159,6 +1175,7 @@ export function Timeline({
     patch: { muted?: boolean; solo?: boolean; locked?: boolean; volumeDb?: number },
   ) => void;
   onClipEdit: (clipId: string, patch: Record<string, unknown>) => void;
+  onDropOnTrack: (trackId: string, start: number, files: FileList | null, assetId?: string) => void;
 }) {
   const seq = project.sequences.find((s) => s.id === project.activeSequenceId)!;
   const duration = Math.max(20, ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)));
@@ -1167,6 +1184,7 @@ export function Timeline({
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [waveCache, setWaveCache] = useState<Record<string, number[]>>({});
   const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number; duration: number } | null>(null);
+  const [dropHoverTrackId, setDropHoverTrackId] = useState<string | null>(null);
 
   // Load real audio waveform peaks lazily for visible audio/video assets
   useEffect(() => {
@@ -1379,7 +1397,34 @@ export function Timeline({
                   </div>
                 )}
               </div>
-              <div className="track-lane">
+              <div
+                className="track-lane"
+                onDragOver={(e) => {
+                  if (track.locked) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.dataTransfer.dropEffect = "copy";
+                  if (dropHoverTrackId !== track.id) setDropHoverTrackId(track.id);
+                }}
+                onDragLeave={() => {
+                  if (dropHoverTrackId === track.id) setDropHoverTrackId(null);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDropHoverTrackId(null);
+                  if (track.locked) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const rawStart = Math.max(0, (e.clientX - rect.left) / zoom);
+                  const snapped = applySnap(rawStart, "");
+                  const assetId = e.dataTransfer.getData("application/x-vedit-asset-id") || undefined;
+                  onDropOnTrack(track.id, snapped, e.dataTransfer.files, assetId);
+                }}
+                style={{
+                  background: dropHoverTrackId === track.id ? "rgba(79, 140, 255, 0.16)" : undefined,
+                  outline: dropHoverTrackId === track.id ? "1px dashed #4f8cff" : undefined,
+                }}
+              >
                 {track.clips.map((clip) => {
                   const selected = selection?.clipId === clip.id;
                   const visStart = dragPreview?.clipId === clip.id ? dragPreview.start : clip.start;

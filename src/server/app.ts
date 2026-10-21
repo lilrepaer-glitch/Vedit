@@ -1,9 +1,10 @@
 // REST API (PLAN.md §5) — REST na /api/v1 + WebSocket události.
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { createReadStream, existsSync } from "node:fs";
-import { access, mkdir, stat, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
+import { access, mkdir, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
@@ -569,7 +570,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.5.1", scope: "F0–F9 Broadcast Studio" });
+    res.json({ ok: true, name: "vedit", version: "0.5.2", scope: "F0–F9 Broadcast Studio" });
   });
 
   app.get("/api/v1/projects", (_req, res) => {
@@ -1380,27 +1381,33 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
     }
   }, registry));
 
-  // Native Drag & Drop / File Picker upload straight into local dataDir/imports with automatic ffprobe
+  // Native Drag & Drop / File Picker zero-buffer streaming upload straight into local dataDir/imports (unlimited GB size!)
   app.post(
     "/api/v1/projects/:id/assets/upload",
-    express.raw({ type: "*/*", limit: "512mb" }),
     wrap(async (req, res, engine) => {
       const rawName = String(req.query.name ?? "imported.mp4");
       const safeName = basename(rawName).replace(/[^a-zA-Z0-9._-]+/g, "_") || "imported.mp4";
       const importsDir = resolvePath(dataDir, "imports");
       await mkdir(importsDir, { recursive: true });
       const targetPath = join(importsDir, `${Date.now()}-${safeName}`);
-      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
-      if (buf.length === 0) {
+
+      // Stream raw body directly to disk so multi-GB 4K/8K MP4/MKV/MOV files never buffer in RAM or hit 512MB caps!
+      if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+        await writeFile(targetPath, req.body);
+      } else {
+        await pipeline(req, createWriteStream(targetPath));
+      }
+      const writtenStat = await stat(targetPath);
+      if (writtenStat.size === 0) {
+        await unlink(targetPath).catch(() => {});
         return badRequest(res, "Uploaded media body is empty");
       }
-      await writeFile(targetPath, buf);
 
       const ext = extname(safeName).toLowerCase();
       const inferredKind: AssetKind =
-        /\.(wav|mp3|ogg|flac|m4a|aac)$/i.test(ext)
+        /\.(wav|mp3|ogg|flac|m4a|aac|opus)$/i.test(ext)
           ? "audio"
-          : /\.(png|jpe?g|webp|gif|bmp)$/i.test(ext)
+          : /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(ext)
             ? "image"
             : "video";
       const kind = (req.query.kind as AssetKind | undefined) ?? inferredKind;
@@ -1417,11 +1424,14 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       if (req.query.insert !== "false") {
         const seq = engine.activeSequence();
         const wantAudio = probed.kind === "audio";
+        const requestedTrackId = typeof req.query.trackId === "string" ? req.query.trackId : "";
+        const explicitTrack = requestedTrackId ? seq.tracks.find((t) => t.id === requestedTrackId && !t.locked) : undefined;
         const track =
+          explicitTrack ??
           seq.tracks.find((t) => t.kind === (wantAudio ? "audio" : "video") && !t.locked) ??
           engine.addTrack(wantAudio ? "audio" : "video", wantAudio ? "A1" : "V1");
         const startAt = Number.isFinite(Number(req.query.at))
-          ? Number(req.query.at)
+          ? Math.max(0, Number(req.query.at))
           : Math.max(0, sequenceDuration(seq));
         const dur = Math.max(0.5, probed.duration ?? 5);
         insertedClip = engine.addClip({
