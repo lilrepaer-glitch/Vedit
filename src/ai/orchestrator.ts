@@ -12,6 +12,7 @@ import { addGraphicOverlay } from "../pro/graphics.js";
 import { generateProjectThumbnail } from "../pro/capture.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { analyzeFrameScopes } from "../pro/scopes.js";
+import { callChatCompletion, getRuntimeApiConfig, isLlmEndpointConfigured } from "../pro/api-settings.js";
 
 export interface CopilotStepResult {
   step: string;
@@ -23,6 +24,8 @@ export interface CopilotRunResult {
   checkpointId: string;
   stepsExecuted: CopilotStepResult[];
   summary: string;
+  modelUsed?: string;
+  assistantReply?: string;
 }
 
 /**
@@ -52,6 +55,138 @@ export async function runStudioCopilot(
       .activeSequence()
       .tracks.filter((t) => t.kind === "audio" && !t.locked)
       .flatMap((t) => t.clips)[0];
+
+  // If the user configured a live Custom API Key / Local LLM endpoint in API Settings, let their chosen model plan & explain edits first!
+  let modelUsed: string | undefined;
+  let assistantReply: string | undefined;
+  if (isLlmEndpointConfigured()) {
+    try {
+      const cfg = getRuntimeApiConfig();
+      const seq = engine.activeSequence();
+      const timelineSummary = seq.tracks.map((t) => ({
+        id: t.id,
+        name: t.name,
+        kind: t.kind,
+        clips: t.clips.map((c) => ({ id: c.id, name: c.name, start: c.start, duration: c.duration })),
+      }));
+      const llm = await callChatCompletion(
+        [
+          {
+            role: "system",
+            content:
+              'You are Vedit Studio AI Video Editor Copilot. Given the timeline JSON and user request (in any language including Czech or English), return ONLY valid JSON of the shape {"reply":"short helpful message","actions":[{"op":"lut3d|color_grade|speed|fade|chroma_key|reverse|freeze|layout|enhance_audio|duck_music|remove_silences|highlight|add_caption|add_graphic|apply_template","clipId":"optional","value":"optional string or number","text":"optional text","start":0,"duration":3}]}. Valid lut3d values: kodak-2383, teal-orange-blockbuster, fuji-eterna-soft, bleach-bypass, cyberpunk-neon. Valid color_grade values: cinematic-contrast, warm-golden, cool-noir, vivid-social, neutral. Valid layout values: pip-bottom-right, pip-top-right, split-left, split-right, full-reset.',
+          },
+          {
+            role: "user",
+            content: `Timeline: ${JSON.stringify(timelineSummary)}\nUser request: ${cleanPrompt}`,
+          },
+        ],
+        { timeoutMs: 22000, maxTokens: 700 },
+      );
+      modelUsed = llm.model || cfg.model;
+      const jsonMatch = /\{[\s\S]*\}/.exec(llm.content);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]) as {
+          reply?: string;
+          actions?: Array<Record<string, unknown>>;
+        };
+        assistantReply = parsed.reply;
+        for (const act of parsed.actions ?? []) {
+          const op = String(act.op ?? "");
+          const targetClip =
+            (typeof act.clipId === "string"
+              ? seq.tracks.flatMap((t) => t.clips).find((c) => c.id === act.clipId)
+              : undefined) ?? getLeadVideoClip();
+          if (op === "lut3d" && targetClip) {
+            const lutId = (String(act.value || "kodak-2383") as Parameters<typeof applyCubeLut>[2]["lutId"]);
+            await applyCubeLut(engine, targetClip.id, { lutId, outDir: opts.dataDir ? `${opts.dataDir}/luts` : undefined });
+            steps.push({ step: "cinema.lut3d", detail: `Applied ${lutId} 3D LUT via ${modelUsed}` });
+          } else if (op === "color_grade" && targetClip) {
+            const preset = String(act.value || "cinematic-contrast") as Parameters<typeof applyColorGrade>[2]["preset"];
+            applyColorGrade(engine, targetClip.id, { preset });
+            steps.push({ step: "color.grade", detail: `Applied color grade "${preset}"` });
+          } else if (op === "speed" && targetClip) {
+            const rate = Math.max(0.1, Math.min(8, Number(act.value || 1.5)));
+            setClipSpeed(engine, targetClip.id, rate);
+            steps.push({ step: "clip.set_speed", detail: `Set "${targetClip.name}" speed to ${rate}×` });
+          } else if (op === "fade" && targetClip) {
+            const dur = Math.max(0.1, Number(act.value || 0.5));
+            applyFadeTransition(engine, targetClip.id, { fadeIn: dur, fadeOut: dur });
+            steps.push({ step: "transition.fade", detail: `Added ${dur}s fade in/out` });
+          } else if (op === "chroma_key" && targetClip) {
+            const color = String(act.value || "#00ff00");
+            applyChromaKey(engine, targetClip.id, { color });
+            steps.push({ step: "effect.chroma_key", detail: `Applied chroma key (${color})` });
+          } else if (op === "reverse" && targetClip) {
+            await reverseClip(engine, targetClip.id, { outDir: opts.dataDir ? `${opts.dataDir}/reversed` : undefined });
+            steps.push({ step: "cinema.reverse", detail: `Reversed "${targetClip.name}"` });
+          } else if (op === "freeze" && targetClip) {
+            await freezeFrameClip(engine, targetClip.id, { outDir: opts.dataDir ? `${opts.dataDir}/freeze` : undefined });
+            steps.push({ step: "cinema.freeze", detail: `Inserted freeze frame on "${targetClip.name}"` });
+          } else if (op === "layout" && targetClip) {
+            const layout = String(act.value || "pip-bottom-right") as Parameters<typeof applyLayoutPreset>[2];
+            applyLayoutPreset(engine, targetClip.id, layout);
+            steps.push({ step: "cinema.layout", detail: `Applied layout "${layout}"` });
+          } else if (op === "enhance_audio" && targetClip) {
+            await enhanceAudio(engine, {
+              clipId: targetClip.id,
+              outDir: opts.dataDir ? `${opts.dataDir}/audio` : undefined,
+            });
+            steps.push({ step: "audio.enhance", detail: `Enhanced voice DSP on "${targetClip.name}"` });
+          } else if (op === "duck_music") {
+            const music = getMusicClip() ?? targetClip;
+            if (music) {
+              await duckMusicUnderVoice(engine, {
+                musicClipId: music.id,
+                outDir: opts.dataDir ? `${opts.dataDir}/audio` : undefined,
+              });
+              steps.push({ step: "audio.duck", detail: `Auto-ducked music track "${music.name}"` });
+            }
+          } else if (op === "remove_silences") {
+            const res = await removeSilences(engine, {});
+            steps.push({ step: "edit.remove_silences", detail: `Removed ${res.savedDuration.toFixed(2)}s silence` });
+          } else if (op === "highlight") {
+            const res = await buildHighlight(engine, { targetDuration: Number(act.duration || act.value || 15) });
+            steps.push({ step: "edit.highlight", detail: `Built ${res.totalDuration.toFixed(1)}s highlight reel` });
+          } else if (op === "add_caption") {
+            const text = String(act.text || act.value || "Title");
+            const start = Math.max(0, Number(act.start || 0));
+            const duration = Math.max(0.5, Number(act.duration || 3));
+            engine.addCaption({ text, start, end: start + duration });
+            steps.push({ step: "caption.add", detail: `Added caption "${text}" (${start}s–${start + duration}s)` });
+          } else if (op === "add_graphic") {
+            const label = String(act.text || act.value || "Vedit Studio");
+            await addGraphicOverlay(engine, {
+              kind: "lower-third-card",
+              label,
+              start: Number(act.start || 0),
+              duration: 3,
+              outDir: opts.dataDir ? `${opts.dataDir}/graphics` : undefined,
+            });
+            steps.push({ step: "graphics.overlay", detail: `Added lower-third "${label}"` });
+          } else if (op === "apply_template") {
+            const r = applyTemplate(engine, String(act.value || "tpl-youtube-intro"), {});
+            steps.push({ step: "marketplace.apply_template", detail: `Applied ${r.appliedName}` });
+          }
+        }
+        if (steps.length > 0 || assistantReply) {
+          recordAudit(engine.project, "api", `${modelUsed}: ${cleanPrompt}`, "AI Copilot");
+          return {
+            prompt: cleanPrompt,
+            checkpointId: snap.id,
+            stepsExecuted: steps,
+            summary: assistantReply
+              ? `[${modelUsed}] ${assistantReply}`
+              : `[${modelUsed}] Executed ${steps.length} step(s): ${steps.map((s) => s.detail).join(" • ")}`,
+            modelUsed,
+            assistantReply,
+          };
+        }
+      }
+    } catch {
+      // Gracefully fall back to built-in offline studio parser below if remote API is unreachable
+    }
+  }
 
   // 1. Silence removal
   if (/(silence|pause|dead air|tich)/.test(lower)) {

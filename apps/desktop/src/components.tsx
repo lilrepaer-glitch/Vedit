@@ -327,6 +327,7 @@ export function Preview({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [showScopes, setShowScopes] = useState(false);
+  const [canvasZoom, setCanvasZoom] = useState<number>(100);
   const [scopesData, setScopesData] = useState<Awaited<ReturnType<typeof api.getScopes>> | null>(null);
 
   useEffect(() => {
@@ -432,21 +433,69 @@ export function Preview({
 
   return (
     <section className="panel preview-panel">
-      <h2>
-        Preview <span className="muted">— Real-Time Stream + FFmpeg Decoder</span>
-      </h2>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <h2 style={{ margin: 0 }}>Player</h2>
+          <span className="muted">
+            {seq.width}×{seq.height} • {seq.fps}fps
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <select
+            value={String(canvasZoom)}
+            onChange={(e) => setCanvasZoom(Number(e.target.value))}
+            title="Player Canvas Scale (Alt + Scroll inside player)"
+            style={{ padding: "2px 6px", fontSize: 11 }}
+          >
+            <option value="100">Fit (100%)</option>
+            <option value="50">50%</option>
+            <option value="75">75%</option>
+            <option value="125">125%</option>
+            <option value="150">150%</option>
+            <option value="200">200%</option>
+          </select>
+          <button
+            type="button"
+            title="Toggle Broadcast RGB Histogram & IRE Waveform Scopes"
+            onClick={() => setShowScopes((s) => !s)}
+            style={{ fontWeight: showScopes ? 700 : 400, padding: "3px 7px", fontSize: 11 }}
+          >
+            📊 Scopes
+          </button>
+          <button
+            type="button"
+            title="Maximize Video Monitor Only"
+            style={{ padding: "3px 7px", fontSize: 11 }}
+            onClick={() => {
+              if (document.fullscreenElement) {
+                void document.exitFullscreen();
+              } else {
+                void stageRef.current?.requestFullscreen?.();
+              }
+            }}
+          >
+            ⛶ Player
+          </button>
+        </div>
+      </div>
       <div
         ref={stageRef}
         className="preview-stage"
-        style={{ aspectRatio: `${seq.width} / ${seq.height}`, position: "relative" }}
+        onWheel={(e) => {
+          if (e.ctrlKey || e.altKey) {
+            e.preventDefault();
+            setCanvasZoom((z) => Math.max(40, Math.min(250, Math.round(z - e.deltaY * 0.1))));
+          }
+        }}
+        style={{ position: "relative" }}
       >
         {clip && (streamSrc || frameUrl) ? (
           <div
             className="preview-clip preview-frame"
             style={{
-              transform: t
-                ? `translate(${t.x}px, ${t.y}px) rotate(${t.rotation}deg) scale(${t.scaleX}, ${t.scaleY})`
-                : undefined,
+              transform: `${canvasZoom !== 100 ? `scale(${(canvasZoom / 100).toFixed(2)}) ` : ""}${
+                t ? `translate(${t.x}px, ${t.y}px) rotate(${t.rotation}deg) scale(${t.scaleX}, ${t.scaleY})` : ""
+              }`.trim() || undefined,
               opacity: t?.opacity ?? 1,
               filter: cssFilters.length ? cssFilters.join(" ") : undefined,
             }}
@@ -515,54 +564,37 @@ export function Preview({
         {audioStreamSrc && <audio ref={audioRef} src={audioStreamSrc} preload="auto" />}
       </div>
 
-      {/* Pro NLE Transport Bar */}
+      {/* CapCut Clean Transport Bar */}
       <div
         className="preview-meta"
-        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "nowrap" }}
       >
+        <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, color: "var(--text)" }}>
+          <span style={{ color: "#38e8f8" }}>{fmt(playhead)}</span>
+          {playing && shuttleRate !== 1 ? ` (${shuttleRate}×)` : ""}
+        </span>
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <button type="button" title="Jump to start (Home)" onClick={() => onSeek(0)}>
+          <button type="button" className="icon-btn" title="Jump to start" onClick={() => onSeek(0)}>
             ⏮
           </button>
-          <button type="button" title="Previous frame (←)" onClick={() => onSeek(Math.max(0, playhead - frameStep))}>
-            ⏪ -1f
+          <button type="button" className="icon-btn" title="Previous frame (←)" onClick={() => onSeek(Math.max(0, playhead - frameStep))}>
+            ⏪
           </button>
           <button
             type="button"
-            title="Play / Pause (Space, J/K/L shuttle)"
+            className="btn-accent"
+            title="Play / Pause (Space, J/K/L)"
             onClick={onTogglePlay}
-            style={{ fontWeight: 700, minWidth: 74 }}
+            style={{ minWidth: 78 }}
           >
             {playing ? "⏸ Pause" : "▶ Play"}
           </button>
-          <button type="button" title="Next frame (→)" onClick={() => onSeek(playhead + frameStep)}>
-            +1f ⏩
-          </button>
-          <button
-            type="button"
-            title="Toggle Broadcast RGB Histogram & IRE Waveform Scopes"
-            onClick={() => setShowScopes((s) => !s)}
-            style={{ fontWeight: showScopes ? 700 : 400 }}
-          >
-            📊 Scopes
-          </button>
-          <button
-            type="button"
-            title="Toggle Fullscreen Monitor"
-            onClick={() => {
-              if (document.fullscreenElement) {
-                void document.exitFullscreen();
-              } else {
-                void stageRef.current?.requestFullscreen?.();
-              }
-            }}
-          >
-            ⛶ Fullscreen
+          <button type="button" className="icon-btn" title="Next frame (→)" onClick={() => onSeek(playhead + frameStep)}>
+            ⏩
           </button>
         </div>
-        <span>
-          {seq.width}×{seq.height} • {seq.fps} fps • playhead <strong>{fmt(playhead)}</strong>
-          {playing && shuttleRate !== 1 ? ` (${shuttleRate}×)` : ""}
+        <span className="muted" style={{ fontSize: 11 }}>
+          Space Play • J/K/L Shuttle
         </span>
       </div>
       {showScopes && scopesData && (
@@ -1161,6 +1193,11 @@ export function Timeline({
   onUpdateTrack,
   onClipEdit,
   onDropOnTrack,
+  onSplitAtPlayhead,
+  onDeleteSelected,
+  onRippleDeleteSelected,
+  onAddCaptionAtPlayhead,
+  heightPx,
 }: {
   project: Project;
   selection: { trackId: string; clipId: string } | null;
@@ -1176,26 +1213,36 @@ export function Timeline({
   ) => void;
   onClipEdit: (clipId: string, patch: Record<string, unknown>) => void;
   onDropOnTrack: (trackId: string, start: number, files: FileList | null, assetId?: string) => void;
+  onSplitAtPlayhead?: () => void;
+  onDeleteSelected?: () => void;
+  onRippleDeleteSelected?: () => void;
+  onAddCaptionAtPlayhead?: () => void;
+  heightPx?: number;
 }) {
   const seq = project.sequences.find((s) => s.id === project.activeSequenceId)!;
   const duration = Math.max(20, ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)));
-  const width = duration * zoom + 80;
-  const ticks = Array.from({ length: Math.ceil(duration) + 1 }, (_, i) => i);
+  const width = duration * zoom + 220;
+  const stepSec = zoom < 35 ? 5 : zoom < 70 ? 2 : 1;
+  const ticks: number[] = [];
+  for (let s = 0; s <= Math.ceil(duration); s += stepSec) ticks.push(s);
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [trackHeight, setTrackHeight] = useState<number>(48);
   const [waveCache, setWaveCache] = useState<Record<string, number[]>>({});
+  const attemptedWaveRef = useRef<Set<string>>(new Set());
   const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number; duration: number } | null>(null);
   const [dropHoverTrackId, setDropHoverTrackId] = useState<string | null>(null);
 
-  // Load real audio waveform peaks lazily for visible audio/video assets
+  // Load real audio waveform peaks AT MOST ONCE per asset (eliminates infinite retry storms on virtual sample clips!)
   useEffect(() => {
     for (const a of project.assets) {
-      if (a.kind === "image" || waveCache[a.id]) continue;
+      if (a.kind === "image" || attemptedWaveRef.current.has(a.id)) continue;
+      attemptedWaveRef.current.add(a.id);
       void api
-        .waveform(a.id, 64)
+        .waveform(a.id, 48)
         .then((res) => setWaveCache((prev) => ({ ...prev, [a.id]: res.peaks })))
-        .catch(() => undefined);
+        .catch(() => setWaveCache((prev) => ({ ...prev, [a.id]: [] })));
     }
-  }, [project.assets, waveCache]);
+  }, [project.assets]);
 
   const snapPoints = [
     0,
@@ -1277,44 +1324,124 @@ export function Timeline({
   };
 
   return (
-    <section className="panel timeline-panel">
-      <div className="timeline-head" style={{ gap: 8, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <h2>Timeline &amp; Mixer</h2>
-          <button type="button" onClick={() => onAddTrack("video")} style={{ fontSize: 11, padding: "2px 6px" }}>
-            + Video
+    <section
+      className="panel timeline-panel"
+      style={heightPx ? { height: heightPx } : undefined}
+      onWheel={(e) => {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          onZoom(Math.max(15, Math.min(300, Math.round(zoom - e.deltaY * 0.14))));
+        }
+      }}
+    >
+      {/* CapCut Style Timeline Action Ribbon */}
+      <div className="timeline-toolbar">
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <button
+            type="button"
+            disabled={!selection?.clipId}
+            title="Split clip at playhead (Ctrl+B)"
+            onClick={onSplitAtPlayhead}
+          >
+            ✂ Split
           </button>
-          <button type="button" onClick={() => onAddTrack("audio")} style={{ fontSize: 11, padding: "2px 6px" }}>
-            + Audio
+          <button
+            type="button"
+            disabled={!selection?.clipId}
+            title="Delete selected clip (Del)"
+            onClick={onDeleteSelected}
+          >
+            🗑 Delete
           </button>
-          <button type="button" onClick={() => onAddTrack("graphics")} style={{ fontSize: 11, padding: "2px 6px" }}>
-            + Graphics
+          <button
+            type="button"
+            disabled={!selection?.clipId}
+            title="Ripple delete selected clip & close gap"
+            onClick={onRippleDeleteSelected}
+          >
+            ⇤ Ripple
+          </button>
+          <button
+            type="button"
+            title="Add subtitle caption at playhead"
+            onClick={onAddCaptionAtPlayhead}
+          >
+            💬 + Caption
+          </button>
+          <span style={{ width: 1, height: 16, background: "var(--border)", margin: "0 3px" }} />
+          <button type="button" onClick={() => onAddTrack("video")} style={{ fontSize: 11, padding: "4px 7px" }}>
+            + Video Track
+          </button>
+          <button type="button" onClick={() => onAddTrack("audio")} style={{ fontSize: 11, padding: "4px 7px" }}>
+            + Audio Track
+          </button>
+          <button type="button" onClick={() => onAddTrack("graphics")} style={{ fontSize: 11, padding: "4px 7px" }}>
+            + Overlay
           </button>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <label className="muted" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label className="muted" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, cursor: "pointer" }}>
             <input type="checkbox" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} />
             🧲 Snap
           </label>
-          <label className="muted">
-            zoom{" "}
+          <select
+            value={String(trackHeight)}
+            onChange={(e) => setTrackHeight(Number(e.target.value))}
+            title="Track Lane Vertical Height"
+            style={{ padding: "3px 6px", fontSize: 11 }}
+          >
+            <option value="36">Tracks: S</option>
+            <option value="48">Tracks: M</option>
+            <option value="68">Tracks: L</option>
+          </select>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button
+              type="button"
+              className="icon-btn"
+              title="Zoom out timeline"
+              onClick={() => onZoom(Math.max(15, zoom - 15))}
+            >
+              −
+            </button>
             <input
               type="range"
-              min={20}
-              max={160}
+              min={15}
+              max={300}
               value={zoom}
               onChange={(e) => onZoom(Number(e.target.value))}
+              style={{ width: 96 }}
+              title={`Timeline Zoom: ${zoom}px/s (Ctrl + Mouse Wheel)`}
             />
-          </label>
+            <button
+              type="button"
+              className="icon-btn"
+              title="Zoom in timeline"
+              onClick={() => onZoom(Math.min(300, zoom + 15))}
+            >
+              +
+            </button>
+          </div>
         </div>
       </div>
       <div className="timeline-scroll">
-        <div className="timeline-inner" style={{ width }}>
+        <div className="timeline-inner" style={{ width, paddingTop: 0 }}>
           <div
             className="ruler"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              onSeek(Math.max(0, (e.clientX - rect.left) / zoom));
+            onMouseDown={(e) => {
+              const rulerEl = e.currentTarget;
+              const seekFromClientX = (clientX: number) => {
+                const rect = rulerEl.getBoundingClientRect();
+                onSeek(Math.max(0, (clientX - rect.left) / zoom));
+              };
+              seekFromClientX(e.clientX);
+              const onMove = (ev: MouseEvent) => seekFromClientX(ev.clientX);
+              const onUp = () => {
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+              };
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
             }}
           >
             {ticks.map((s) => (
@@ -1324,7 +1451,7 @@ export function Timeline({
             ))}
           </div>
           {seq.tracks.map((track) => (
-            <div key={track.id} className="track" style={{ opacity: track.muted ? 0.48 : 1 }}>
+            <div key={track.id} className="track" style={{ height: trackHeight, opacity: track.muted ? 0.48 : 1 }}>
               <div
                 className="track-label"
                 style={{
@@ -1510,7 +1637,10 @@ export function Timeline({
               </div>
             </div>
           ))}
-          <div className="playhead" style={{ left: playhead * zoom }} />
+          <div
+            className="playhead"
+            style={{ transform: `translate3d(${132 + playhead * zoom}px, 0, 0)` }}
+          />
         </div>
       </div>
     </section>
