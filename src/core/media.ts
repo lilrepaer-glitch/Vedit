@@ -2,17 +2,53 @@
 // (PLAN.md §13: F1 — dekódování médií, reálný export)
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require_ = createRequire(import.meta.url);
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+
+function resolveBundledBinary(stem: "ffmpeg" | "ffprobe"): string | null {
+  const exe = process.platform === "win32" ? `${stem}.exe` : stem;
+  // When packaged inside `resources/server/dist/core/media.js`, bundled binaries live at `resources/bin/<stem>(.exe)`
+  const candidates = [
+    resolve(MODULE_DIR, "..", "..", "..", "bin", exe),
+    resolve(MODULE_DIR, "..", "..", "..", "bin", stem),
+    join(process.cwd(), "..", "bin", exe),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
 
 export function ffmpegPath(): string {
-  return process.env.VEDIT_FFMPEG ?? (require_("@ffmpeg-installer/ffmpeg") as { path: string }).path;
+  if (process.env.VEDIT_FFMPEG && existsSync(process.env.VEDIT_FFMPEG)) {
+    return process.env.VEDIT_FFMPEG;
+  }
+  const bundled = resolveBundledBinary("ffmpeg");
+  if (bundled) return bundled;
+  try {
+    return (require_("@ffmpeg-installer/ffmpeg") as { path: string }).path;
+  } catch {
+    return process.env.VEDIT_FFMPEG || (process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+  }
 }
 
 export function ffprobePath(): string {
-  return process.env.VEDIT_FFPROBE ?? (require_("@ffprobe-installer/ffprobe") as { path: string }).path;
+  if (process.env.VEDIT_FFPROBE && existsSync(process.env.VEDIT_FFPROBE)) {
+    return process.env.VEDIT_FFPROBE;
+  }
+  const bundled = resolveBundledBinary("ffprobe");
+  if (bundled) return bundled;
+  try {
+    return (require_("@ffprobe-installer/ffprobe") as { path: string }).path;
+  } catch {
+    return process.env.VEDIT_FFPROBE || (process.platform === "win32" ? "ffprobe.exe" : "ffprobe");
+  }
 }
 
 export interface ProbeResult {

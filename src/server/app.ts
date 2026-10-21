@@ -1,9 +1,10 @@
 // REST API (PLAN.md §5) — REST na /api/v1 + WebSocket události.
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { access, mkdir, stat, writeFile } from "node:fs/promises";
-import { basename, extname, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
 import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
@@ -541,15 +542,14 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
-  // CORS — desktopový Tauri webview (http://tauri.localhost) volá API na 127.0.0.1:47000
+  // CORS + Chromium Private Network Access — desktop Tauri WebView2 (`http(s)://tauri.localhost` or same-origin `http://127.0.0.1:47000`)
   app.use((req, res, next) => {
-    const origin = req.header("origin");
-    if (origin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    }
+    const origin = req.header("origin") || "*";
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
     if (req.method === "OPTIONS") {
       res.status(204).end();
       return;
@@ -569,7 +569,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.5.0", scope: "F0–F9 Broadcast Studio" });
+    res.json({ ok: true, name: "vedit", version: "0.5.1", scope: "F0–F9 Broadcast Studio" });
   });
 
   app.get("/api/v1/projects", (_req, res) => {
@@ -1726,6 +1726,21 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       badRequest(res, (err as Error).message);
     }
   }, registry));
+
+  // Serve built Desktop UI bundle directly on same-origin `http://127.0.0.1:47000/`
+  // so Windows WebView2 avoids every cross-origin / Mixed Content / Private Network Access restriction!
+  const appModuleDir = dirname(fileURLToPath(import.meta.url));
+  const uiCandidates = [
+    resolvePath(appModuleDir, "..", "..", "ui"),
+    resolvePath(appModuleDir, "..", "..", "apps", "desktop", "dist"),
+  ];
+  const uiDir = uiCandidates.find((p) => existsSync(join(p, "index.html")));
+  if (uiDir) {
+    app.use(express.static(uiDir));
+    app.get(/^\/(?!api\/|ws$).*/, (_req, res) => {
+      res.sendFile(join(uiDir, "index.html"));
+    });
+  }
 
   // error handler → JSON
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

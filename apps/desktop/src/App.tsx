@@ -39,6 +39,8 @@ export function App() {
   const [hwAccel, setHwAccel] = useState("auto");
   const [loudnessLufs, setLoudnessLufs] = useState<string>("-14");
   const [packs, setPacks] = useState<MarketplacePackInfo[]>([]);
+  const [bootStatus, setBootStatus] = useState<string>("Starting local Vedit Studio engine…");
+  const [bootNonce, setBootNonce] = useState<number>(0);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -61,27 +63,37 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      for (let attempt = 0; !cancelled && attempt < 40; attempt++) {
+      let attempt = 0;
+      while (!cancelled) {
+        attempt++;
         try {
           await refresh();
-          const [presetRes, capsRes, genRes, expRes, marketRes] = await Promise.all([
-            api.presets(),
-            api.aiCaps(),
-            api.genProviders(),
-            api.exportPresets(),
-            api.marketplaceList(),
-          ]);
           if (cancelled) return;
-          setPresets(presetRes.presets);
-          setAiCaps(capsRes);
-          setGenProviders(genRes.providers);
-          setCameraMoves(genRes.cameraMoves);
-          setExportPresets(expRes.presets);
-          setPacks(marketRes.packs);
+          // Load non-blocking studio catalogs in parallel without ever blocking editor mount!
+          void api.presets().then((r) => !cancelled && setPresets(r.presets)).catch(() => {});
+          void api.aiCaps().then((r) => !cancelled && setAiCaps(r)).catch(() => {});
+          void api
+            .genProviders()
+            .then((r) => {
+              if (!cancelled) {
+                setGenProviders(r.providers);
+                setCameraMoves(r.cameraMoves);
+              }
+            })
+            .catch(() => {});
+          void api.exportPresets().then((r) => !cancelled && setExportPresets(r.presets)).catch(() => {});
+          void api.marketplaceList().then((r) => !cancelled && setPacks(r.packs)).catch(() => {});
           return;
         } catch (err) {
-          if (attempt === 39) flash(`Error: ${(err as Error).message}`);
-          await new Promise((r) => setTimeout(r, 300));
+          if (attempt >= 3) {
+            const diag = (window as unknown as { __VEDIT_DIAG__?: string }).__VEDIT_DIAG__;
+            setBootStatus(
+              diag
+                ? `Engine diagnostic: ${diag}`
+                : `Waiting for local engine on 127.0.0.1:47000 (attempt #${attempt} — Windows SmartScreen / Defender may still be scanning node.exe on first launch: ${(err as Error).message})`,
+            );
+          }
+          await new Promise((r) => setTimeout(r, 400));
         }
       }
     })();
@@ -90,7 +102,7 @@ export function App() {
       cancelled = true;
       disconnect();
     };
-  }, [refresh, flash]);
+  }, [refresh, bootNonce]);
 
   const seq = project?.sequences.find((s) => s.id === project.activeSequenceId) ?? null;
 
@@ -239,7 +251,17 @@ export function App() {
   }, [project, activeClip, playhead]);
 
   if (!project || !seq) {
-    return <div className="app loading">Connecting to Vedit Engine…</div>;
+    return (
+      <div className="app loading" style={{ flexDirection: "column", gap: 12, textAlign: "center", padding: 24 }}>
+        <div style={{ fontSize: 18, fontWeight: 700 }}>Connecting to Vedit Engine…</div>
+        <div className="muted" style={{ maxWidth: 560, fontSize: 12 }}>
+          {bootStatus}
+        </div>
+        <button type="button" onClick={() => setBootNonce((n) => n + 1)}>
+          🔄 Retry Connection
+        </button>
+      </div>
+    );
   }
 
   const clipId = selection?.clipId;

@@ -62,6 +62,8 @@ ensureDir(path.join(srcTauri, 'target', 'release', 'bundle', 'msi'));
 const serverDir = path.join(resources, 'server');
 ensureDir(serverDir);
 copyDir(path.join(root, 'dist'), path.join(serverDir, 'dist'));
+copyDir(path.join(root, 'python'), path.join(serverDir, 'python'));
+copyDir(path.join(desktopDir, 'dist'), path.join(serverDir, 'ui'));
 
 const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const runtimeDeps = {};
@@ -112,9 +114,54 @@ ensureDir(nodeDir);
 const stagedNode = path.join(nodeDir, `node${exeSuffix}`);
 copyExecutable(process.execPath, stagedNode);
 
-// 4) Smoke-verify packaged sidecar entry executes cleanly
+// 4) Smoke-verify packaged sidecar CLI + real HTTP server boot & UI serving on current OS (including Windows CI!)
 execFileSync(stagedNode, [path.join(serverDir, 'dist', 'cli', 'index.js'), '--help'], {
   cwd: serverDir,
   stdio: 'pipe',
 });
-console.log('[prebuild] verified packaged sidecar CLI boots cleanly!');
+
+(async () => {
+  const { spawn } = require('child_process');
+  const os = require('os');
+  const tmpData = fs.mkdtempSync(path.join(os.tmpdir(), 'vedit-prebuild-smoke-'));
+  const child = spawn(
+    stagedNode,
+    [path.join(serverDir, 'dist', 'cli', 'index.js'), 'serve', '--host', '127.0.0.1', '--port', '47988', '--token', 'dev', '--no-sample'],
+    {
+      cwd: serverDir,
+      env: { ...process.env, VEDIT_DATA: tmpData, VEDIT_PYTHON: '' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    },
+  );
+  let errBuf = '';
+  child.stderr.on('data', (c) => (errBuf += c.toString()));
+  try {
+    let ok = false;
+    for (let i = 0; i < 60; i++) {
+      try {
+        const h = await fetch('http://127.0.0.1:47988/api/v1/projects', {
+          headers: { Authorization: 'Bearer dev' },
+        });
+        const ui = await fetch('http://127.0.0.1:47988/');
+        if (h.status === 200 && ui.status === 200) {
+          ok = true;
+          break;
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    if (!ok) {
+      throw new Error(`Packaged sidecar HTTP smoke check failed! stderr=${errBuf}`);
+    }
+    console.log('[prebuild] verified packaged sidecar HTTP API + UI bundle serves cleanly!');
+  } finally {
+    child.kill();
+    try {
+      fs.rmSync(tmpData, { recursive: true, force: true });
+    } catch {}
+  }
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
