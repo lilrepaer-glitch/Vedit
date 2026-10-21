@@ -54,7 +54,7 @@ describe("render pipeline (F1)", () => {
     expect(fc).toContain("subtitles=");
     // 2 video klipy se zvukem + 1 hudba = 3 audio vstupy do mixu
     expect(fc).toContain("amix=inputs=3");
-    expect(fc).toContain("eq=b=0.1:saturation=1.2");
+    expect(fc).toContain("eq=brightness=0.1:saturation=1.2");
     expect(plan.srt?.content).toContain("titulek");
     expect(plan.duration).toBeCloseTo(4, 1);
   });

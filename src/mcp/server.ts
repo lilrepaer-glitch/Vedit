@@ -33,6 +33,15 @@ import {
   runPlugin,
 } from "../ext/marketplace.js";
 import { getQueueStatus, listExportPresets, runBatchExport, WatchFolderManager } from "../ext/delivery.js";
+import { probeHardwareEncoders } from "../render/hwaccel.js";
+import {
+  COLOR_GRADE_PRESETS,
+  applyChromaKey,
+  applyColorGrade,
+  applyFadeTransition,
+  setClipSpeed,
+} from "../pro/fx.js";
+import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
 import { resolve as resolvePath } from "node:path";
 
 export interface McpContext {
@@ -950,10 +959,12 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   server.registerTool(
     "export.render",
     {
-      description: "Reálný export videa přes FFmpeg (F1/F5) — H.264 / H.265 / ProRes / WebM + platformní presety, stav přes gen.job_status.",
+      description: "Real FFmpeg video export (F1/F5/F6) — H.264 / H.265 / ProRes / WebM, GPU hardware acceleration, and loudness normalization.",
       inputSchema: {
         preset: z.string().optional(),
         codec: z.enum(["h264", "h265", "prores", "vp9"]).optional(),
+        hwAccel: z.enum(["auto", "cpu", "nvenc", "amf", "qsv", "videotoolbox", "vaapi"]).optional(),
+        loudnessLufs: z.number().min(-36).max(-5).optional(),
         format: z.enum(["mp4", "mov", "webm"]).default("mp4"),
         width: z.number().int().positive().optional(),
         height: z.number().int().positive().optional(),
@@ -1232,6 +1243,105 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       inputSchema: { limit: z.number().int().positive().max(200).default(50) },
     },
     async ({ limit }) => ok({ entries: listAuditLog(engine().project, limit) }),
+  );
+
+  // ---- F6: Hardware GPU Encoders, Pro VFX, Color Grading, Chroma Key, Speed Control & Pro Audio DSP ----
+  server.registerTool(
+    "export.encoders",
+    {
+      description: "F6: Probes hardware GPU encoders (NVENC, AMF, QSV, VideoToolbox, VAAPI) and recommends best backend.",
+    },
+    async () => wrapTool(async () => probeHardwareEncoders()),
+  );
+
+  server.registerTool(
+    "color.grade",
+    {
+      description: "F6: Applies color grading preset or custom brightness/contrast/saturation/gamma to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        preset: z.string().optional(),
+        brightness: z.number().min(-1).max(1).optional(),
+        contrast: z.number().min(0).max(4).optional(),
+        saturation: z.number().min(0).max(4).optional(),
+        gamma: z.number().min(0.1).max(4).optional(),
+      },
+    },
+    async ({ clipId, ...opts }) =>
+      wrapTool(() => ({
+        effect: applyColorGrade(engine(), clipId, opts),
+        presets: COLOR_GRADE_PRESETS.map((p) => p.id),
+      })),
+  );
+
+  server.registerTool(
+    "effect.chroma_key",
+    {
+      description: "F6: Applies green/blue screen chroma keying with edge spill suppression on a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        color: z.string().optional().describe("Hex key color like '#00ff00' or 'blue'"),
+        similarity: z.number().min(0.01).max(1).optional(),
+        blend: z.number().min(0.0).max(1).optional(),
+        despill: z.boolean().optional(),
+      },
+    },
+    async ({ clipId, ...opts }) => wrapTool(() => ({ effect: applyChromaKey(engine(), clipId, opts) })),
+  );
+
+  server.registerTool(
+    "clip.set_speed",
+    {
+      description: "F6: Sets clip playback speed (0.1x .. 8.0x) and retimes timeline duration & pitch-preserved audio.",
+      inputSchema: {
+        clipId: idSchema,
+        speed: z.number().min(0.1).max(8),
+      },
+    },
+    async ({ clipId, speed }) => wrapTool(() => ({ clip: setClipSpeed(engine(), clipId, speed) })),
+  );
+
+  server.registerTool(
+    "effect.fade",
+    {
+      description: "F6: Adds smooth fade-in / fade-out transitions on a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        fadeIn: z.number().min(0).max(30).optional(),
+        fadeOut: z.number().min(0).max(30).optional(),
+      },
+    },
+    async ({ clipId, fadeIn, fadeOut }) =>
+      wrapTool(() => ({ effect: applyFadeTransition(engine(), clipId, { fadeIn, fadeOut }) })),
+  );
+
+  server.registerTool(
+    "audio.enhance",
+    {
+      description: "F6: Pro voice enhancement — highpass rumble filter, FFT denoise, vocal EQ, compressor & EBU R128 loudness.",
+      inputSchema: {
+        clipId: idSchema.optional(),
+        assetId: idSchema.optional(),
+        noiseFloor: z.number().min(-80).max(-20).optional(),
+        voicePresence: z.boolean().optional(),
+        loudnessLufs: z.number().min(-36).max(-8).optional(),
+      },
+    },
+    async (args) => wrapTool(() => enhanceAudio(engine(), args)),
+  );
+
+  server.registerTool(
+    "audio.duck",
+    {
+      description: "F6: Automatically ducks background music volume whenever speech is active on the voice clip.",
+      inputSchema: {
+        musicClipId: idSchema,
+        voiceClipId: idSchema.optional(),
+        voiceAssetId: idSchema.optional(),
+        reductionDb: z.number().min(-40).max(0).optional(),
+      },
+    },
+    async (args) => wrapTool(() => duckMusicUnderVoice(engine(), args)),
   );
 
   // ---- F5: MCP Resources (PLAN.md §4.2) ----

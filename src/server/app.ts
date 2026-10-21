@@ -1,12 +1,24 @@
 // REST API (PLAN.md §5) — REST na /api/v1 + WebSocket události.
 
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { access, mkdir } from "node:fs/promises";
-import { resolve as resolvePath } from "node:path";
+import { createReadStream } from "node:fs";
+import { access, mkdir, stat, writeFile } from "node:fs/promises";
+import { basename, extname, join, resolve as resolvePath } from "node:path";
 import { VeditEngine } from "../core/engine.js";
 import { captionsToSrt, listAnimationPresets } from "../core/presets.js";
 import { extractFrame, extractPeaks, generateProxy, probeMedia } from "../core/media.js";
 import { renderSequence, resolveExportPreset, type VideoCodecId } from "../render/export.js";
+import { probeHardwareEncoders, type HwAccelBackend } from "../render/hwaccel.js";
+import {
+  COLOR_GRADE_PRESETS,
+  applyChromaKey,
+  applyColorGrade,
+  applyFadeTransition,
+  setClipSpeed,
+} from "../pro/fx.js";
+import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
+import { listSavedProjects, loadProjectFromDisk, saveProjectToDisk } from "../pro/persistence.js";
+import { sequenceDuration } from "../core/types.js";
 import {
   addReviewComment,
   addTimelineMarker,
@@ -343,6 +355,8 @@ export function runRealRenderJob(
         outPath,
         preset: presetObj?.id,
         codec: input.codec != null ? (String(input.codec) as VideoCodecId) : presetObj?.codec,
+        hwAccel: input.hwAccel != null ? (String(input.hwAccel) as HwAccelBackend) : "auto",
+        loudnessLufs: input.loudnessLufs != null ? Number(input.loudnessLufs) : undefined,
         width: input.width != null ? Number(input.width) : undefined,
         height: input.height != null ? Number(input.height) : undefined,
         fps: input.fps != null ? Number(input.fps) : undefined,
@@ -362,6 +376,8 @@ export function runRealRenderJob(
           height: result.height,
           fps: result.fps,
           codec: result.codec,
+          encoder: result.encoder,
+          hwBackend: result.hwBackend,
           preset: result.preset,
           sizeBytes: result.sizeBytes,
           warnings: result.warnings,
@@ -537,7 +553,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.1.0", scope: "F0 skeleton" });
+    res.json({ ok: true, name: "vedit", version: "0.2.0", scope: "F0–F6 Pro Studio" });
   });
 
   app.get("/api/v1/projects", (_req, res) => {
@@ -1248,6 +1264,225 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   app.delete("/api/v1/watch-folders/:watchId", (req, res) => {
     res.json({ ok: watchManager.stop(String(req.params.watchId)) });
   });
+
+  // ---- F6: Hardware GPU Encoders, Media Streaming, Drag & Drop File Upload, Persistence, Pro VFX & Pro Audio ----
+
+  app.get("/api/v1/export/encoders", async (_req, res, next) => {
+    try {
+      res.json(await probeHardwareEncoders());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/api/v1/fx/color-presets", (_req, res) => {
+    res.json({ presets: COLOR_GRADE_PRESETS });
+  });
+
+  // HTTP 206 Range media streamer for smooth 60fps HTML5 <video>/<audio> playback in Desktop Preview
+  app.get("/api/v1/projects/:id/assets/:assetId/stream", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.params.assetId));
+    const filePath = asset.proxyPath ?? asset.path;
+    const st = await stat(filePath);
+    const ext = extname(filePath).toLowerCase();
+    const mimeMap: Record<string, string> = {
+      ".mp4": "video/mp4",
+      ".mov": "video/quicktime",
+      ".webm": "video/webm",
+      ".mkv": "video/x-matroska",
+      ".wav": "audio/wav",
+      ".mp3": "audio/mpeg",
+      ".ogg": "audio/ogg",
+      ".m4a": "audio/mp4",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+    };
+    const contentType = mimeMap[ext] ?? "application/octet-stream";
+    const range = req.headers.range;
+    if (range) {
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const start = m?.[1] ? parseInt(m[1], 10) : 0;
+      const end = m?.[2] ? Math.min(st.size - 1, parseInt(m[2], 10)) : st.size - 1;
+      if (start >= st.size || start > end) {
+        res.status(416).setHeader("Content-Range", `bytes */${st.size}`).end();
+        return;
+      }
+      res.writeHead(206, {
+        "Content-Range": `bytes ${start}-${end}/${st.size}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": end - start + 1,
+        "Content-Type": contentType,
+      });
+      createReadStream(filePath, { start, end }).pipe(res);
+    } else {
+      res.writeHead(200, {
+        "Accept-Ranges": "bytes",
+        "Content-Length": st.size,
+        "Content-Type": contentType,
+      });
+      createReadStream(filePath).pipe(res);
+    }
+  }, registry));
+
+  // Native Drag & Drop / File Picker upload straight into local dataDir/imports with automatic ffprobe
+  app.post(
+    "/api/v1/projects/:id/assets/upload",
+    express.raw({ type: "*/*", limit: "512mb" }),
+    wrap(async (req, res, engine) => {
+      const rawName = String(req.query.name ?? "imported.mp4");
+      const safeName = basename(rawName).replace(/[^a-zA-Z0-9._-]+/g, "_") || "imported.mp4";
+      const importsDir = resolvePath(dataDir, "imports");
+      await mkdir(importsDir, { recursive: true });
+      const targetPath = join(importsDir, `${Date.now()}-${safeName}`);
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+      if (buf.length === 0) {
+        return badRequest(res, "Uploaded media body is empty");
+      }
+      await writeFile(targetPath, buf);
+
+      const ext = extname(safeName).toLowerCase();
+      const inferredKind: AssetKind =
+        /\.(wav|mp3|ogg|flac|m4a|aac)$/i.test(ext)
+          ? "audio"
+          : /\.(png|jpe?g|webp|gif|bmp)$/i.test(ext)
+            ? "image"
+            : "video";
+      const kind = (req.query.kind as AssetKind | undefined) ?? inferredKind;
+
+      const asset = engine.addAsset({
+        name: rawName,
+        kind,
+        path: targetPath,
+      });
+      await probeIntoAsset(engine, asset.id, targetPath);
+      const probed = engine.findAsset(asset.id);
+
+      let insertedClip = null;
+      if (req.query.insert !== "false") {
+        const seq = engine.activeSequence();
+        const wantAudio = probed.kind === "audio";
+        const track =
+          seq.tracks.find((t) => t.kind === (wantAudio ? "audio" : "video") && !t.locked) ??
+          engine.addTrack(wantAudio ? "audio" : "video", wantAudio ? "A1" : "V1");
+        const startAt = Number.isFinite(Number(req.query.at))
+          ? Number(req.query.at)
+          : Math.max(0, sequenceDuration(seq));
+        const dur = Math.max(0.5, probed.duration ?? 5);
+        insertedClip = engine.addClip({
+          trackId: track.id,
+          assetId: probed.id,
+          name: probed.name,
+          start: startAt,
+          duration: dur,
+          in: 0,
+          out: dur,
+        });
+      }
+
+      res.status(201).json({ asset: probed, clip: insertedClip });
+    }, registry),
+  );
+
+  // Project Disk Persistence (.vedit JSON Save / Open / Saved List)
+  app.get("/api/v1/projects-saved", async (_req, res, next) => {
+    try {
+      res.json({ saved: await listSavedProjects(dataDir) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/v1/projects/:id/save", wrap(async (req, res, engine) => {
+    const customPath = req.body?.filePath != null ? String(req.body.filePath) : undefined;
+    const saved = await saveProjectToDisk(engine, dataDir, customPath);
+    res.json(saved);
+  }, registry));
+
+  app.post("/api/v1/projects/open", async (req, res) => {
+    try {
+      const filePath = String(req.body?.filePath ?? "");
+      if (!filePath) return badRequest(res, "filePath is required");
+      const loaded = await loadProjectFromDisk(filePath);
+      registry.add(loaded);
+      res.json({ project: loaded.project });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  });
+
+  // Pro VFX & Speed Control
+  app.post("/api/v1/projects/:id/clips/:clipId/color-grade", wrap((req, res, engine) => {
+    try {
+      const effect = applyColorGrade(engine, String(req.params.clipId), req.body ?? {});
+      res.json({ effect });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/chroma-key", wrap((req, res, engine) => {
+    try {
+      const effect = applyChromaKey(engine, String(req.params.clipId), req.body ?? {});
+      res.json({ effect });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/speed", wrap((req, res, engine) => {
+    try {
+      const speed = Number(req.body?.speed ?? req.body?.rate ?? 1);
+      const clip = setClipSpeed(engine, String(req.params.clipId), speed);
+      res.json({ clip });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/fade", wrap((req, res, engine) => {
+    try {
+      const effect = applyFadeTransition(engine, String(req.params.clipId), req.body ?? {});
+      res.json({ effect });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  // Pro Audio DSP: Voice Enhance & Music Auto-Ducking
+  app.post("/api/v1/projects/:id/audio/enhance", wrap(async (req, res, engine) => {
+    try {
+      const result = await enhanceAudio(engine, {
+        clipId: req.body?.clipId != null ? String(req.body.clipId) : undefined,
+        assetId: req.body?.assetId != null ? String(req.body.assetId) : undefined,
+        noiseFloor: req.body?.noiseFloor != null ? Number(req.body.noiseFloor) : undefined,
+        voicePresence: req.body?.voicePresence !== false,
+        loudnessLufs: req.body?.loudnessLufs != null ? Number(req.body.loudnessLufs) : undefined,
+        outDir: resolvePath(dataDir, "audio"),
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/audio/duck", wrap(async (req, res, engine) => {
+    try {
+      if (!req.body?.musicClipId) return badRequest(res, "musicClipId is required");
+      const result = await duckMusicUnderVoice(engine, {
+        musicClipId: String(req.body.musicClipId),
+        voiceClipId: req.body?.voiceClipId != null ? String(req.body.voiceClipId) : undefined,
+        voiceAssetId: req.body?.voiceAssetId != null ? String(req.body.voiceAssetId) : undefined,
+        reductionDb: req.body?.reductionDb != null ? Number(req.body.reductionDb) : undefined,
+        noiseDb: req.body?.noiseDb != null ? Number(req.body.noiseDb) : undefined,
+        outDir: resolvePath(dataDir, "audio"),
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
 
   // error handler → JSON
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

@@ -442,7 +442,81 @@ diffCmd.action(async (baseFile: string, targetFile: string) => {
   console.log(JSON.stringify(diffProjects(a, b), null, 2));
 });
 
+// ---- F6: Hardware GPU Encoders, Pro VFX, Speed & Pro Audio CLI ----
+program
+  .command("encoders")
+  .description("F6: probes hardware GPU encoders (NVENC, AMF, QSV, VideoToolbox, VAAPI)")
+  .action(async () => {
+    const { probeHardwareEncoders } = await import("../render/hwaccel.js");
+    const report = await probeHardwareEncoders();
+    console.log(`Recommended backend: ${report.recommendedBackend.toUpperCase()}`);
+    for (const enc of report.encoders) {
+      const status = enc.usable ? "✓ USABLE" : enc.compiled ? "○ no GPU driver" : "– not compiled";
+      console.log(`  ${enc.encoder.padEnd(20)} ${status.padEnd(18)} ${enc.label}`);
+    }
+  });
+
+const gradeCmd = program.command("color-grade").description("F6: applies color grading preset to a clip");
+projectPathOpt(gradeCmd);
+gradeCmd.argument("<clipId>", "target clip ID");
+gradeCmd.option("--preset <id>", "color preset ID", "cinematic-contrast");
+gradeCmd.action(async (clipId: string, opts: { project: string; preset: string }) => {
+  const { applyColorGrade } = await import("../pro/fx.js");
+  await withEngine(opts, (engine) => {
+    const eff = applyColorGrade(engine, clipId, { preset: opts.preset });
+    console.log(`Color grade applied (${opts.preset}) → ${eff.id}`);
+  });
+});
+
+const chromaCmd = program.command("chroma-key").description("F6: applies green/blue screen chroma key + despill");
+projectPathOpt(chromaCmd);
+chromaCmd.argument("<clipId>", "target clip ID");
+chromaCmd.option("--color <hex>", "key color (#00ff00 or blue)", "#00ff00");
+chromaCmd.option("--similarity <n>", "similarity (0.01..1.0)", "0.28");
+chromaCmd.action(async (clipId: string, opts: { project: string; color: string; similarity: string }) => {
+  const { applyChromaKey } = await import("../pro/fx.js");
+  await withEngine(opts, (engine) => {
+    const eff = applyChromaKey(engine, clipId, { color: opts.color, similarity: Number(opts.similarity) });
+    console.log(`Chroma key applied (${opts.color}) → ${eff.id}`);
+  });
+});
+
+const speedCmd = program.command("speed").description("F6: sets clip playback speed (0.1x..8.0x)");
+projectPathOpt(speedCmd);
+speedCmd.argument("<clipId>", "target clip ID");
+speedCmd.requiredOption("--rate <x>", "speed multiplier, e.g. 2.0 or 0.5");
+speedCmd.action(async (clipId: string, opts: { project: string; rate: string }) => {
+  const { setClipSpeed } = await import("../pro/fx.js");
+  await withEngine(opts, (engine) => {
+    const clip = setClipSpeed(engine, clipId, Number(opts.rate));
+    console.log(`Clip speed set to ${opts.rate}x → duration ${clip.duration.toFixed(2)}s`);
+  });
+});
+
+const enhCmd = program.command("audio-enhance").description("F6: cleans, equalizes & normalizes speech audio");
+projectPathOpt(enhCmd);
+enhCmd.option("--clip <clipId>", "target clip ID");
+enhCmd.action(async (opts: { project: string; clip?: string }) => {
+  const { enhanceAudio } = await import("../pro/audio.js");
+  await withEngine(opts, async (engine) => {
+    const r = await enhanceAudio(engine, { clipId: opts.clip });
+    console.log(`Enhanced audio saved → ${r.outPath} (${r.duration.toFixed(2)}s)`);
+  });
+});
+
+const duckCmd = program.command("audio-duck").description("F6: auto-ducks music clip under speech");
+projectPathOpt(duckCmd);
+duckCmd.requiredOption("--music <clipId>", "background music clip ID");
+duckCmd.option("--voice <clipId>", "voice clip ID");
+duckCmd.action(async (opts: { project: string; music: string; voice?: string }) => {
+  const { duckMusicUnderVoice } = await import("../pro/audio.js");
+  await withEngine(opts, async (engine) => {
+    const r = await duckMusicUnderVoice(engine, { musicClipId: opts.music, voiceClipId: opts.voice });
+    console.log(`Ducked music (${r.speechIntervals.length} speech segments) → ${r.outPath}`);
+  });
+});
+
 program.parseAsync(process.argv).catch((err) => {
-  console.error(`chyba: ${(err as Error).message}`);
+  console.error(`Error: ${(err as Error).message}`);
   process.exit(1);
 });
