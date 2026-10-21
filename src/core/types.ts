@@ -33,6 +33,8 @@ export interface Asset {
   bitrate?: number;
   /** F1: cesta k proxy souboru */
   proxyPath?: string;
+  /** F8: searchable tags for Media Pool organization */
+  tags?: string[];
   source?: AssetSource;
   createdAt: string;
 }

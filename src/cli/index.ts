@@ -598,6 +598,77 @@ mixCmd.action(
   },
 );
 
+// ---- F8: AI Orchestrator Copilot, Cinema 3D LUTs, VidStab Stabilization, Layouts & EDL / FCPXML CLI ----
+const copilotCmd = program.command("copilot").description("F8: runs multi-step AI Studio Copilot natural-language command");
+projectPathOpt(copilotCmd);
+copilotCmd.argument("<prompt>", "natural-language editing instruction");
+copilotCmd.action(async (prompt: string, opts: { project: string }) => {
+  const { runStudioCopilot } = await import("../ai/orchestrator.js");
+  await withEngine(opts, async (engine) => {
+    const res = await runStudioCopilot(engine, prompt);
+    console.log(res.summary);
+  });
+});
+
+program
+  .command("luts")
+  .description("F8: lists built-in cinema 3D .cube LUTs")
+  .action(async () => {
+    const { BUILTIN_LUTS } = await import("../pro/cinema.js");
+    for (const l of BUILTIN_LUTS) {
+      console.log(`${l.id.padEnd(26)} ${l.label} — ${l.description}`);
+    }
+  });
+
+const lutCmd = program.command("apply-lut").description("F8: applies a cinema 3D .cube LUT to a clip");
+projectPathOpt(lutCmd);
+lutCmd.argument("<clipId>", "target clip ID");
+lutCmd.option("--lut <id>", "built-in LUT ID", "kodak-2383");
+lutCmd.option("--file <cubePath>", "custom .cube LUT file path");
+lutCmd.action(async (clipId: string, opts: { project: string; lut: string; file?: string }) => {
+  const { applyCubeLut } = await import("../pro/cinema.js");
+  await withEngine(opts, async (engine) => {
+    const res = await applyCubeLut(engine, clipId, {
+      lutId: opts.lut as Parameters<typeof applyCubeLut>[2]["lutId"],
+      filePath: opts.file,
+    });
+    console.log(`3D LUT applied → ${res.cubePath}`);
+  });
+});
+
+const stabCmd = program.command("stabilize").description("F8: stabilizes shaky footage on a clip (2-pass VidStab)");
+projectPathOpt(stabCmd);
+stabCmd.argument("<clipId>", "target clip ID");
+stabCmd.action(async (clipId: string, opts: { project: string }) => {
+  const { stabilizeClip } = await import("../pro/cinema.js");
+  await withEngine(opts, async (engine) => {
+    const res = await stabilizeClip(engine, clipId);
+    console.log(`Stabilized (${res.method}) → ${res.outPath}`);
+  });
+});
+
+const edlCmd = program.command("export-edl").description("F8: exports sequence as CMX 3600 .edl");
+projectPathOpt(edlCmd);
+edlCmd.requiredOption("--out <file>", "output .edl path");
+edlCmd.action(async (opts: { project: string; out: string }) => {
+  const { writeFile } = await import("node:fs/promises");
+  const { exportEdl } = await import("../pro/interchange.js");
+  const engine = await loadOrInitEngine(resolve(opts.project));
+  await writeFile(resolve(opts.out), exportEdl(engine.project), "utf8");
+  console.log(`EDL exported → ${opts.out}`);
+});
+
+const xmlCmd = program.command("export-fcpxml").description("F8: exports sequence as Final Cut Pro / Resolve .fcpxml");
+projectPathOpt(xmlCmd);
+xmlCmd.requiredOption("--out <file>", "output .fcpxml path");
+xmlCmd.action(async (opts: { project: string; out: string }) => {
+  const { writeFile } = await import("node:fs/promises");
+  const { exportFcpXml } = await import("../pro/interchange.js");
+  const engine = await loadOrInitEngine(resolve(opts.project));
+  await writeFile(resolve(opts.out), exportFcpXml(engine.project), "utf8");
+  console.log(`FCPXML exported → ${opts.out}`);
+});
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(`Error: ${(err as Error).message}`);
   process.exit(1);

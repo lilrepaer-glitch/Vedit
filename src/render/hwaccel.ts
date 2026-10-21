@@ -101,6 +101,13 @@ export async function resolveVideoEncoder(
   crf?: number,
   audioBitrate = "160k",
 ): Promise<ResolvedEncoderArgs> {
+  if (codec === "gif") {
+    return {
+      encoder: "gif",
+      backend: "cpu",
+      args: ["-r", String(fps), "-loop", "0"],
+    };
+  }
   if (codec === "prores") {
     return {
       encoder: "prores_ks",

@@ -34,6 +34,7 @@ export interface Asset {
   width?: number;
   height?: number;
   fps?: number;
+  tags?: string[];
   source?: {
     provider?: string;
     model?: string;
@@ -93,8 +94,8 @@ export interface ExportPresetInfo {
   id: string;
   label: string;
   platform: string;
-  format: "mp4" | "mov" | "webm";
-  codec: "h264" | "h265" | "prores" | "vp9";
+  format: "mp4" | "mov" | "webm" | "gif";
+  codec: "h264" | "h265" | "prores" | "vp9" | "gif";
 }
 
 export interface Project {
@@ -216,6 +217,20 @@ export const api = {
       `/projects/${currentId}/thumbnail`,
       { ...(title ? { title } : {}), ...(at != null ? { at } : {}) },
     ),
+  updateAsset: (assetId: string, patch: { name?: string; path?: string; tags?: string[] }) =>
+    req<{ asset: Asset }>(`PATCH`, `/projects/${currentId}/assets/${assetId}`, patch),
+  runCopilot: (prompt: string) =>
+    req<{ summary: string; checkpointId: string; stepsExecuted: Array<{ step: string; detail: string }> }>(
+      "POST",
+      `/projects/${currentId}/copilot`,
+      { prompt },
+    ),
+  applyLut: (clipId: string, lutId: string) =>
+    req<{ cubePath: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/lut`, { lutId }),
+  stabilizeClip: (clipId: string) =>
+    req<{ outPath: string; method: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/stabilize`, {}),
+  applyLayout: (clipId: string, layout: string) =>
+    req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/layout`, { layout }),
   addClip: (input: { trackId: string; assetId: string; start: number; duration?: number; in?: number; out?: number }) =>
     req<{ clip: Clip }>("POST", `/projects/${currentId}/clips`, input),
   splitClip: (clipId: string, at: number) =>
