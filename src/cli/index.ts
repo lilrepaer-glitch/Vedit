@@ -516,6 +516,88 @@ duckCmd.action(async (opts: { project: string; music: string; voice?: string }) 
   });
 });
 
+// ---- F7: Studio Screen Capture, Vector/SVG Graphics, Track Mixer & Smart Thumbnail CLI ----
+const recCmd = program.command("record-screen").description("F7: records desktop screen onto timeline");
+projectPathOpt(recCmd);
+recCmd.option("--seconds <n>", "capture duration in seconds", "3");
+recCmd.option("--fps <n>", "frames per second", "24");
+recCmd.option("--label <name>", "clip name", "Screen Capture");
+recCmd.action(async (opts: { project: string; seconds: string; fps: string; label: string }) => {
+  const { captureDesktopClip } = await import("../pro/capture.js");
+  await withEngine(opts, async (engine) => {
+    const r = await captureDesktopClip(engine, {
+      seconds: Number(opts.seconds),
+      fps: Number(opts.fps),
+      label: opts.label,
+    });
+    console.log(`Captured screen (${r.asset.duration?.toFixed(2)}s) → ${r.outPath}`);
+  });
+});
+
+const gfxCmd = program.command("graphic").description("F7: generates vector shape / callout / SVG overlay onto timeline");
+projectPathOpt(gfxCmd);
+gfxCmd.argument("<kind>", "lower-third-card | callout-arrow | spotlight-ring | pill-badge | progress-ribbon | custom-svg");
+gfxCmd.option("--label <text>", "optional caption label");
+gfxCmd.option("--svg <markup>", "raw <svg>...</svg> markup for custom-svg");
+gfxCmd.option("--start <sec>", "timeline start", "0");
+gfxCmd.option("--duration <sec>", "overlay duration", "3");
+gfxCmd.action(
+  async (
+    kind: string,
+    opts: { project: string; label?: string; svg?: string; start: string; duration: string },
+  ) => {
+    const { addGraphicOverlay } = await import("../pro/graphics.js");
+    await withEngine(opts, async (engine) => {
+      const r = await addGraphicOverlay(engine, {
+        kind: kind as Parameters<typeof addGraphicOverlay>[1]["kind"],
+        label: opts.label,
+        svgMarkup: opts.svg,
+        start: Number(opts.start),
+        duration: Number(opts.duration),
+      });
+      console.log(`Graphic overlay created → ${r.outPath}`);
+    });
+  },
+);
+
+const thumbCmd = program.command("thumbnail").description("F7: exports sharpest high-resolution thumbnail JPEG");
+projectPathOpt(thumbCmd);
+thumbCmd.option("--at <sec>", "optional timestamp in seconds");
+thumbCmd.option("--title <text>", "optional bold thumbnail title banner");
+thumbCmd.action(async (opts: { project: string; at?: string; title?: string }) => {
+  const { generateProjectThumbnail } = await import("../pro/capture.js");
+  const engine = await loadOrInitEngine(resolve(opts.project));
+  const r = await generateProjectThumbnail(engine, {
+    at: opts.at != null ? Number(opts.at) : undefined,
+    title: opts.title,
+  });
+  console.log(`Thumbnail exported (t=${r.selectedTime}s, ${r.sizeBytes} B) → ${r.outPath}`);
+});
+
+const mixCmd = program.command("track-mix").description("F7: sets track mixer volume, pan, mute, or solo");
+projectPathOpt(mixCmd);
+mixCmd.argument("<trackId>", "target track ID");
+mixCmd.option("--volume <db>", "gain in dB (-60..+18)");
+mixCmd.option("--pan <n>", "stereo pan (-1..+1)");
+mixCmd.option("--mute <bool>", "true | false");
+mixCmd.option("--solo <bool>", "true | false");
+mixCmd.action(
+  async (
+    trackId: string,
+    opts: { project: string; volume?: string; pan?: string; mute?: string; solo?: string },
+  ) => {
+    await withEngine(opts, (engine) => {
+      const t = engine.updateTrack(trackId, {
+        ...(opts.volume != null ? { volumeDb: Number(opts.volume) } : {}),
+        ...(opts.pan != null ? { pan: Number(opts.pan) } : {}),
+        ...(opts.mute != null ? { muted: opts.mute === "true" } : {}),
+        ...(opts.solo != null ? { solo: opts.solo === "true" } : {}),
+      });
+      console.log(`Track "${t.name}" updated: vol=${t.volumeDb ?? 0}dB mute=${t.muted} solo=${t.solo}`);
+    });
+  },
+);
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(`Error: ${(err as Error).message}`);
   process.exit(1);

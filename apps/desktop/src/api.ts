@@ -20,6 +20,8 @@ export interface Track {
   muted: boolean;
   solo: boolean;
   locked: boolean;
+  volumeDb?: number;
+  pan?: number;
   clips: Clip[];
 }
 
@@ -193,6 +195,27 @@ export const api = {
     req<{ asset: Asset }>("POST", `/projects/${currentId}/assets`, input),
   addTrack: (kind: string, name?: string) =>
     req<{ track: Track }>("POST", `/projects/${currentId}/tracks`, { kind, name }),
+  updateTrack: (
+    trackId: string,
+    patch: { muted?: boolean; solo?: boolean; locked?: boolean; volumeDb?: number; pan?: number; name?: string },
+  ) => req<{ track: Track }>(`PATCH`, `/projects/${currentId}/tracks/${trackId}`, patch),
+  waveform: (assetId: string, samples = 96) =>
+    req<{ peaks: number[]; samples: number }>("GET", `/projects/${currentId}/assets/${assetId}/waveform?samples=${samples}`),
+  addGraphic: (input: {
+    kind: string;
+    label?: string;
+    svgMarkup?: string;
+    accentColor?: string;
+    start?: number;
+    duration?: number;
+    animationPreset?: string;
+  }) => req<{ asset: Asset; clip: Clip; outPath: string }>("POST", `/projects/${currentId}/graphics`, input),
+  exportThumbnail: (title?: string, at?: number) =>
+    req<{ outPath: string; selectedTime: number; width: number; sizeBytes: number }>(
+      "POST",
+      `/projects/${currentId}/thumbnail`,
+      { ...(title ? { title } : {}), ...(at != null ? { at } : {}) },
+    ),
   addClip: (input: { trackId: string; assetId: string; start: number; duration?: number; in?: number; out?: number }) =>
     req<{ clip: Clip }>("POST", `/projects/${currentId}/clips`, input),
   splitClip: (clipId: string, at: number) =>
