@@ -191,11 +191,19 @@ export function App() {
         e.preventDefault();
         setPlaying(false);
         setPlayhead((p) => Math.min(totalSeqDuration, p + 1 / fps));
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        if (selection?.clipId) {
+          void act(() => api.splitClip(selection.clipId, playhead), "Split clip at playhead");
+        }
+      } else if (e.key === "Delete" && selection?.clipId) {
+        e.preventDefault();
+        void act(() => api.deleteClip(selection.clipId), "Deleted selected clip");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [seq, totalSeqDuration, act, flash]);
+  }, [seq, totalSeqDuration, selection, playhead, act, flash]);
 
   const selected: { clip: Clip; trackId: string } | null = useMemo(() => {
     if (!seq || !selection) return null;
@@ -349,6 +357,18 @@ export function App() {
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Quick AI shot prompt…"
           />
+          <button
+            disabled={busy}
+            title="Acoustically sync multi-camera angles & build switched Multicam Program track"
+            onClick={() =>
+              act(async () => {
+                const res = await api.syncMulticam(2.5);
+                flash(`Multicam synced ${res.angles.length} angles → ${res.segmentCount} program cuts`);
+              })
+            }
+          >
+            🎥 Multicam
+          </button>
           <button
             disabled={busy}
             title="Generate AI video shot & insert onto timeline"
@@ -578,6 +598,7 @@ export function App() {
           <Inspector
             clip={selected?.clip ?? null}
             asset={selectedAsset}
+            playhead={playhead}
             captions={seq.captions}
             onProAction={(action, payload) => {
               if (!clipId) return;
@@ -587,6 +608,12 @@ export function App() {
                     () => api.setClipSpeed(clipId, Number(payload?.speed ?? 1)),
                     `Clip speed set to ${payload?.speed}×`,
                   );
+                  break;
+                case "reverse":
+                  void act(() => api.reverseClip(clipId), "Clip video & audio reversed");
+                  break;
+                case "freeze":
+                  void act(() => api.freezeClip(clipId, playhead, 1.5), "Inserted 1.5s freeze-frame hold");
                   break;
                 case "color-grade":
                   void act(

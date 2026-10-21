@@ -48,11 +48,15 @@ import {
   BUILTIN_LUTS,
   applyCubeLut,
   applyLayoutPreset,
+  freezeFrameClip,
+  reverseClip,
   stabilizeClip,
   type BuiltInLutId,
   type LayoutPresetId,
 } from "../pro/cinema.js";
 import { exportEdl, exportFcpXml } from "../pro/interchange.js";
+import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
+import { analyzeFrameScopes } from "../pro/scopes.js";
 import { runStudioCopilot } from "../ai/orchestrator.js";
 import { resolve as resolvePath } from "node:path";
 
@@ -1523,6 +1527,96 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       },
     },
     async ({ assetId, ...patch }) => wrapTool(() => ({ asset: engine().updateAsset(assetId, patch) })),
+  );
+
+  // ---- F9: Broadcast Video Scopes, Multicam Audio Sync & Switcher, Freeze Frame, Reverse & Keyframe Curves ----
+  server.registerTool(
+    "cinema.scopes",
+    {
+      description: "F9: Computes Broadcast RGB Parade Histograms, 48-column IRE Waveform, and clipping QC metrics at time `t`.",
+      inputSchema: {
+        time: z.number().nonnegative().optional(),
+        assetPath: z.string().optional(),
+      },
+    },
+    async (args) => wrapTool(() => analyzeFrameScopes(engine(), args)),
+  );
+
+  server.registerTool(
+    "cinema.reverse",
+    {
+      description: "F9: Reverses video and audio playback on a clip cleanly via FFmpeg reverse + areverse.",
+      inputSchema: {
+        clipId: idSchema,
+      },
+    },
+    async ({ clipId }) => wrapTool(() => reverseClip(engine(), clipId)),
+  );
+
+  server.registerTool(
+    "cinema.freeze_frame",
+    {
+      description: "F9: Extracts a sharp still frame from a clip at time `at` and inserts a ripple freeze-frame hold clip.",
+      inputSchema: {
+        clipId: idSchema,
+        at: z.number().nonnegative().optional(),
+        holdDuration: z.number().min(0.2).max(30).optional(),
+      },
+    },
+    async ({ clipId, at, holdDuration }) =>
+      wrapTool(() => freezeFrameClip(engine(), clipId, { at, holdDuration })),
+  );
+
+  server.registerTool(
+    "multicam.sync",
+    {
+      description: "F9: Acoustically cross-correlates 2+ multi-camera/mic assets to align them automatically on timeline.",
+      inputSchema: {
+        assetIds: z.array(idSchema).min(2).optional(),
+        maxOffsetSec: z.number().min(1).max(60).optional(),
+        sampleRate: z.number().min(1000).max(16000).optional(),
+      },
+    },
+    async (args) => wrapTool(() => syncMulticamClips(engine(), args)),
+  );
+
+  server.registerTool(
+    "multicam.cuts",
+    {
+      description: "F9: Generates a switched Multicam Program track across camera angles via explicit cut points or interval.",
+      inputSchema: {
+        cuts: z
+          .array(
+            z.object({
+              time: z.number().nonnegative(),
+              angleIndex: z.number().int().nonnegative().optional(),
+              trackId: idSchema.optional(),
+            }),
+          )
+          .optional(),
+        autoIntervalSec: z.number().min(0.4).max(120).optional(),
+      },
+    },
+    async (args) => wrapTool(() => applyMulticamCuts(engine(), args)),
+  );
+
+  server.registerTool(
+    "keyframes.set_curve",
+    {
+      description: "F9: Sets eased keyframes (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `hold`) on a clip property.",
+      inputSchema: {
+        clipId: idSchema,
+        keyframes: z.array(
+          z.object({
+            time: z.number().nonnegative(),
+            property: z.enum(["x", "y", "opacity"]),
+            value: z.number(),
+            easing: z.enum(["linear", "ease-in", "ease-out", "ease-in-out", "hold"]).optional(),
+          }),
+        ),
+      },
+    },
+    async ({ clipId, keyframes }) => wrapTool(() => ({ clip: engine().updateClip(clipId, { keyframes }) })),
   );
 
   // ---- F5: MCP Resources (PLAN.md §4.2) ----

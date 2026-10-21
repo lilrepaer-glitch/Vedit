@@ -231,6 +231,46 @@ export const api = {
     req<{ outPath: string; method: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/stabilize`, {}),
   applyLayout: (clipId: string, layout: string) =>
     req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/layout`, { layout }),
+  getScopes: (time: number) =>
+    req<{
+      time: number;
+      status: string;
+      warnings: string[];
+      lumaHistogram: number[];
+      redHistogram: number[];
+      greenHistogram: number[];
+      blueHistogram: number[];
+      waveform: Array<{ min: number; p25: number; median: number; p75: number; max: number }>;
+      metrics: {
+        avgLumaIre: number;
+        minLumaIre: number;
+        maxLumaIre: number;
+        blackClippingPct: number;
+        whiteClippingPct: number;
+        rAvg: number;
+        gAvg: number;
+        bAvg: number;
+        saturationAvg: number;
+      };
+    }>(`GET`, `/projects/${currentId}/scopes?time=${encodeURIComponent(time.toFixed(3))}`),
+  reverseClip: (clipId: string) =>
+    req<{ outPath: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/reverse`, {}),
+  freezeClip: (clipId: string, at?: number, holdDuration = 1.5) =>
+    req<{ outPath: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/freeze`, {
+      ...(at != null ? { at } : {}),
+      holdDuration,
+    }),
+  syncMulticam: (autoIntervalSec = 2.5) =>
+    req<{ referenceAssetId: string; angles: Array<{ assetName: string; offsetSec: number; confidence: number }> }>(
+      `POST`,
+      `/projects/${currentId}/multicam/sync`,
+      {},
+    ).then(async (syncRes) => {
+      const cutRes = await req<{ segmentCount: number }>(`POST`, `/projects/${currentId}/multicam/cuts`, {
+        autoIntervalSec,
+      });
+      return { angles: syncRes.angles, segmentCount: cutRes.segmentCount };
+    }),
   addClip: (input: { trackId: string; assetId: string; start: number; duration?: number; in?: number; out?: number }) =>
     req<{ clip: Clip }>("POST", `/projects/${currentId}/clips`, input),
   splitClip: (clipId: string, at: number) =>

@@ -24,11 +24,15 @@ import {
   BUILTIN_LUTS,
   applyCubeLut,
   applyLayoutPreset,
+  freezeFrameClip,
+  reverseClip,
   stabilizeClip,
   type BuiltInLutId,
   type LayoutPresetId,
 } from "../pro/cinema.js";
 import { exportEdl, exportFcpXml } from "../pro/interchange.js";
+import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
+import { analyzeFrameScopes } from "../pro/scopes.js";
 import { runStudioCopilot } from "../ai/orchestrator.js";
 import { sequenceDuration } from "../core/types.js";
 import {
@@ -565,7 +569,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.4.0", scope: "F0–F8 Cinema Studio" });
+    res.json({ ok: true, name: "vedit", version: "0.5.0", scope: "F0–F9 Broadcast Studio" });
   });
 
   app.get("/api/v1/projects", (_req, res) => {
@@ -1660,6 +1664,67 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   app.get("/api/v1/projects/:id/export/fcpxml", wrap((_req, res, engine) => {
     res.setHeader("Content-Disposition", `attachment; filename="${engine.project.id.slice(0, 8)}.fcpxml"`);
     res.type("application/xml").send(exportFcpXml(engine.project));
+  }, registry));
+
+  // ---- F9: Broadcast Scopes, Multicam Sync & Live Angle Switcher, Reverse & Freeze Frame ----
+
+  app.get("/api/v1/projects/:id/scopes", wrap(async (req, res, engine) => {
+    try {
+      const time = req.query.time != null ? Number(req.query.time) : 0;
+      const result = await analyzeFrameScopes(engine, { time });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/reverse", wrap(async (req, res, engine) => {
+    try {
+      const result = await reverseClip(engine, String(req.params.clipId), {
+        outDir: resolvePath(dataDir, "reversed"),
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/freeze", wrap(async (req, res, engine) => {
+    try {
+      const result = await freezeFrameClip(engine, String(req.params.clipId), {
+        at: req.body?.at != null ? Number(req.body.at) : undefined,
+        holdDuration: req.body?.holdDuration != null ? Number(req.body.holdDuration) : undefined,
+        outDir: resolvePath(dataDir, "freezes"),
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/multicam/sync", wrap(async (req, res, engine) => {
+    try {
+      const result = await syncMulticamClips(engine, {
+        assetIds: Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : undefined,
+        maxOffsetSec: req.body?.maxOffsetSec != null ? Number(req.body.maxOffsetSec) : undefined,
+        sampleRate: req.body?.sampleRate != null ? Number(req.body.sampleRate) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/multicam/cuts", wrap((req, res, engine) => {
+    try {
+      const result = applyMulticamCuts(engine, {
+        cuts: Array.isArray(req.body?.cuts) ? req.body.cuts : undefined,
+        autoIntervalSec: req.body?.autoIntervalSec != null ? Number(req.body.autoIntervalSec) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
   }, registry));
 
   // error handler → JSON

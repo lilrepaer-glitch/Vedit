@@ -669,6 +669,58 @@ xmlCmd.action(async (opts: { project: string; out: string }) => {
   console.log(`FCPXML exported → ${opts.out}`);
 });
 
+// ---- F9: Broadcast Scopes, Multicam Sync, Reverse & Freeze Frame CLI ----
+const scopesCmd = program.command("scopes").description("F9: analyzes broadcast RGB/IRE video scopes at playhead time");
+projectPathOpt(scopesCmd);
+scopesCmd.option("--time <sec>", "timeline timestamp in seconds", "0");
+scopesCmd.action(async (opts: { project: string; time: string }) => {
+  const { analyzeFrameScopes } = await import("../pro/scopes.js");
+  const engine = await loadOrInitEngine(resolve(opts.project));
+  const res = await analyzeFrameScopes(engine, { time: Number(opts.time) });
+  console.log(
+    `Scopes @ ${res.time}s [${res.status}]: avg=${res.metrics.avgLumaIre} IRE, peak=${res.metrics.maxLumaIre} IRE, RGB=(${res.metrics.rAvg},${res.metrics.gAvg},${res.metrics.bAvg})`,
+  );
+});
+
+const revCmd = program.command("reverse").description("F9: reverses video & audio playback on a clip");
+projectPathOpt(revCmd);
+revCmd.argument("<clipId>", "target clip ID");
+revCmd.action(async (clipId: string, opts: { project: string }) => {
+  const { reverseClip } = await import("../pro/cinema.js");
+  await withEngine(opts, async (engine) => {
+    const res = await reverseClip(engine, clipId);
+    console.log(`Reversed clip → ${res.outPath}`);
+  });
+});
+
+const freezeCmd = program.command("freeze").description("F9: inserts a sharp ripple freeze-frame hold on a clip");
+projectPathOpt(freezeCmd);
+freezeCmd.argument("<clipId>", "target clip ID");
+freezeCmd.option("--at <sec>", "timeline timestamp in seconds");
+freezeCmd.option("--duration <sec>", "freeze hold duration in seconds", "1.5");
+freezeCmd.action(async (clipId: string, opts: { project: string; at?: string; duration: string }) => {
+  const { freezeFrameClip } = await import("../pro/cinema.js");
+  await withEngine(opts, async (engine) => {
+    const res = await freezeFrameClip(engine, clipId, {
+      at: opts.at != null ? Number(opts.at) : undefined,
+      holdDuration: Number(opts.duration),
+    });
+    console.log(`Freeze frame inserted → ${res.outPath}`);
+  });
+});
+
+const mcamCmd = program.command("multicam-sync").description("F9: acoustically syncs multi-camera angles & builds program cuts");
+projectPathOpt(mcamCmd);
+mcamCmd.option("--interval <sec>", "auto angle switch interval in seconds", "2.5");
+mcamCmd.action(async (opts: { project: string; interval: string }) => {
+  const { syncMulticamClips, applyMulticamCuts } = await import("../pro/multicam.js");
+  await withEngine(opts, async (engine) => {
+    const synced = await syncMulticamClips(engine);
+    const cuts = applyMulticamCuts(engine, { autoIntervalSec: Number(opts.interval) });
+    console.log(`Synced ${synced.angles.length} angles → ${cuts.segmentCount} Multicam Program cuts`);
+  });
+});
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(`Error: ${(err as Error).message}`);
   process.exit(1);

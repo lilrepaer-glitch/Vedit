@@ -226,8 +226,52 @@ function getClipSpeed(clip: Clip): number {
   return Math.max(0.1, Math.min(8, raw));
 }
 
+export type KeyframeEasing = "linear" | "ease-in" | "ease-out" | "ease-in-out" | "hold";
+
+/** Evaluates a clip's keyframe curve at relative clip time `relTime` with full easing support. */
+export function evaluateKeyframeCurve(
+  clip: Pick<Clip, "keyframes">,
+  property: string,
+  relTime: number,
+  fallback: number,
+): number {
+  const keys = clip.keyframes
+    .filter((k) => k.property === property && typeof k.value === "number")
+    .sort((a, b) => a.time - b.time);
+  if (keys.length === 0) return fallback;
+  if (relTime <= keys[0]!.time) return Number(keys[0]!.value);
+  const last = keys[keys.length - 1]!;
+  if (relTime >= last.time) return Number(last.value);
+
+  for (let i = 0; i < keys.length - 1; i++) {
+    const k0 = keys[i]!;
+    const k1 = keys[i + 1]!;
+    if (relTime >= k0.time && relTime <= k1.time) {
+      const v0 = Number(k0.value);
+      const v1 = Number(k1.value);
+      const dt = Math.max(1e-4, k1.time - k0.time);
+      const u = Math.max(0, Math.min(1, (relTime - k0.time) / dt));
+      switch (k0.easing) {
+        case "hold":
+          return v0;
+        case "ease-in":
+          return v0 + (v1 - v0) * (u * u);
+        case "ease-out":
+          return v0 + (v1 - v0) * (1 - (1 - u) * (1 - u));
+        case "ease-in-out":
+          return v0 + (v1 - v0) * (u * u * (3 - 2 * u));
+        default:
+          return v0 + (v1 - v0) * u;
+      }
+    }
+  }
+  return Number(last.value);
+}
+
 function keyframeExpr(clip: Clip, property: "x" | "y" | "opacity", fallback: number): string {
-  const keys = clip.keyframes.filter((k) => k.property === property && typeof k.value === "number");
+  const keys = clip.keyframes
+    .filter((k) => k.property === property && typeof k.value === "number")
+    .sort((a, b) => a.time - b.time);
   if (keys.length === 0) return String(fallback);
   const s = clip.start;
   const v = (k: { value: number | string }) => Number(k.value);
@@ -238,10 +282,29 @@ function keyframeExpr(clip: Clip, property: "x" | "y" | "opacity", fallback: num
     const k1 = keys[i + 1]!;
     const t0 = s + k0.time;
     const t1 = s + k1.time;
-    const lin = `(${v(k0)})+(${v(k1)}-(${v(k0)}))*(t-${t0})/(${t1}-${t0})`;
-    expr = `if(lt(t,${t1}),${lin},${expr})`;
+    const dt = Math.max(1e-4, t1 - t0).toFixed(4);
+    const u = `((t-${t0.toFixed(4)})/${dt})`;
+    let seg: string;
+    switch (k0.easing) {
+      case "hold":
+        seg = `${v(k0)}`;
+        break;
+      case "ease-in":
+        seg = `(${v(k0)})+(${v(k1)}-(${v(k0)}))*pow(${u},2)`;
+        break;
+      case "ease-out":
+        seg = `(${v(k0)})+(${v(k1)}-(${v(k0)}))*(1-pow(1-${u},2))`;
+        break;
+      case "ease-in-out":
+        seg = `(${v(k0)})+(${v(k1)}-(${v(k0)}))*(pow(${u},2)*(3-2*${u}))`;
+        break;
+      default:
+        seg = `(${v(k0)})+(${v(k1)}-(${v(k0)}))*${u}`;
+        break;
+    }
+    expr = `if(lt(t,${t1.toFixed(4)}),${seg},${expr})`;
   }
-  return `if(lt(t,${s + keys[0]!.time}),${v(keys[0]!)},${expr})`;
+  return `if(lt(t,${(s + keys[0]!.time).toFixed(4)}),${v(keys[0]!)},${expr})`;
 }
 
 function clipStaticValue(clip: Clip, property: "x" | "y", fallback: number): number {
