@@ -343,20 +343,27 @@ export const api = {
     ),
   openProjectDisk: (filePath: string) =>
     req<{ project: Project }>("POST", "/projects/open", { filePath }),
-  uploadAssetFile: async (file: File, at?: number, insert = true): Promise<{ asset: Asset; clip: Clip | null }> => {
-    const buf = await file.arrayBuffer();
+  uploadAssetFile: async (
+    file: File,
+    at?: number,
+    insert = true,
+    trackId?: string,
+  ): Promise<{ asset: Asset; clip: Clip | null }> => {
     const qs = new URLSearchParams({
       name: file.name,
       insert: String(insert),
       ...(at != null ? { at: String(at) } : {}),
+      ...(trackId ? { trackId } : {}),
     });
+    // Pass `file` Blob directly as streaming body with `application/octet-stream`
+    // so multi-GB 4K/8K videos stream straight to disk without `ArrayBuffer` memory limits!
     const res = await fetch(apiUrl(`/projects/${currentId}/assets/upload?${qs.toString()}`), {
       method: "POST",
       headers: {
-        "Content-Type": file.type || "application/octet-stream",
+        "Content-Type": "application/octet-stream",
         Authorization: `Bearer ${API_TOKEN}`,
       },
-      body: buf,
+      body: file,
     });
     if (!res.ok) {
       let msg = res.statusText;

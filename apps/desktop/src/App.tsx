@@ -41,6 +41,7 @@ export function App() {
   const [packs, setPacks] = useState<MarketplacePackInfo[]>([]);
   const [bootStatus, setBootStatus] = useState<string>("Starting local Vedit Studio engine…");
   const [bootNonce, setBootNonce] = useState<number>(0);
+  const [windowDragOver, setWindowDragOver] = useState<boolean>(false);
 
   const flash = useCallback((message: string) => {
     setToast(message);
@@ -268,7 +269,59 @@ export function App() {
   const captionText = `Caption @ ${fmt(playhead)}`;
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes("Files")) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (!windowDragOver) setWindowDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setWindowDragOver(false);
+      }}
+      onDrop={(e) => {
+        setWindowDragOver(false);
+        const files = e.dataTransfer.files;
+        if (!files || files.length === 0) return;
+        e.preventDefault();
+        void act(async () => {
+          let cursor = playhead;
+          for (const file of Array.from(files)) {
+            const res = await api.uploadAssetFile(file, cursor, true);
+            cursor += res.asset.duration ?? 5;
+          }
+          flash(`Imported ${files.length} file${files.length > 1 ? "s" : ""} onto timeline`);
+        });
+      }}
+      style={
+        windowDragOver
+          ? { outline: "2px dashed #4f8cff", outlineOffset: -4 }
+          : undefined
+      }
+    >
+      {windowDragOver && (
+        <div
+          style={{
+            position: "fixed",
+            top: 8,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 9999,
+            background: "#1d4ed8",
+            color: "#fff",
+            padding: "6px 16px",
+            borderRadius: 999,
+            fontWeight: 700,
+            fontSize: 13,
+            pointerEvents: "none",
+            boxShadow: "0 6px 24px rgba(0,0,0,0.45)",
+          }}
+        >
+          📂 Drop video, audio, or image files anywhere (or onto a specific Timeline track)
+        </div>
+      )}
       <header className="toolbar">
         <div className="brand">
           <span className="logo">Vedit</span>
@@ -721,6 +774,31 @@ export function App() {
         onAddTrack={(kind) => act(() => api.addTrack(kind), `Added ${kind} track`)}
         onUpdateTrack={(trackId, patch) => act(() => api.updateTrack(trackId, patch))}
         onClipEdit={(id, patch) => act(() => api.updateClip(id, patch), "Clip updated")}
+        onDropOnTrack={(trackId, start, files, assetId) => {
+          if (assetId) {
+            const asset = project.assets.find((a) => a.id === assetId);
+            const dur = Math.max(0.5, asset?.duration ?? 5);
+            void act(
+              async () => {
+                const res = await api.addClip({ trackId, assetId, start, duration: dur, in: 0, out: dur });
+                setSelection({ trackId, clipId: res.clip.id });
+              },
+              `Placed "${asset?.name ?? "clip"}" at ${fmt(start)}`,
+            );
+            return;
+          }
+          if (files && files.length > 0) {
+            void act(async () => {
+              let cursor = start;
+              for (const file of Array.from(files)) {
+                const res = await api.uploadAssetFile(file, cursor, true, trackId);
+                if (res.clip) setSelection({ trackId, clipId: res.clip.id });
+                cursor += res.asset.duration ?? 5;
+              }
+              flash(`Dropped ${files.length} file${files.length > 1 ? "s" : ""} at ${fmt(start)}`);
+            });
+          }
+        }}
       />
 
       {toast && <div className="toast">{toast}</div>}
