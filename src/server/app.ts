@@ -20,6 +20,16 @@ import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
 import { listSavedProjects, loadProjectFromDisk, saveProjectToDisk } from "../pro/persistence.js";
 import { addGraphicOverlay, type VectorGraphicPreset } from "../pro/graphics.js";
 import { captureDesktopClip, generateProjectThumbnail } from "../pro/capture.js";
+import {
+  BUILTIN_LUTS,
+  applyCubeLut,
+  applyLayoutPreset,
+  stabilizeClip,
+  type BuiltInLutId,
+  type LayoutPresetId,
+} from "../pro/cinema.js";
+import { exportEdl, exportFcpXml } from "../pro/interchange.js";
+import { runStudioCopilot } from "../ai/orchestrator.js";
 import { sequenceDuration } from "../core/types.js";
 import {
   addReviewComment,
@@ -555,7 +565,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.3.0", scope: "F0–F7 Studio Complete" });
+    res.json({ ok: true, name: "vedit", version: "0.4.0", scope: "F0–F8 Cinema Studio" });
   });
 
   app.get("/api/v1/projects", (_req, res) => {
@@ -637,6 +647,19 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
 
   app.get("/api/v1/projects/:id/assets", wrap((_req, res, engine) => {
     res.json({ assets: engine.project.assets });
+  }, registry));
+
+  app.patch("/api/v1/projects/:id/assets/:assetId", wrap(async (req, res, engine) => {
+    const assetId = String(req.params.assetId);
+    const patch: Record<string, unknown> = {};
+    if (req.body?.name !== undefined) patch.name = String(req.body.name);
+    if (req.body?.path !== undefined) patch.path = String(req.body.path);
+    if (Array.isArray(req.body?.tags)) patch.tags = req.body.tags.map(String);
+    const updated = engine.updateAsset(assetId, patch);
+    if (req.body?.path !== undefined) {
+      await probeIntoAsset(engine, assetId, updated.path);
+    }
+    res.json({ asset: engine.findAsset(assetId) });
   }, registry));
 
   // tracks
@@ -1574,6 +1597,69 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       outDir: resolvePath(dataDir, "thumbnails"),
     });
     res.type("image/jpeg").sendFile(result.outPath);
+  }, registry));
+
+  // ---- F8: Cinema 3D .cube LUTs, VidStab Stabilization, PiP/Split Layouts, EDL/FCPXML Interchange & AI Copilot ----
+
+  app.get("/api/v1/cinema/luts", (_req, res) => {
+    res.json({ luts: BUILTIN_LUTS });
+  });
+
+  app.post("/api/v1/projects/:id/clips/:clipId/lut", wrap(async (req, res, engine) => {
+    try {
+      const result = await applyCubeLut(engine, String(req.params.clipId), {
+        lutId: req.body?.lutId != null ? (String(req.body.lutId) as BuiltInLutId) : undefined,
+        filePath: req.body?.filePath != null ? String(req.body.filePath) : undefined,
+        intensity: req.body?.intensity != null ? Number(req.body.intensity) : undefined,
+        outDir: resolvePath(dataDir, "luts"),
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/stabilize", wrap(async (req, res, engine) => {
+    try {
+      const result = await stabilizeClip(engine, String(req.params.clipId), {
+        shakiness: req.body?.shakiness != null ? Number(req.body.shakiness) : undefined,
+        smoothing: req.body?.smoothing != null ? Number(req.body.smoothing) : undefined,
+        outDir: resolvePath(dataDir, "stabilized"),
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/layout", wrap((req, res, engine) => {
+    try {
+      const layout = (req.body?.layout ?? "pip-bottom-right") as LayoutPresetId;
+      const clip = applyLayoutPreset(engine, String(req.params.clipId), layout);
+      res.json({ clip });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/copilot", wrap(async (req, res, engine) => {
+    try {
+      const prompt = String(req.body?.prompt ?? "");
+      const result = await runStudioCopilot(engine, prompt, { dataDir });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.get("/api/v1/projects/:id/export/edl", wrap((_req, res, engine) => {
+    res.setHeader("Content-Disposition", `attachment; filename="${engine.project.id.slice(0, 8)}.edl"`);
+    res.type("text/plain").send(exportEdl(engine.project));
+  }, registry));
+
+  app.get("/api/v1/projects/:id/export/fcpxml", wrap((_req, res, engine) => {
+    res.setHeader("Content-Disposition", `attachment; filename="${engine.project.id.slice(0, 8)}.fcpxml"`);
+    res.type("application/xml").send(exportFcpXml(engine.project));
   }, registry));
 
   // error handler → JSON

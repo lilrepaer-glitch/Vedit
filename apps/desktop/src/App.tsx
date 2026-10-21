@@ -29,6 +29,7 @@ export function App() {
   const [presets, setPresets] = useState<Array<{ id: string; label: string }>>([]);
   const [presetId, setPresetId] = useState("fade-in");
   const [prompt, setPrompt] = useState("fireworks over Prague, night skyline");
+  const [copilotPrompt, setCopilotPrompt] = useState("Apply Kodak 2383 LUT, add lower third \"Vedit Studio\", duck music");
   const [busy, setBusy] = useState(false);
   const [aiCaps, setAiCaps] = useState<Awaited<ReturnType<typeof api.aiCaps>> | null>(null);
   const [genProviders, setGenProviders] = useState<GenProviderInfo[]>([]);
@@ -326,6 +327,24 @@ export function App() {
         <div className="toolbar-group">
           <input
             className="prompt"
+            value={copilotPrompt}
+            onChange={(e) => setCopilotPrompt(e.target.value)}
+            placeholder='AI Copilot: e.g. "Apply Kodak LUT & duck music"'
+          />
+          <button
+            disabled={busy || !copilotPrompt.trim()}
+            title="Execute multi-step AI Studio Copilot workflow with auto checkpoint"
+            onClick={() =>
+              act(async () => {
+                const res = await api.runCopilot(copilotPrompt);
+                flash(res.summary);
+              })
+            }
+          >
+            🤖 Copilot
+          </button>
+          <input
+            className="prompt"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Quick AI shot prompt…"
@@ -398,6 +417,20 @@ export function App() {
             }
           >
             📦 Batch
+          </button>
+          <button
+            disabled={busy}
+            title="Export DaVinci Resolve / Premiere CMX 3600 .edl"
+            onClick={() => window.open(withToken(`/api/v1/projects/${project.id}/export/edl`), "_blank")}
+          >
+            🎞 EDL
+          </button>
+          <button
+            disabled={busy}
+            title="Export Final Cut Pro / DaVinci Resolve .fcpxml"
+            onClick={() => window.open(withToken(`/api/v1/projects/${project.id}/export/fcpxml`), "_blank")}
+          >
+            🎬 XML
           </button>
         </div>
       </header>
@@ -571,6 +604,24 @@ export function App() {
                   void act(
                     () => api.fadeClip(clipId, Number(payload?.fadeIn ?? 0.5), Number(payload?.fadeOut ?? 0.5)),
                     "Fade transition applied",
+                  );
+                  break;
+                case "lut3d":
+                  void act(
+                    () => api.applyLut(clipId, String(payload?.lutId ?? "kodak-2383")),
+                    `3D .cube LUT "${payload?.lutId}" applied`,
+                  );
+                  break;
+                case "stabilize":
+                  void act(async () => {
+                    const res = await api.stabilizeClip(clipId);
+                    flash(`Stabilized clip (${res.method})`);
+                  });
+                  break;
+                case "layout":
+                  void act(
+                    () => api.applyLayout(clipId, String(payload?.layout ?? "pip-bottom-right")),
+                    `Layout "${payload?.layout}" applied`,
                   );
                   break;
                 case "enhance-audio":

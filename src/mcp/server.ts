@@ -44,6 +44,16 @@ import {
 import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
 import { addGraphicOverlay } from "../pro/graphics.js";
 import { captureDesktopClip, generateProjectThumbnail } from "../pro/capture.js";
+import {
+  BUILTIN_LUTS,
+  applyCubeLut,
+  applyLayoutPreset,
+  stabilizeClip,
+  type BuiltInLutId,
+  type LayoutPresetId,
+} from "../pro/cinema.js";
+import { exportEdl, exportFcpXml } from "../pro/interchange.js";
+import { runStudioCopilot } from "../ai/orchestrator.js";
 import { resolve as resolvePath } from "node:path";
 
 export interface McpContext {
@@ -964,10 +974,10 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       description: "Real FFmpeg video export (F1/F5/F6) — H.264 / H.265 / ProRes / WebM, GPU hardware acceleration, and loudness normalization.",
       inputSchema: {
         preset: z.string().optional(),
-        codec: z.enum(["h264", "h265", "prores", "vp9"]).optional(),
+        codec: z.enum(["h264", "h265", "prores", "vp9", "gif"]).optional(),
         hwAccel: z.enum(["auto", "cpu", "nvenc", "amf", "qsv", "videotoolbox", "vaapi"]).optional(),
         loudnessLufs: z.number().min(-36).max(-5).optional(),
-        format: z.enum(["mp4", "mov", "webm"]).default("mp4"),
+        format: z.enum(["mp4", "mov", "webm", "gif"]).default("mp4"),
         width: z.number().int().positive().optional(),
         height: z.number().int().positive().optional(),
         fps: z.number().positive().optional(),
@@ -1418,6 +1428,101 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       },
     },
     async (args) => wrapTool(() => generateProjectThumbnail(engine(), args)),
+  );
+
+  // ---- F8: AI Orchestrator Copilot, Cinema 3D .cube LUTs, Stabilization, PiP/Split Layouts & EDL/FCPXML ----
+  server.registerTool(
+    "ai.orchestrate",
+    {
+      description: "F8: Runs multi-step AI Studio Copilot workflow from a natural-language instruction with automatic checkpoint protection.",
+      inputSchema: {
+        prompt: z.string().min(2),
+      },
+    },
+    async ({ prompt }) => wrapTool(() => runStudioCopilot(engine(), prompt)),
+  );
+
+  server.registerTool(
+    "cinema.list_luts",
+    { description: "F8: Lists built-in cinema 3D .cube film stock LUTs." },
+    async () => ok({ luts: BUILTIN_LUTS }),
+  );
+
+  server.registerTool(
+    "cinema.apply_lut",
+    {
+      description: "F8: Applies a built-in cinema film stock 3D .cube LUT or custom .cube file to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        lutId: z
+          .enum(["kodak-2383", "teal-orange-blockbuster", "fuji-eterna-soft", "bleach-bypass", "cyberpunk-neon"])
+          .optional(),
+        filePath: z.string().optional(),
+        intensity: z.number().min(0).max(1).optional(),
+      },
+    },
+    async ({ clipId, lutId, filePath, intensity }) =>
+      wrapTool(() => applyCubeLut(engine(), clipId, { lutId: lutId as BuiltInLutId | undefined, filePath, intensity })),
+  );
+
+  server.registerTool(
+    "cinema.stabilize",
+    {
+      description: "F8: Stabilizes shaky camera motion on a video clip using 2-pass FFmpeg VidStab optical analysis.",
+      inputSchema: {
+        clipId: idSchema,
+        shakiness: z.number().min(1).max(10).optional(),
+        smoothing: z.number().min(1).max(60).optional(),
+      },
+    },
+    async ({ clipId, shakiness, smoothing }) =>
+      wrapTool(() => stabilizeClip(engine(), clipId, { shakiness, smoothing })),
+  );
+
+  server.registerTool(
+    "cinema.layout",
+    {
+      description: "F8: Positions a clip using Picture-in-Picture (PiP) or 50/50 Split-Screen layout geometry.",
+      inputSchema: {
+        clipId: idSchema,
+        layout: z.enum([
+          "pip-bottom-right",
+          "pip-bottom-left",
+          "pip-top-right",
+          "pip-top-left",
+          "split-left",
+          "split-right",
+          "full-reset",
+        ]),
+      },
+    },
+    async ({ clipId, layout }) => wrapTool(() => ({ clip: applyLayoutPreset(engine(), clipId, layout as LayoutPresetId) })),
+  );
+
+  server.registerTool(
+    "export.edl",
+    { description: "F8: Exports active sequence as CMX 3600 .edl for DaVinci Resolve / Premiere Pro / Avid." },
+    async () => ok({ edl: exportEdl(engine().project) }),
+  );
+
+  server.registerTool(
+    "export.fcpxml",
+    { description: "F8: Exports active sequence as Final Cut Pro / DaVinci Resolve FCPXML v1.10 (.fcpxml)." },
+    async () => ok({ fcpxml: exportFcpXml(engine().project) }),
+  );
+
+  server.registerTool(
+    "media.update",
+    {
+      description: "F8: Updates media asset tags, name, or relinks offline media path.",
+      inputSchema: {
+        assetId: idSchema,
+        name: z.string().optional(),
+        path: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+      },
+    },
+    async ({ assetId, ...patch }) => wrapTool(() => ({ asset: engine().updateAsset(assetId, patch) })),
   );
 
   // ---- F5: MCP Resources (PLAN.md §4.2) ----

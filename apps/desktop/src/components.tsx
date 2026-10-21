@@ -33,6 +33,7 @@ export function MediaPool({
 }) {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [recMode, setRecMode] = useState<"screen" | "camera" | "mic" | null>(null);
   const [recSec, setRecSec] = useState(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -168,36 +169,71 @@ export function MediaPool({
         )}
       </div>
 
+      <input
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        placeholder="🔍 Filter media by name or #tag…"
+        style={{ width: "100%", marginBottom: 6 }}
+      />
+
       <ul className="asset-list">
-        {project.assets.map((a) => (
-          <li key={a.id} className="asset">
-            <span className={`badge badge-${a.kind}`}>{a.kind}</span>
-            <span
-              className="asset-name"
-              title={
-                a.source?.prompt
-                  ? `${a.name} — ${a.source.provider ?? "gen"}/${a.source.model ?? ""}: "${a.source.prompt}"`
-                  : a.path
-              }
-            >
-              {a.name}
-            </span>
-            <span className="muted">{a.duration != null ? fmt(a.duration) : "—"}</span>
-            {a.source?.model && (
-              <span className="badge badge-stub" title={a.source.directedPrompt ?? a.source.prompt}>
-                {a.source.simulated ? "offline" : a.source.provider ?? "AI"}
+        {project.assets
+          .filter((a) => {
+            const q = searchQuery.trim().toLowerCase().replace(/^#/, "");
+            if (!q) return true;
+            return (
+              a.name.toLowerCase().includes(q) ||
+              (a.tags ?? []).some((t) => t.toLowerCase().includes(q))
+            );
+          })
+          .map((a) => (
+            <li key={a.id} className="asset" style={{ flexWrap: "wrap", gap: 4 }}>
+              <span className={`badge badge-${a.kind}`}>{a.kind}</span>
+              <span
+                className="asset-name"
+                title={
+                  a.source?.prompt
+                    ? `${a.name} — ${a.source.provider ?? "gen"}/${a.source.model ?? ""}: "${a.source.prompt}"`
+                    : a.path
+                }
+              >
+                {a.name}
               </span>
-            )}
-            <button
-              type="button"
-              title="Insert onto timeline at playhead"
-              style={{ padding: "1px 6px", fontSize: 11 }}
-              onClick={() => onQuickAdd(a)}
-            >
-              + Add
-            </button>
-          </li>
-        ))}
+              {(a.tags ?? []).map((tg) => (
+                <span key={tg} className="badge badge-stub" style={{ fontSize: 10 }}>
+                  #{tg}
+                </span>
+              ))}
+              <span className="muted">{a.duration != null ? fmt(a.duration) : "—"}</span>
+              {a.source?.model && (
+                <span className="badge badge-stub" title={a.source.directedPrompt ?? a.source.prompt}>
+                  {a.source.simulated ? "offline" : a.source.provider ?? "AI"}
+                </span>
+              )}
+              <button
+                type="button"
+                title="Add searchable tag"
+                style={{ padding: "1px 5px", fontSize: 10 }}
+                onClick={async () => {
+                  const tag = window.prompt(`Add tag for "${a.name}" (e.g. b-roll, hero, intro):`);
+                  if (!tag?.trim()) return;
+                  const next = Array.from(new Set([...(a.tags ?? []), tag.trim()]));
+                  await api.updateAsset(a.id, { tags: next });
+                  onImported(`Tagged "${a.name}" #${tag.trim()}`);
+                }}
+              >
+                #Tag
+              </button>
+              <button
+                type="button"
+                title="Insert onto timeline at playhead"
+                style={{ padding: "1px 6px", fontSize: 11 }}
+                onClick={() => onQuickAdd(a)}
+              >
+                + Add
+              </button>
+            </li>
+          ))}
       </ul>
       <details style={{ marginTop: 6 }}>
         <summary className="muted" style={{ cursor: "pointer", fontSize: 11 }}>
@@ -1357,7 +1393,17 @@ export function Inspector({
   asset: Asset | null;
   onPatch: (patch: Record<string, unknown>) => void;
   onProAction: (
-    action: "speed" | "color-grade" | "chroma-key" | "fade" | "enhance-audio" | "duck-audio" | "remove-effect",
+    action:
+      | "speed"
+      | "color-grade"
+      | "chroma-key"
+      | "fade"
+      | "lut3d"
+      | "stabilize"
+      | "layout"
+      | "enhance-audio"
+      | "duck-audio"
+      | "remove-effect",
     payload?: Record<string, unknown>,
   ) => void;
   captions: Caption[];
@@ -1442,6 +1488,46 @@ export function Inspector({
         </button>
         <button type="button" onClick={() => onProAction("fade", { fadeIn: 0.5, fadeOut: 0.5 })}>
           🌅 Fade In/Out
+        </button>
+      </div>
+
+      <h3>Cinema 3D LUTs, Stabilization &amp; PiP Layout</h3>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        <select
+          defaultValue=""
+          onChange={(e) => {
+            if (e.target.value) {
+              onProAction("lut3d", { lutId: e.target.value });
+              e.target.value = "";
+            }
+          }}
+        >
+          <option value="">🎞 3D .cube Film LUT…</option>
+          <option value="kodak-2383">Kodak 2383 Print Film</option>
+          <option value="teal-orange-blockbuster">Blockbuster Teal &amp; Orange</option>
+          <option value="fuji-eterna-soft">Fuji Eterna Soft Cinema</option>
+          <option value="bleach-bypass">Silver Bleach Bypass</option>
+          <option value="cyberpunk-neon">Cyberpunk Neon Night</option>
+        </select>
+        <button type="button" onClick={() => onProAction("stabilize")}>
+          🎥 Stabilize
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        <button type="button" onClick={() => onProAction("layout", { layout: "pip-bottom-right" })}>
+          ↘ PiP BR
+        </button>
+        <button type="button" onClick={() => onProAction("layout", { layout: "pip-top-right" })}>
+          ↗ PiP TR
+        </button>
+        <button type="button" onClick={() => onProAction("layout", { layout: "split-left" })}>
+          ◧ Split L
+        </button>
+        <button type="button" onClick={() => onProAction("layout", { layout: "split-right" })}>
+          ◨ Split R
+        </button>
+        <button type="button" onClick={() => onProAction("layout", { layout: "full-reset" })}>
+          ⛶ Full
         </button>
       </div>
 

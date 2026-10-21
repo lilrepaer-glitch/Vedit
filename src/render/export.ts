@@ -24,7 +24,7 @@ import {
 } from "../core/types.js";
 import { resolveVideoEncoder, type HwAccelBackend } from "./hwaccel.js";
 
-export type VideoCodecId = "h264" | "h265" | "prores" | "vp9";
+export type VideoCodecId = "h264" | "h265" | "prores" | "vp9" | "gif";
 
 export interface ExportPreset {
   id: string;
@@ -34,8 +34,8 @@ export interface ExportPreset {
   height: number;
   fps: number;
   codec: VideoCodecId;
-  format: "mp4" | "mov" | "webm";
-  ext: ".mp4" | ".mov" | ".webm";
+  format: "mp4" | "mov" | "webm" | "gif";
+  ext: ".mp4" | ".mov" | ".webm" | ".gif";
   crf?: number;
   audioBitrate?: string;
 }
@@ -129,6 +129,17 @@ export const EXPORT_PRESETS: ExportPreset[] = [
     ext: ".webm",
     crf: 30,
     audioBitrate: "128k",
+  },
+  {
+    id: "animated-gif",
+    label: "Animated Loop GIF (640p Optimal Palette)",
+    description: "High-quality 2-pass palettegen/paletteuse animated GIF loop",
+    width: 640,
+    height: 360,
+    fps: 15,
+    codec: "gif",
+    format: "gif",
+    ext: ".gif",
   },
 ];
 
@@ -330,6 +341,14 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
         }
         break;
       }
+      case "lut3d": {
+        const lutFile = String(p.filePath ?? "");
+        if (lutFile && existsSync(lutFile)) {
+          const escapedLut = lutFile.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+          f.push(`lut3d=file='${escapedLut}'`);
+        }
+        break;
+      }
       default:
         warnings.push(`Effect "${effect.type}" is stored as metadata only (not rendered by FFmpeg filter graph)`);
     }
@@ -390,6 +409,11 @@ function defaultCodecArgs(codec: VideoCodecId, fps: number, crf?: number, audioB
         "-c:a", "pcm_s16le",
         "-ar", "48000",
       ];
+    case "gif":
+      return [
+        "-r", String(fps),
+        "-loop", "0",
+      ];
     case "vp9":
       return [
         "-c:v", "libvpx-vp9",
@@ -432,7 +456,7 @@ export function buildRenderArgs(
   const height = opts.height ?? preset?.height ?? seq.height;
   const fps = opts.fps ?? preset?.fps ?? seq.fps;
   const ext = extname(opts.outPath).toLowerCase();
-  const inferredCodec: VideoCodecId = ext === ".webm" ? "vp9" : "h264";
+  const inferredCodec: VideoCodecId = ext === ".webm" ? "vp9" : ext === ".gif" ? "gif" : "h264";
   const codec: VideoCodecId = opts.codec ?? preset?.codec ?? inferredCodec;
   const warnings: string[] = [];
 
@@ -441,7 +465,7 @@ export function buildRenderArgs(
 
   const args: string[] = [
     "-hide_banner", "-loglevel", "error", "-y",
-    "-f", "lavfi", "-i", `color=c=black:size=${width}x${height}:rate=${fps}`,
+    "-f", "lavfi", "-i", `color=c=black:size=${width}x${height}:rate=${fps}:duration=${duration.toFixed(3)}`,
   ];
   const visual: RenderClip[] = [];
   const audioClips: RenderClip[] = [];
@@ -534,6 +558,22 @@ export function buildRenderArgs(
     current = "vsub";
   }
 
+  if (codec === "gif") {
+    filters.push(`[${current}]split[g0][g1];[g0]palettegen=stats_mode=diff[gp];[g1][gp]paletteuse=dither=bayer[vgif]`);
+    current = "vgif";
+    const encArgs = customCodecArgs ?? defaultCodecArgs(codec, fps);
+    args.push(
+      "-filter_complex", filters.join(";"),
+      "-map", `[${current}]`,
+      "-an",
+      "-t", duration.toFixed(3),
+      ...encArgs,
+      "-progress", "pipe:1", "-nostats",
+      opts.outPath,
+    );
+    return { args, duration, width, height, fps, codec, warnings, srt };
+  }
+
   const loudnessChain =
     opts.loudnessLufs != null
       ? `,loudnorm=I=${Math.max(-36, Math.min(-5, opts.loudnessLufs)).toFixed(1)}:TP=-1.5:LRA=11`
@@ -585,7 +625,7 @@ export async function renderSequence(project: Project, opts: RenderOptions): Pro
     project.sequences.find((s) => s.id === project.activeSequenceId)!;
   const fps = opts.fps ?? preset?.fps ?? seq.fps;
   const ext = extname(opts.outPath).toLowerCase();
-  const inferredCodec: VideoCodecId = ext === ".webm" ? "vp9" : "h264";
+  const inferredCodec: VideoCodecId = ext === ".webm" ? "vp9" : ext === ".gif" ? "gif" : "h264";
   const codec: VideoCodecId = opts.codec ?? preset?.codec ?? inferredCodec;
 
   const resolvedEncoder = await resolveVideoEncoder(
