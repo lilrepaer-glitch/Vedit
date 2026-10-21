@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev --prefix ..",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "npm run build --prefix ..",
+    "beforeBuildCommand": "node prebuild.cjs && npm run build --prefix ../..",
     "frontendDist": "../dist"
   },
   "app": {
