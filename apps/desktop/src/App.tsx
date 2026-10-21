@@ -376,6 +376,19 @@ export function App() {
           </button>
           <button
             disabled={busy}
+            title="Auto-select sharpest frame & export 1280×720 YouTube thumbnail"
+            onClick={() =>
+              act(async () => {
+                const res = await api.exportThumbnail();
+                flash(`Thumbnail saved (t=${res.selectedTime}s) → ${res.outPath.split(/[\\/]/).pop()}`);
+                window.open(withToken(`/api/v1/projects/${project.id}/thumbnail/image`), "_blank");
+              })
+            }
+          >
+            🖼 Thumbnail
+          </button>
+          <button
+            disabled={busy}
             title="Render YouTube 16:9 + TikTok 9:16 + WebM simultaneously"
             onClick={() =>
               act(async () => {
@@ -509,6 +522,20 @@ export function App() {
               act(() => api.applyTemplate(templateId, title ? { title } : {}), "Template applied")
             }
             onRunPlugin={(pluginId) => act(() => api.runPlugin(pluginId), `Plugin ${pluginId} finished`)}
+            onAddGraphic={(kind, label, svgMarkup) =>
+              act(
+                () =>
+                  api.addGraphic({
+                    kind,
+                    label,
+                    svgMarkup,
+                    start: playhead,
+                    duration: 3,
+                    animationPreset: "fade-in",
+                  }),
+                `Graphic overlay "${kind}" added`,
+              )
+            }
             onSaveSnapshot={(label) => act(() => api.saveSnapshot(label), `Checkpoint "${label}" saved`)}
             onRestoreSnapshot={(snapshotId) => act(() => api.restoreSnapshot(snapshotId), "Checkpoint restored")}
             onAddComment={(text, timecode) => act(() => api.addComment(text, timecode), "Review note added")}
@@ -591,6 +618,9 @@ export function App() {
         }}
         zoom={zoom}
         onZoom={setZoom}
+        onAddTrack={(kind) => act(() => api.addTrack(kind), `Added ${kind} track`)}
+        onUpdateTrack={(trackId, patch) => act(() => api.updateTrack(trackId, patch))}
+        onClipEdit={(id, patch) => act(() => api.updateClip(id, patch), "Clip updated")}
       />
 
       {toast && <div className="toast">{toast}</div>}

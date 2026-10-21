@@ -33,7 +33,58 @@ export function MediaPool({
 }) {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [recMode, setRecMode] = useState<"screen" | "camera" | "mic" | null>(null);
+  const [recSec, setRecSec] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+  const timerRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const stopRecording = () => {
+    recorderRef.current?.stop();
+  };
+
+  const startRecording = async (mode: "screen" | "camera" | "mic") => {
+    try {
+      const stream =
+        mode === "screen"
+          ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+          : mode === "camera"
+            ? await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            : await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      chunksRef.current = [];
+      const mime = mode === "mic" ? "audio/webm" : "video/webm";
+      const rec = new MediaRecorder(stream, MediaRecorder.isTypeSupported(mime) ? { mimeType: mime } : undefined);
+      rec.ondataavailable = (ev) => {
+        if (ev.data.size > 0) chunksRef.current.push(ev.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        if (timerRef.current) clearInterval(timerRef.current);
+        setRecMode(null);
+        setUploading(true);
+        try {
+          const ext = mode === "mic" ? "webm" : "webm";
+          const blob = new Blob(chunksRef.current, { type: mime });
+          const file = new File([blob], `${mode}-recording-${Date.now()}.${ext}`, { type: mime });
+          await api.uploadAssetFile(file, playhead, true);
+          onImported(`Recorded ${mode} clip added onto timeline`);
+        } catch (err) {
+          alert(`Recording upload failed: ${(err as Error).message}`);
+        } finally {
+          setUploading(false);
+        }
+      };
+      recorderRef.current = rec;
+      setRecMode(mode);
+      setRecSec(0);
+      timerRef.current = window.setInterval(() => setRecSec((s) => s + 0.2), 200);
+      rec.start(250);
+    } catch (err) {
+      alert(`Capture unavailable: ${(err as Error).message}`);
+    }
+  };
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -90,6 +141,31 @@ export function MediaPool({
         <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
           or click to browse files on your PC (auto-added to timeline)
         </div>
+      </div>
+
+      {/* F7: Built-in Studio Recorder (Screen / Webcam / Voice Mic) */}
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        {recMode ? (
+          <button
+            type="button"
+            onClick={stopRecording}
+            style={{ width: "100%", background: "#b91c1c", color: "#fff", fontWeight: 700 }}
+          >
+            ⏹ Stop {recMode.toUpperCase()} Recording ({recSec.toFixed(1)}s)
+          </button>
+        ) : (
+          <>
+            <button type="button" disabled={uploading} onClick={() => void startRecording("screen")} title="Record Windows screen + audio">
+              🖥 Record Screen
+            </button>
+            <button type="button" disabled={uploading} onClick={() => void startRecording("camera")} title="Record webcam + mic">
+              📷 Camera
+            </button>
+            <button type="button" disabled={uploading} onClick={() => void startRecording("mic")} title="Record voice microphone">
+              🎙 Mic
+            </button>
+          </>
+        )}
       </div>
 
       <ul className="asset-list">
@@ -569,6 +645,7 @@ export function StudioPanel({
   busy,
   onApplyTemplate,
   onRunPlugin,
+  onAddGraphic,
   onSaveSnapshot,
   onRestoreSnapshot,
   onAddComment,
@@ -581,6 +658,7 @@ export function StudioPanel({
   busy: boolean;
   onApplyTemplate: (templateId: string, title?: string) => void;
   onRunPlugin: (pluginId: string) => void;
+  onAddGraphic: (kind: string, label?: string, svgMarkup?: string) => void;
   onSaveSnapshot: (label: string) => void;
   onRestoreSnapshot: (snapshotId: string) => void;
   onAddComment: (text: string, timecode: number) => void;
@@ -592,6 +670,9 @@ export function StudioPanel({
   const [tplId, setTplId] = useState(templates[0]?.id ?? "tpl-youtube-intro");
   const [tplTitle, setTplTitle] = useState("");
   const [pluginId, setPluginId] = useState(plugins[0]?.id ?? "plg-auto-chapters");
+  const [gfxKind, setGfxKind] = useState("lower-third-card");
+  const [gfxLabel, setGfxLabel] = useState("");
+  const [svgCode, setSvgCode] = useState('<svg><rect x="20" y="20" width="240" height="72" rx="14" fill="#2563eb"/></svg>');
   const [snapLabel, setSnapLabel] = useState("");
   const [noteText, setNoteText] = useState("");
 
@@ -637,6 +718,40 @@ export function StudioPanel({
             Run Plugin
           </button>
         </div>
+
+        <h3>Vector Shapes, Callouts &amp; SVG</h3>
+        <div className="row">
+          <select value={gfxKind} onChange={(e) => setGfxKind(e.target.value)}>
+            <option value="lower-third-card">Lower Third Card</option>
+            <option value="callout-arrow">Callout Pointer Arrow</option>
+            <option value="spotlight-ring">Spotlight Focus Ring</option>
+            <option value="pill-badge">Pill CTA Badge</option>
+            <option value="progress-ribbon">Progress Bar Ribbon</option>
+            <option value="custom-svg">Custom &lt;svg&gt; Layer</option>
+          </select>
+          <button
+            disabled={busy}
+            onClick={() => {
+              onAddGraphic(gfxKind, gfxLabel || undefined, gfxKind === "custom-svg" ? svgCode : undefined);
+              setGfxLabel("");
+            }}
+          >
+            + Add Layer
+          </button>
+        </div>
+        <input
+          value={gfxLabel}
+          onChange={(e) => setGfxLabel(e.target.value)}
+          placeholder="Overlay caption label (optional)…"
+        />
+        {gfxKind === "custom-svg" && (
+          <textarea
+            rows={2}
+            value={svgCode}
+            onChange={(e) => setSvgCode(e.target.value)}
+            placeholder="<svg>...</svg>"
+          />
+        )}
 
         <h3>Version Checkpoints ({project.snapshots?.length ?? 0})</h3>
         <div className="row">
@@ -899,6 +1014,9 @@ export function Timeline({
   onSeek,
   zoom,
   onZoom,
+  onAddTrack,
+  onUpdateTrack,
+  onClipEdit,
 }: {
   project: Project;
   selection: { trackId: string; clipId: string } | null;
@@ -907,26 +1025,142 @@ export function Timeline({
   onSeek: (t: number) => void;
   zoom: number;
   onZoom: (z: number) => void;
+  onAddTrack: (kind: Track["kind"]) => void;
+  onUpdateTrack: (
+    trackId: string,
+    patch: { muted?: boolean; solo?: boolean; locked?: boolean; volumeDb?: number },
+  ) => void;
+  onClipEdit: (clipId: string, patch: Record<string, unknown>) => void;
 }) {
   const seq = project.sequences.find((s) => s.id === project.activeSequenceId)!;
   const duration = Math.max(20, ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)));
   const width = duration * zoom + 80;
   const ticks = Array.from({ length: Math.ceil(duration) + 1 }, (_, i) => i);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [waveCache, setWaveCache] = useState<Record<string, number[]>>({});
+  const [dragPreview, setDragPreview] = useState<{ clipId: string; start: number; duration: number } | null>(null);
+
+  // Load real audio waveform peaks lazily for visible audio/video assets
+  useEffect(() => {
+    for (const a of project.assets) {
+      if (a.kind === "image" || waveCache[a.id]) continue;
+      void api
+        .waveform(a.id, 64)
+        .then((res) => setWaveCache((prev) => ({ ...prev, [a.id]: res.peaks })))
+        .catch(() => undefined);
+    }
+  }, [project.assets, waveCache]);
+
+  const snapPoints = [
+    0,
+    playhead,
+    ...seq.tracks.flatMap((t) => t.clips.flatMap((c) => [c.start, c.start + c.duration])),
+  ];
+
+  const applySnap = (timeSec: number, excludeClipId: string): number => {
+    if (!snapEnabled) return Math.max(0, Number(timeSec.toFixed(3)));
+    const threshSec = 8 / Math.max(20, zoom);
+    let best = timeSec;
+    let bestDist = threshSec;
+    for (const sp of snapPoints) {
+      const d = Math.abs(sp - timeSec);
+      if (d < bestDist) {
+        best = sp;
+        bestDist = d;
+      }
+    }
+    void excludeClipId;
+    return Math.max(0, Number(best.toFixed(3)));
+  };
+
+  const beginClipDrag = (
+    e: React.MouseEvent,
+    track: Track,
+    clip: Clip,
+    mode: "move" | "trim-left" | "trim-right",
+  ) => {
+    if (track.locked) return;
+    e.stopPropagation();
+    onSelect(track.id, clip.id);
+    const startX = e.clientX;
+    const origStart = clip.start;
+    const origDur = clip.duration;
+    const origIn = clip.in;
+    let latest = { start: origStart, duration: origDur, in: origIn };
+
+    const onMove = (ev: MouseEvent) => {
+      const dt = (ev.clientX - startX) / zoom;
+      if (mode === "move") {
+        const nextStart = applySnap(Math.max(0, origStart + dt), clip.id);
+        latest = { start: nextStart, duration: origDur, in: origIn };
+      } else if (mode === "trim-right") {
+        const rawEnd = Math.max(origStart + 0.15, origStart + origDur + dt);
+        const snappedEnd = applySnap(rawEnd, clip.id);
+        latest = { start: origStart, duration: Math.max(0.15, snappedEnd - origStart), in: origIn };
+      } else {
+        const maxShift = origDur - 0.15;
+        const clampedDt = Math.max(-origIn, Math.min(maxShift, dt));
+        const rawStart = Math.max(0, origStart + clampedDt);
+        const snappedStart = applySnap(rawStart, clip.id);
+        const actualShift = snappedStart - origStart;
+        latest = {
+          start: snappedStart,
+          duration: Math.max(0.15, origDur - actualShift),
+          in: Math.max(0, origIn + actualShift),
+        };
+      }
+      setDragPreview({ clipId: clip.id, start: latest.start, duration: latest.duration });
+    };
+
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setDragPreview(null);
+      if (Math.abs(latest.start - origStart) > 0.005 || Math.abs(latest.duration - origDur) > 0.005) {
+        onClipEdit(clip.id, {
+          start: Number(latest.start.toFixed(3)),
+          duration: Number(latest.duration.toFixed(3)),
+          in: Number(latest.in.toFixed(3)),
+          out: Number((latest.in + latest.duration).toFixed(3)),
+        });
+      }
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   return (
     <section className="panel timeline-panel">
-      <div className="timeline-head">
-        <h2>Timeline</h2>
-        <label className="muted">
-          zoom{" "}
-          <input
-            type="range"
-            min={20}
-            max={160}
-            value={zoom}
-            onChange={(e) => onZoom(Number(e.target.value))}
-          />
-        </label>
+      <div className="timeline-head" style={{ gap: 8, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <h2>Timeline &amp; Mixer</h2>
+          <button type="button" onClick={() => onAddTrack("video")} style={{ fontSize: 11, padding: "2px 6px" }}>
+            + Video
+          </button>
+          <button type="button" onClick={() => onAddTrack("audio")} style={{ fontSize: 11, padding: "2px 6px" }}>
+            + Audio
+          </button>
+          <button type="button" onClick={() => onAddTrack("graphics")} style={{ fontSize: 11, padding: "2px 6px" }}>
+            + Graphics
+          </button>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <label className="muted" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+            <input type="checkbox" checked={snapEnabled} onChange={(e) => setSnapEnabled(e.target.checked)} />
+            🧲 Snap
+          </label>
+          <label className="muted">
+            zoom{" "}
+            <input
+              type="range"
+              min={20}
+              max={160}
+              value={zoom}
+              onChange={(e) => onZoom(Number(e.target.value))}
+            />
+          </label>
+        </div>
       </div>
       <div className="timeline-scroll">
         <div className="timeline-inner" style={{ width }}>
@@ -944,27 +1178,159 @@ export function Timeline({
             ))}
           </div>
           {seq.tracks.map((track) => (
-            <div key={track.id} className="track">
-              <div className="track-label" style={{ borderColor: TRACK_COLOR[track.kind] }}>
-                {track.name}
+            <div key={track.id} className="track" style={{ opacity: track.muted ? 0.48 : 1 }}>
+              <div
+                className="track-label"
+                style={{
+                  borderColor: TRACK_COLOR[track.kind],
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                  minWidth: 132,
+                  padding: "3px 6px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 3 }}>
+                  <strong style={{ fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {track.name}
+                  </strong>
+                  <span style={{ display: "flex", gap: 2 }}>
+                    <button
+                      type="button"
+                      title="Mute Track"
+                      onClick={() => onUpdateTrack(track.id, { muted: !track.muted })}
+                      style={{
+                        padding: "0 4px",
+                        fontSize: 10,
+                        background: track.muted ? "#dc2626" : undefined,
+                      }}
+                    >
+                      M
+                    </button>
+                    <button
+                      type="button"
+                      title="Solo Track"
+                      onClick={() => onUpdateTrack(track.id, { solo: !track.solo })}
+                      style={{
+                        padding: "0 4px",
+                        fontSize: 10,
+                        background: track.solo ? "#ca8a04" : undefined,
+                      }}
+                    >
+                      S
+                    </button>
+                    <button
+                      type="button"
+                      title="Lock Track"
+                      onClick={() => onUpdateTrack(track.id, { locked: !track.locked })}
+                      style={{
+                        padding: "0 4px",
+                        fontSize: 10,
+                        background: track.locked ? "#4b5563" : undefined,
+                      }}
+                    >
+                      🔒
+                    </button>
+                  </span>
+                </div>
+                {(track.kind === "audio" || track.kind === "video") && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10 }}>
+                    <input
+                      type="range"
+                      min={-24}
+                      max={12}
+                      step={1}
+                      defaultValue={track.volumeDb ?? 0}
+                      title={`Track Gain: ${track.volumeDb ?? 0} dB`}
+                      style={{ width: 78 }}
+                      onMouseUp={(e) =>
+                        onUpdateTrack(track.id, { volumeDb: Number((e.target as HTMLInputElement).value) })
+                      }
+                    />
+                    <span className="muted">{track.volumeDb ?? 0}dB</span>
+                  </div>
+                )}
               </div>
               <div className="track-lane">
                 {track.clips.map((clip) => {
                   const selected = selection?.clipId === clip.id;
+                  const visStart = dragPreview?.clipId === clip.id ? dragPreview.start : clip.start;
+                  const visDur = dragPreview?.clipId === clip.id ? dragPreview.duration : clip.duration;
+                  const peaks = waveCache[clip.assetId];
+                  const pxWidth = Math.max(12, visDur * zoom);
                   return (
                     <div
                       key={clip.id}
                       className={`clip ${selected ? "clip-selected" : ""}`}
                       style={{
-                        left: clip.start * zoom,
-                        width: Math.max(8, clip.duration * zoom),
+                        left: visStart * zoom,
+                        width: pxWidth,
                         background: TRACK_COLOR[track.kind],
+                        cursor: track.locked ? "not-allowed" : "grab",
+                        overflow: "hidden",
                       }}
-                      title={`${clip.name} (${fmt(clip.start)}–${fmt(clip.start + clip.duration)})`}
+                      title={`${clip.name} (${fmt(visStart)}–${fmt(visStart + visDur)}) — drag to move, drag edges to trim`}
+                      onMouseDown={(e) => beginClipDrag(e, track, clip, "move")}
                       onClick={() => onSelect(track.id, clip.id)}
                     >
-                      <span className="clip-name">{clip.name}</span>
+                      {peaks && peaks.length > 0 && (
+                        <svg
+                          viewBox={`0 0 ${peaks.length} 24`}
+                          preserveAspectRatio="none"
+                          style={{
+                            position: "absolute",
+                            inset: 0,
+                            width: "100%",
+                            height: "100%",
+                            opacity: 0.35,
+                            pointerEvents: "none",
+                          }}
+                        >
+                          {peaks.map((pk, idx) => {
+                            const h = Math.max(2, pk * 22);
+                            return (
+                              <rect
+                                key={idx}
+                                x={idx}
+                                y={12 - h / 2}
+                                width={0.75}
+                                height={h}
+                                fill="#ffffff"
+                              />
+                            );
+                          })}
+                        </svg>
+                      )}
+                      <div
+                        title="Trim In Point"
+                        onMouseDown={(e) => beginClipDrag(e, track, clip, "trim-left")}
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 6,
+                          cursor: "ew-resize",
+                          background: "rgba(255,255,255,0.28)",
+                        }}
+                      />
+                      <span className="clip-name" style={{ paddingLeft: 6 }}>
+                        {clip.name}
+                      </span>
                       {clip.keyframes.length > 0 && <span className="clip-kf">◆{clip.keyframes.length}</span>}
+                      <div
+                        title="Trim Out Point"
+                        onMouseDown={(e) => beginClipDrag(e, track, clip, "trim-right")}
+                        style={{
+                          position: "absolute",
+                          right: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 6,
+                          cursor: "ew-resize",
+                          background: "rgba(255,255,255,0.28)",
+                        }}
+                      />
                     </div>
                   );
                 })}

@@ -86,6 +86,10 @@ export interface Track {
   muted: boolean;
   solo: boolean;
   locked: boolean;
+  /** F7: per-track mixer fader gain in dB (-60 .. +12, default 0) */
+  volumeDb?: number;
+  /** F7: stereo pan (-1.0 left .. 0.0 center .. +1.0 right) */
+  pan?: number;
   clips: Clip[];
 }
 

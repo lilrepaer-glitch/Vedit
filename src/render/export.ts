@@ -186,6 +186,8 @@ interface RenderClip {
   asset: Asset;
   inputIndex: number;
   speed: number;
+  trackVolumeDb: number;
+  trackPan: number;
 }
 
 /** Builds a valid FFmpeg `atempo` chain for any speed in [0.1 .. 8.0] (each stage within [0.5 .. 2.0]). */
@@ -339,8 +341,16 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
   return f;
 }
 
-function clipAudioFilters(clip: Clip, speed: number): string[] {
+function clipAudioFilters(clip: Clip, speed: number, trackVolumeDb = 0, trackPan = 0): string[] {
   const af: string[] = [...buildAtempoChain(speed)];
+  if (Math.abs(trackVolumeDb) > 0.01) {
+    af.push(`volume=${trackVolumeDb.toFixed(2)}dB`);
+  }
+  if (Math.abs(trackPan) > 0.01) {
+    const leftGain = Math.min(1, 1 - Math.max(0, trackPan)).toFixed(3);
+    const rightGain = Math.min(1, 1 + Math.min(0, trackPan)).toFixed(3);
+    af.push(`pan=stereo|c0=${leftGain}*c0|c1=${rightGain}*c1`);
+  }
   for (const effect of clip.effects) {
     const p = effect.params as Record<string, number | boolean | string>;
     if (effect.type === "audio-volume" && p.gainDb != null) {
@@ -437,9 +447,15 @@ export function buildRenderArgs(
   const audioClips: RenderClip[] = [];
   let inputIndex = 1;
 
+  const hasVideoSolo = seq.tracks.some((t) => t.kind !== "audio" && t.solo);
+  const hasAudioSolo = seq.tracks.some((t) => t.kind === "audio" && t.solo);
+
   for (const track of seq.tracks) {
     if (track.muted) continue;
     const isAudioTrack = track.kind === "audio";
+    if (isAudioTrack && hasAudioSolo && !track.solo) continue;
+    if (!isAudioTrack && hasVideoSolo && !track.solo) continue;
+
     for (const clip of [...track.clips].sort((a, b) => a.start - b.start)) {
       const asset = assetOf(clip);
       if (!asset) {
@@ -452,7 +468,14 @@ export function buildRenderArgs(
       }
       const speed = getClipSpeed(clip);
       const sourceSpan = Math.max(0.05, clip.duration * speed);
-      const rc: RenderClip = { clip, asset, inputIndex, speed };
+      const rc: RenderClip = {
+        clip,
+        asset,
+        inputIndex,
+        speed,
+        trackVolumeDb: track.volumeDb ?? 0,
+        trackPan: track.pan ?? 0,
+      };
       if (isAudioTrack) {
         if (asset.kind !== "audio" && !asset.hasAudio) {
           warnings.push(`Clip "${clip.name}" has no audio stream — skipped`);
@@ -469,7 +492,9 @@ export function buildRenderArgs(
         }
         visual.push(rc);
         inputIndex++;
-        if (asset.hasAudio) audioClips.push(rc);
+        if (asset.hasAudio && (!hasAudioSolo || track.solo)) {
+          audioClips.push(rc);
+        }
       }
     }
   }
@@ -520,7 +545,7 @@ export function buildRenderArgs(
     audioClips.forEach((rc, n) => {
       const aLabel = `a${n}`;
       const delayMs = Math.round(rc.clip.start * 1000);
-      const af = clipAudioFilters(rc.clip, rc.speed);
+      const af = clipAudioFilters(rc.clip, rc.speed, rc.trackVolumeDb, rc.trackPan);
       af.push(`adelay=${delayMs}|${delayMs}`, "apad");
       filters.push(`[${rc.inputIndex}:a]${af.join(",")}[${aLabel}]`);
       labels.push(`[${aLabel}]`);

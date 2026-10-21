@@ -42,6 +42,8 @@ import {
   setClipSpeed,
 } from "../pro/fx.js";
 import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
+import { addGraphicOverlay } from "../pro/graphics.js";
+import { captureDesktopClip, generateProjectThumbnail } from "../pro/capture.js";
 import { resolve as resolvePath } from "node:path";
 
 export interface McpContext {
@@ -1342,6 +1344,80 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       },
     },
     async (args) => wrapTool(() => duckMusicUnderVoice(engine(), args)),
+  );
+
+  // ---- F7: Studio Capture, Track Mixer Console, Vector/SVG Graphics & Smart Thumbnail Export ----
+  server.registerTool(
+    "track.update",
+    {
+      description: "F7: Updates track mixer & state controls (muted, solo, locked, volumeDb, pan, name).",
+      inputSchema: {
+        trackId: idSchema,
+        name: z.string().optional(),
+        muted: z.boolean().optional(),
+        solo: z.boolean().optional(),
+        locked: z.boolean().optional(),
+        volumeDb: z.number().min(-60).max(18).optional(),
+        pan: z.number().min(-1).max(1).optional(),
+      },
+    },
+    async ({ trackId, ...patch }) => wrapTool(() => ({ track: engine().updateTrack(trackId, patch) })),
+  );
+
+  server.registerTool(
+    "graphics.add_overlay",
+    {
+      description: "F7: Generates a transparent 32-bit RGBA vector shape, callout arrow, lower-third card, or custom SVG overlay onto a Graphics track.",
+      inputSchema: {
+        kind: z.enum([
+          "lower-third-card",
+          "callout-arrow",
+          "spotlight-ring",
+          "pill-badge",
+          "progress-ribbon",
+          "custom-svg",
+        ]),
+        width: z.number().int().min(32).max(3840).optional(),
+        height: z.number().int().min(32).max(2160).optional(),
+        primaryColor: z.string().optional(),
+        accentColor: z.string().optional(),
+        svgMarkup: z.string().optional(),
+        start: z.number().nonnegative().optional(),
+        duration: z.number().positive().optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        animationPreset: z.string().optional(),
+        label: z.string().optional(),
+      },
+    },
+    async (args) => wrapTool(() => addGraphicOverlay(engine(), args)),
+  );
+
+  server.registerTool(
+    "capture.screen",
+    {
+      description: "F7: Captures desktop screen video via FFmpeg OS grabber and inserts clip onto timeline.",
+      inputSchema: {
+        seconds: z.number().min(0.5).max(120).optional(),
+        fps: z.number().min(5).max(60).optional(),
+        start: z.number().nonnegative().optional(),
+        label: z.string().optional(),
+      },
+    },
+    async (args) => wrapTool(() => captureDesktopClip(engine(), args)),
+  );
+
+  server.registerTool(
+    "export.thumbnail",
+    {
+      description: "F7: Scores timeline frames by visual detail/sharpness and exports a high-resolution YouTube/social thumbnail JPEG.",
+      inputSchema: {
+        at: z.number().nonnegative().optional(),
+        width: z.number().int().min(320).max(3840).optional(),
+        title: z.string().optional(),
+      },
+    },
+    async (args) => wrapTool(() => generateProjectThumbnail(engine(), args)),
   );
 
   // ---- F5: MCP Resources (PLAN.md §4.2) ----

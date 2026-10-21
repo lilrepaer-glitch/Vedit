@@ -18,6 +18,8 @@ import {
 } from "../pro/fx.js";
 import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
 import { listSavedProjects, loadProjectFromDisk, saveProjectToDisk } from "../pro/persistence.js";
+import { addGraphicOverlay, type VectorGraphicPreset } from "../pro/graphics.js";
+import { captureDesktopClip, generateProjectThumbnail } from "../pro/capture.js";
 import { sequenceDuration } from "../core/types.js";
 import {
   addReviewComment,
@@ -553,7 +555,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }
 
   app.get("/api/v1/health", (_req, res) => {
-    res.json({ ok: true, name: "vedit", version: "0.2.0", scope: "F0–F6 Pro Studio" });
+    res.json({ ok: true, name: "vedit", version: "0.3.0", scope: "F0–F7 Studio Complete" });
   });
 
   app.get("/api/v1/projects", (_req, res) => {
@@ -641,10 +643,35 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   app.post("/api/v1/projects/:id/tracks", wrap((req, res, engine) => {
     const kind = req.body?.kind as TrackKind | undefined;
     if (!kind || !["video", "audio", "text", "graphics"].includes(kind)) {
-      return badRequest(res, "kind musí být video|audio|text|graphics");
+      return badRequest(res, "kind must be video|audio|text|graphics");
     }
     const track = engine.addTrack(kind, req.body?.name ? String(req.body.name) : undefined);
     res.status(201).json({ track });
+  }, registry));
+
+  app.patch("/api/v1/projects/:id/tracks/:trackId", wrap((req, res, engine) => {
+    try {
+      const track = engine.updateTrack(String(req.params.trackId), {
+        ...(req.body?.name !== undefined ? { name: String(req.body.name) } : {}),
+        ...(req.body?.muted !== undefined ? { muted: Boolean(req.body.muted) } : {}),
+        ...(req.body?.solo !== undefined ? { solo: Boolean(req.body.solo) } : {}),
+        ...(req.body?.locked !== undefined ? { locked: Boolean(req.body.locked) } : {}),
+        ...(req.body?.volumeDb !== undefined ? { volumeDb: Number(req.body.volumeDb) } : {}),
+        ...(req.body?.pan !== undefined ? { pan: Number(req.body.pan) } : {}),
+      });
+      res.json({ track });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.delete("/api/v1/projects/:id/tracks/:trackId", wrap((req, res, engine) => {
+    try {
+      engine.removeTrack(String(req.params.trackId));
+      res.json({ ok: true });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
   }, registry));
 
   // clips
@@ -1482,6 +1509,71 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
     } catch (err) {
       badRequest(res, (err as Error).message);
     }
+  }, registry));
+
+  // ---- F7: Vector Shapes / SVG Overlays, Desktop Screen Capture & Smart Thumbnail Export ----
+
+  app.post("/api/v1/projects/:id/graphics", wrap(async (req, res, engine) => {
+    try {
+      const kind = (req.body?.kind ?? "lower-third-card") as VectorGraphicPreset;
+      const result = await addGraphicOverlay(engine, {
+        kind,
+        width: req.body?.width != null ? Number(req.body.width) : undefined,
+        height: req.body?.height != null ? Number(req.body.height) : undefined,
+        primaryColor: req.body?.primaryColor != null ? String(req.body.primaryColor) : undefined,
+        accentColor: req.body?.accentColor != null ? String(req.body.accentColor) : undefined,
+        svgMarkup: req.body?.svgMarkup != null ? String(req.body.svgMarkup) : undefined,
+        start: req.body?.start != null ? Number(req.body.start) : undefined,
+        duration: req.body?.duration != null ? Number(req.body.duration) : undefined,
+        x: req.body?.x != null ? Number(req.body.x) : undefined,
+        y: req.body?.y != null ? String(req.body.y) === "" ? undefined : Number(req.body.y) : undefined,
+        animationPreset: req.body?.animationPreset != null ? String(req.body.animationPreset) : undefined,
+        label: req.body?.label != null ? String(req.body.label) : undefined,
+        outDir: resolvePath(dataDir, "graphics"),
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/capture/screen", wrap(async (req, res, engine) => {
+    try {
+      const result = await captureDesktopClip(engine, {
+        seconds: req.body?.seconds != null ? Number(req.body.seconds) : 3,
+        fps: req.body?.fps != null ? Number(req.body.fps) : 24,
+        start: req.body?.start != null ? Number(req.body.start) : undefined,
+        label: req.body?.label != null ? String(req.body.label) : undefined,
+        outDir: resolvePath(dataDir, "captures"),
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/thumbnail", wrap(async (req, res, engine) => {
+    try {
+      const result = await generateProjectThumbnail(engine, {
+        at: req.body?.at != null ? Number(req.body.at) : undefined,
+        width: req.body?.width != null ? Number(req.body.width) : 1280,
+        title: req.body?.title != null ? String(req.body.title) : undefined,
+        outDir: resolvePath(dataDir, "thumbnails"),
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.get("/api/v1/projects/:id/thumbnail/image", wrap(async (req, res, engine) => {
+    const result = await generateProjectThumbnail(engine, {
+      at: req.query.at != null ? Number(req.query.at) : undefined,
+      width: req.query.width != null ? Number(req.query.width) : 1280,
+      title: req.query.title != null ? String(req.query.title) : undefined,
+      outDir: resolvePath(dataDir, "thumbnails"),
+    });
+    res.type("image/jpeg").sendFile(result.outPath);
   }, registry));
 
   // error handler → JSON

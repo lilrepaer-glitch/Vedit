@@ -325,6 +325,24 @@ export class VeditEngine {
     return track;
   }
 
+  updateTrack(
+    trackId: ID,
+    patch: Partial<Pick<Track, "name" | "muted" | "solo" | "locked" | "volumeDb" | "pan">>,
+  ): Track {
+    const seq = this.activeSequence();
+    const track = seq.tracks.find((t) => t.id === trackId);
+    if (!track) throw new Error(`track not found: ${trackId}`);
+    this.commit(`track.update "${track.name}"`, () => {
+      if (patch.name !== undefined) track.name = patch.name;
+      if (patch.muted !== undefined) track.muted = patch.muted;
+      if (patch.solo !== undefined) track.solo = patch.solo;
+      if (patch.locked !== undefined) track.locked = patch.locked;
+      if (patch.volumeDb !== undefined) track.volumeDb = Math.max(-60, Math.min(18, patch.volumeDb));
+      if (patch.pan !== undefined) track.pan = Math.max(-1, Math.min(1, patch.pan));
+    });
+    return track;
+  }
+
   removeTrack(trackId: ID): void {
     const seq = this.activeSequence();
     const index = seq.tracks.findIndex((t) => t.id === trackId);
