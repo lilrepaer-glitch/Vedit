@@ -1,4 +1,4 @@
-// Entry point: starts the REST+WS API server (vedit serve).
+// Entry point: starts the local REST + WebSocket API server (vedit serve).
 
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
@@ -28,15 +28,15 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
- * Demo projekt s reálnými ukázkovými klipy (generované přes FFmpeg lavfi),
- * aby UI mělo co ukázat hned po startu.
+ * Seeds a real playable starter project with FFmpeg lavfi sample media
+ * so the desktop editor opens with an interactive timeline immediately on first launch.
  */
 export async function seedDemoProject(registry: ProjectRegistry, dataDir: string): Promise<void> {
   const mediaDir = resolvePath(dataDir, "media");
   await mkdir(mediaDir, { recursive: true });
-  const clipA = resolvePath(mediaDir, "demo_zaber_01.mp4");
-  const clipB = resolvePath(mediaDir, "demo_zaber_02.mp4");
-  const music = resolvePath(mediaDir, "demo_hudba.wav");
+  const clipA = resolvePath(mediaDir, "demo_shot_01.mp4");
+  const clipB = resolvePath(mediaDir, "demo_shot_02.mp4");
+  const music = resolvePath(mediaDir, "demo_music.wav");
   if (!(await exists(clipA))) await generateTestClip(clipA, { seconds: 5, kind: "testsrc", freq: 440 });
   if (!(await exists(clipB))) await generateTestClip(clipB, { seconds: 4, kind: "smptebars", freq: 660 });
   if (!(await exists(music))) {
@@ -47,7 +47,7 @@ export async function seedDemoProject(registry: ProjectRegistry, dataDir: string
     ]);
   }
 
-  const engine = new VeditEngine(VeditEngine.createProject("Demo projekt"));
+  const engine = new VeditEngine(VeditEngine.createProject("Vedit Studio Starter"));
   const v1 = engine.addTrack("video", "V1");
   const a1 = engine.addTrack("audio", "A1");
 
@@ -56,7 +56,7 @@ export async function seedDemoProject(registry: ProjectRegistry, dataDir: string
   const probeM = await probeMedia(music);
 
   const assetA = engine.addAsset({
-    name: "demo_zaber_01.mp4",
+    name: "demo_shot_01.mp4",
     kind: "video",
     path: clipA,
     duration: probeA.duration,
@@ -67,10 +67,10 @@ export async function seedDemoProject(registry: ProjectRegistry, dataDir: string
     videoCodec: probeA.videoCodec,
     audioCodec: probeA.audioCodec,
     hasAudio: probeA.hasAudio,
-    source: { provider: "vedit-demo", model: "lavfi-testsrc2", prompt: "demo záběr", simulated: true },
+    source: { provider: "vedit-demo", model: "lavfi-testsrc2", prompt: "studio test pattern shot", simulated: true },
   });
   const assetB = engine.addAsset({
-    name: "demo_zaber_02.mp4",
+    name: "demo_shot_02.mp4",
     kind: "video",
     path: clipB,
     duration: probeB.duration,
@@ -81,17 +81,17 @@ export async function seedDemoProject(registry: ProjectRegistry, dataDir: string
     videoCodec: probeB.videoCodec,
     audioCodec: probeB.audioCodec,
     hasAudio: probeB.hasAudio,
-    source: { provider: "vedit-demo", model: "lavfi-smptebars", prompt: "barevné pruhy", simulated: true },
+    source: { provider: "vedit-demo", model: "lavfi-smptebars", prompt: "broadcast color bars", simulated: true },
   });
   const assetM = engine.addAsset({
-    name: "demo_hudba.wav",
+    name: "demo_music.wav",
     kind: "audio",
     path: music,
     duration: probeM.duration,
     sizeBytes: probeM.sizeBytes,
     audioCodec: probeM.audioCodec,
     hasAudio: true,
-    source: { provider: "vedit-demo", model: "lavfi-sine", prompt: "podkladová hudba", simulated: true },
+    source: { provider: "vedit-demo", model: "lavfi-sine", prompt: "ambient backing audio", simulated: true },
   });
 
   const c1 = engine.addClip({ trackId: v1.id, assetId: assetA.id, start: 0, duration: 3, in: 0.5, out: 3.5 });
@@ -99,8 +99,8 @@ export async function seedDemoProject(registry: ProjectRegistry, dataDir: string
   engine.addClip({ trackId: a1.id, assetId: assetM.id, start: 0, duration: 5.5, in: 1, out: 6.5 });
   engine.applyAnimationPreset(c1.id, "fade-in");
   engine.applyAnimationPreset(c2.id, "slide-in-left");
-  engine.addCaption({ text: "Vedit — demo projekt", start: 0.3, end: 2.2 });
-  engine.addCaption({ text: "F1: reálný render přes FFmpeg", start: 3.1, end: 5.2 });
+  engine.addCaption({ text: "Welcome to Vedit Studio", start: 0.3, end: 2.2 });
+  engine.addCaption({ text: "AI Video Editor • Real FFmpeg Engine", start: 3.1, end: 5.2 });
   registry.add(engine);
 }
 
@@ -127,23 +127,29 @@ export function startServer(opts: StartOptions = {}) {
   const server = createServer(app);
   hub = attachWs(server, registry);
 
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (!opts.quiet) {
+      console.error(`Vedit API server error on ${host}:${port}: ${err.message}`);
+    }
+  });
+
   void (async () => {
     if (opts.sample !== false && registry.list().length === 0) {
       try {
         await seedDemoProject(registry, dataDir);
       } catch (err) {
-        if (!opts.quiet) console.warn(`demo projekt se nepodařilo vytvořit: ${(err as Error).message}`);
-        registry.create("Demo projekt", true);
+        if (!opts.quiet) console.warn(`Failed to seed starter project: ${(err as Error).message}`);
+        registry.create("Vedit Studio Starter", true);
       }
     }
     server.listen(port, host, () => {
       if (!opts.quiet) {
-        console.log(`Vedit API  běží na http://${host}:${port}`);
+        console.log(`Vedit API  running on http://${host}:${port}`);
         console.log(`WebSocket  ws://${host}:${port}/ws`);
         console.log(`Data dir   ${dataDir}`);
         if (token) console.log(`API token  ${token}`);
         const first = registry.list()[0];
-        if (first) console.log(`Demo projekt  ${first.id} (${first.name})`);
+        if (first) console.log(`Starter project  ${first.id} (${first.name})`);
       }
     });
   })();
@@ -151,7 +157,7 @@ export function startServer(opts: StartOptions = {}) {
   return { server, app, registry, port, host, token };
 }
 
-// přímé spuštění: node dist/server/index.js
+// Direct launch: node dist/server/index.js
 if (process.argv[1] && process.argv[1].endsWith("server/index.js")) {
   startServer();
 }

@@ -1,10 +1,10 @@
-# Vedit — Windows installer (download & run with one command)
+# Vedit — Windows Installer (One-Command Download & Launch)
 #
 #   irm https://raw.githubusercontent.com/lilrepaer-glitch/Vedit/main/vedit-install.ps1 | iex
 #
-# 1) Download Vedit_installer.exe from GitHub Releases (if available) and run it.
-# 2) If not yet on Releases, build installer from source on your PC
-#    (auto-installs Node.js/Rust via winget only if missing) and run it.
+# 1) Downloads Vedit_installer.exe from GitHub Releases (latest or newest pre-release) and launches it.
+# 2) If not available on GitHub Releases, automatically builds Vedit_installer.exe from source on your PC
+#    (installing Node.js / Rust / C++ Build Tools via winget only if missing) and runs it.
 
 & {
     $ErrorActionPreference = "Stop"
@@ -12,7 +12,8 @@
 
     $repo = "lilrepaer-glitch/Vedit"
     $exeName = "Vedit_installer.exe"
-    $releaseUrl = "https://github.com/$repo/releases/latest/download/$exeName"
+    $latestUrl = "https://github.com/$repo/releases/latest/download/$exeName"
+    $apiReleasesUrl = "https://api.github.com/repos/$repo/releases?per_page=10"
     $work = Join-Path $env:TEMP "vedit-install"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
 
@@ -25,17 +26,16 @@
         if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
             throw "winget (App Installer) is not available. Please install Node.js (nodejs.org) and Rust (rustup.rs) manually and run the script again."
         }
-        Write-Host "  Installing $pkgId (this may take a while)…" -ForegroundColor Yellow
+        Write-Host "  Installing $pkgId (this may take a few minutes)…" -ForegroundColor Yellow
         $wgArgs = @("install", "--id", $pkgId, "-e", "--accept-source-agreements", "--accept-package-agreements", "--silent")
         if ($extraArgs) { $wgArgs += $extraArgs.Split(" ") | Where-Object { $_ } }
         & winget @wgArgs
-        if ($LASTEXITCODE -ne 0) { throw "Install of $pkgId failed (kód $LASTEXITCODE)." }
+        if ($LASTEXITCODE -ne 0) { throw "Install of $pkgId failed (exit code $LASTEXITCODE)." }
     }
 
     function Get-Tool([string]$name) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
         if ($cmd) { return $cmd.Source }
-        # po winget instalaci obnov PATH z registru
         $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
         $user = [Environment]::GetEnvironmentVariable("Path", "User")
         $env:Path = "$machine;$user"
@@ -45,42 +45,61 @@
     }
 
     function Restart-Elevated {
-        # při běhu přes irm|iex nemáme soubor — stáhneme ho a spustíme znovu jako admin
         $self = $PSCommandPath
         if (-not $self) {
             $self = Join-Path $work "vedit-install.ps1"
             Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/main/vedit-install.ps1" -OutFile $self -UseBasicParsing
         }
-        Write-Host "  (requires administrator — please confirm UAC prompt)" -ForegroundColor Yellow
+        Write-Host "  (Administrator privileges required for missing build tools — please confirm UAC prompt)" -ForegroundColor Yellow
         Start-Process -Verb RunAs -FilePath "powershell" -ArgumentList "-ExecutionPolicy", "Bypass", "-File", "`"$self`""
     }
 
-    # ---------- 1) Zkus stáhnout hotový instalátor z GitHub Releases ----------
+    # ---------- 1) Download prebuilt Vedit_installer.exe from GitHub Releases ----------
     $installer = Join-Path $work $exeName
-    Write-Host "Vedit — Installing" -ForegroundColor Cyan
+    Write-Host "Vedit — Preparing Installer" -ForegroundColor Cyan
+
+    $downloadUrl = $latestUrl
     try {
         Write-Host "Downloading prebuilt installer from GitHub Releases…" -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $releaseUrl -OutFile $installer -UseBasicParsing
+        try {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $installer -UseBasicParsing
+        } catch {
+            # Fallback to newest release (including pre-releases) via GitHub API
+            $releases = Invoke-RestMethod -Uri $apiReleasesUrl -Headers @{ "User-Agent" = "Vedit-Installer" } -UseBasicParsing
+            $assetUrl = $null
+            foreach ($rel in $releases) {
+                foreach ($asset in $rel.assets) {
+                    if ($asset.name -eq $exeName) {
+                        $assetUrl = $asset.browser_download_url
+                        break
+                    }
+                }
+                if ($assetUrl) { break }
+            }
+            if (-not $assetUrl) { throw "No $exeName asset found on GitHub Releases." }
+            Invoke-WebRequest -Uri $assetUrl -OutFile $installer -UseBasicParsing
+        }
+
         if ((Get-Item $installer).Length -gt 20MB) {
-            Write-Host "Downloaded. Launching Vedit installer…" -ForegroundColor Green
+            Write-Host "Downloaded Vedit_installer.exe successfully. Launching setup wizard…" -ForegroundColor Green
             Start-Process -FilePath $installer -Wait
-            Write-Host "Done! Find Vedit in the Start menu." -ForegroundColor Green
+            Write-Host "Done! Launch Vedit anytime from the Windows Start Menu or Desktop shortcut." -ForegroundColor Green
             return
         }
-        Write-Host "Downloaded file is not a valid installer — will build from source." -ForegroundColor Yellow
+        Write-Host "Downloaded file is smaller than expected — building from source instead." -ForegroundColor Yellow
     } catch {
-        Write-Host "Prebuilt installer not available yet — building from source on this PC." -ForegroundColor Yellow
+        Write-Host "Prebuilt installer unavailable — building from source on this PC." -ForegroundColor Yellow
     }
 
-    # ---------- 2) Sestavení ze zdrojáků ----------
+    # ---------- 2) Build from source ----------
     Write-Host ""
-    Write-Host "Checking tools (Node.js, Rust)…" -ForegroundColor Cyan
+    Write-Host "Checking build toolchain (Node.js, Rust, C++)…" -ForegroundColor Cyan
 
     if (-not (Get-Tool "node")) {
         Write-Host "Node.js missing — installing LTS…" -ForegroundColor Yellow
         if (-not (Test-Admin)) { Restart-Elevated; return }
         Install-WingetPackage "OpenJS.NodeJS.LTS"
-        if (-not (Get-Tool "node")) { throw "Failed to install Node.js. Try manually from nodejs.org." }
+        if (-not (Get-Tool "node")) { throw "Failed to install Node.js. Install manually from nodejs.org." }
     }
 
     if (-not (Get-Tool "cargo")) {
@@ -88,22 +107,21 @@
         if (-not (Test-Admin)) { Restart-Elevated; return }
         Install-WingetPackage "Rustlang.Rustup"
         & rustup default stable
-        if (-not (Get-Tool "cargo")) { throw "Failed to install Rust. Try manually from rustup.rs." }
+        if (-not (Get-Tool "cargo")) { throw "Failed to install Rust. Install manually from rustup.rs." }
     }
 
-    # C++ build tools pro linkování (jen pokud chybí)
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $hasMSVC = $false
     if (Test-Path $vswhere) {
         $hasMSVC = [bool](& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
     }
     if (-not $hasMSVC) {
-        Write-Host "C++ build tools missing — installing Visual Studio Build Tools (large, up to 15 minutes)…" -ForegroundColor Yellow
+        Write-Host "C++ build tools missing — installing Visual Studio Build Tools (up to 15 minutes)…" -ForegroundColor Yellow
         if (-not (Test-Admin)) { Restart-Elevated; return }
         Install-WingetPackage "Microsoft.VisualStudio.2022.BuildTools" "--override --wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     }
 
-    Write-Host "Downloading Vedit sources…" -ForegroundColor Cyan
+    Write-Host "Downloading Vedit source code…" -ForegroundColor Cyan
     $src = Join-Path $work "src"
     if (Test-Path $src) { Remove-Item -Recurse -Force $src }
     $zip = Join-Path $work "vedit.zip"
@@ -113,11 +131,11 @@
 
     Push-Location $root.FullName
     try {
-        Write-Host "Installing dependencies (npm)…" -ForegroundColor Cyan
+        Write-Host "Installing npm dependencies…" -ForegroundColor Cyan
         & npm ci --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
 
-        Write-Host "Building Vedit (Tauri/NSIS) — this takes a few minutes…" -ForegroundColor Cyan
+        Write-Host "Building Vedit Desktop Installer (Tauri/NSIS) — this takes a few minutes…" -ForegroundColor Cyan
         Push-Location "apps/desktop"
         try {
             & npx tauri build
@@ -129,9 +147,9 @@
         $built = Get-ChildItem "apps/desktop/src-tauri/target/release/bundle/nsis/Vedit_*_x64-setup.exe" | Select-Object -First 1
         if (-not $built) { throw "Built installer not found." }
 
-        Write-Host "Built. Launching Vedit installer…" -ForegroundColor Green
+        Write-Host "Build complete! Launching Vedit installer…" -ForegroundColor Green
         Start-Process -FilePath $built.FullName -Wait
-        Write-Host "Done! Find Vedit in the Start menu." -ForegroundColor Green
+        Write-Host "Done! Find Vedit in the Windows Start Menu." -ForegroundColor Green
     } finally {
         Pop-Location
     }

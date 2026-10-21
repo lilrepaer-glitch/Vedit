@@ -132,10 +132,10 @@ describe("VeditEngine — základní operace", () => {
     expect(right.start).toBeCloseTo(5);
     expect(right.duration).toBeCloseTo(3);
     expect(right.in).toBeCloseTo(5);
-    expect(() => engine.rollClip(left.id, 10)).toThrow(/překračuje/);
+    expect(() => engine.rollClip(left.id, 10)).toThrow(/exceeds/);
     // bez souseda vpravo to nejde
     const solo = engine.addClip({ trackId: v1.id, assetId: video.id, start: 20, duration: 2 });
-    expect(() => engine.rollClip(solo.id, 1)).toThrow(/sousední/);
+    expect(() => engine.rollClip(solo.id, 1)).toThrow(/adjacent/);
   });
 
   it("slip posune obsah bez pohybu na timeline", () => {
@@ -146,8 +146,8 @@ describe("VeditEngine — základní operace", () => {
     expect(clip.out).toBeCloseTo(10.5);
     expect(clip.start).toBe(2);
     expect(clip.duration).toBe(4);
-    expect(() => engine.slipClip(clip.id, -10)).toThrow(/začátek/);
-    expect(() => engine.slipClip(clip.id, 25)).toThrow(/konec/);
+    expect(() => engine.slipClip(clip.id, -10)).toThrow(/start/);
+    expect(() => engine.slipClip(clip.id, 25)).toThrow(/end/);
   });
 
   it("slide posune klip a upraví sousedy", () => {
