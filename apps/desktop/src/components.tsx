@@ -327,7 +327,9 @@ export function Preview({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [showScopes, setShowScopes] = useState(false);
+  const [splitCompare, setSplitCompare] = useState<number | null>(null);
   const [canvasZoom, setCanvasZoom] = useState<number>(100);
+  const [videoFailed, setVideoFailed] = useState<string | null>(null);
   const [scopesData, setScopesData] = useState<Awaited<ReturnType<typeof api.getScopes>> | null>(null);
 
   useEffect(() => {
@@ -456,6 +458,19 @@ export function Preview({
           </select>
           <button
             type="button"
+            title="Before / After Color Split Wipe Preview"
+            onClick={() => setSplitCompare((s) => (s == null ? 50 : null))}
+            style={{
+              fontWeight: splitCompare != null ? 700 : 400,
+              borderColor: splitCompare != null ? "var(--accent)" : undefined,
+              padding: "3px 7px",
+              fontSize: 11,
+            }}
+          >
+            ⇆ Split Wipe
+          </button>
+          <button
+            type="button"
             title="Toggle Broadcast RGB Histogram & IRE Waveform Scopes"
             onClick={() => setShowScopes((s) => !s)}
             style={{ fontWeight: showScopes ? 700 : 400, padding: "3px 7px", fontSize: 11 }}
@@ -500,23 +515,27 @@ export function Preview({
               filter: cssFilters.length ? cssFilters.join(" ") : undefined,
             }}
           >
-            {streamSrc ? (
+            {streamSrc && videoFailed !== streamSrc ? (
               <video
                 ref={videoRef}
                 src={streamSrc}
                 playsInline
                 preload="auto"
+                onError={() => setVideoFailed(streamSrc)}
                 style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
               />
-            ) : frameUrl ? (
+            ) : (
               <img
-                src={frameUrl}
+                src={frameUrl || "/showcase/hero-cinema.jpg"}
                 alt={clip.name}
                 onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).style.display = "none";
+                  const el = e.currentTarget as HTMLImageElement;
+                  if (!el.src.endsWith("/showcase/hero-cinema.jpg")) {
+                    el.src = "/showcase/hero-cinema.jpg";
+                  }
                 }}
               />
-            ) : null}
+            )}
             <div className="frame-label">
               <strong>{clip.name}</strong>
               <div className="muted">
@@ -527,6 +546,89 @@ export function Preview({
           </div>
         ) : (
           <div className="preview-empty">Select a clip or move playhead over a clip</div>
+        )}
+
+        {splitCompare != null && clip && (
+          <div
+            onMouseDown={(e) => {
+              const stage = stageRef.current;
+              if (!stage) return;
+              const move = (ev: MouseEvent) => {
+                const r = stage.getBoundingClientRect();
+                setSplitCompare(Math.max(5, Math.min(95, ((ev.clientX - r.left) / r.width) * 100)));
+              };
+              const up = () => {
+                window.removeEventListener("mousemove", move);
+                window.removeEventListener("mouseup", up);
+              };
+              move(e.nativeEvent);
+              window.addEventListener("mousemove", move);
+              window.addEventListener("mouseup", up);
+            }}
+            style={{
+              position: "absolute",
+              inset: 0,
+              cursor: "ew-resize",
+              zIndex: 4,
+            }}
+            title="Drag left/right to compare Original vs Color Graded After"
+          >
+            <img
+              src={frameUrl || "/showcase/hero-cinema.jpg"}
+              alt="Before Grade"
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                clipPath: `inset(0 ${(100 - splitCompare).toFixed(1)}% 0 0)`,
+              }}
+            />
+            <span
+              className="capcut-card-badge"
+              style={{ position: "absolute", top: 10, left: 10 }}
+            >
+              BEFORE (RAW)
+            </span>
+            <span
+              className="capcut-card-badge"
+              style={{ position: "absolute", top: 10, right: 10, border: "1px solid #00e5ff" }}
+            >
+              AFTER (LUT / VFX)
+            </span>
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                bottom: 0,
+                left: `${splitCompare}%`,
+                width: 2,
+                background: "#00e5ff",
+                boxShadow: "0 0 12px #00e5ff",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: "50%",
+                  left: -13,
+                  transform: "translateY(-50%)",
+                  width: 28,
+                  height: 28,
+                  borderRadius: "50%",
+                  background: "#0b0d13",
+                  border: "2px solid #00e5ff",
+                  display: "grid",
+                  placeItems: "center",
+                  fontSize: 11,
+                  color: "#00e5ff",
+                }}
+              >
+                ⇆
+              </span>
+            </div>
+          </div>
         )}
 
         {activeCaptions.length > 0 && (
@@ -1565,7 +1667,13 @@ export function Timeline({
                       style={{
                         left: visStart * zoom,
                         width: pxWidth,
-                        background: TRACK_COLOR[track.kind],
+                        backgroundImage:
+                          track.kind === "video"
+                            ? `linear-gradient(90deg, rgba(14,22,42,0.72), rgba(14,22,42,0.52)), url('/showcase/hero-cinema.jpg')`
+                            : undefined,
+                        backgroundSize: track.kind === "video" ? "96px 100%" : undefined,
+                        backgroundRepeat: track.kind === "video" ? "repeat-x" : undefined,
+                        backgroundColor: TRACK_COLOR[track.kind],
                         cursor: track.locked ? "not-allowed" : "grab",
                         overflow: "hidden",
                       }}

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b0d13"/>
+      <stop offset="50%" stop-color="#111724"/>
+      <stop offset="100%" stop-color="#090c12"/>
+    </linearGradient>
+    <linearGradient id="cyanGlow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="purpleGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="amberGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+    <linearGradient id="greenGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="340" rx="18" fill="url(#bg)" stroke="#232c3e" stroke-width="2"/>
+  <circle cx="190" cy="60" r="140" fill="#00e5ff" opacity="0.05"/>
+  <circle cx="980" cy="280" r="170" fill="#3b82f6" opacity="0.06"/>
+
+  <text x="42" y="48" fill="#00e5ff" font-family="Segoe UI, Inter, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="2">VEDIT STUDIO v0.6.1 ARCHITECTURE</text>
+  <text x="42" y="76" fill="#f1f5f9" font-family="Segoe UI, Inter, system-ui, sans-serif" font-size="23" font-weight="800">CapCut-Clean Desktop NLE  ×  Custom LLM Copilot  ×  Hardware FFmpeg Engine</text>
+
+  <!-- Connector arrows -->
+  <line x1="258" y1="196" x2="298" y2="196" stroke="url(#cyanGlow)" stroke-width="3" stroke-dasharray="5 4"/>
+  <polygon points="296,190 308,196 296,202" fill="#00e5ff"/>
+
+  <line x1="538" y1="196" x2="578" y2="196" stroke="url(#cyanGlow)" stroke-width="3" stroke-dasharray="5 4"/>
+  <polygon points="576,190 588,196 576,202" fill="#00e5ff"/>
+
+  <line x1="818" y1="196" x2="858" y2="196" stroke="url(#cyanGlow)" stroke-width="3" stroke-dasharray="5 4"/>
+  <polygon points="856,190 868,196 856,202" fill="#00e5ff"/>
+
+  <!-- Card 1 -->
+  <rect x="38" y="108" width="220" height="186" rx="14" fill="#141925" stroke="#28344b" stroke-width="1.5"/>
+  <rect x="38" y="108" width="220" height="5" rx="3" fill="url(#cyanGlow)"/>
+  <text x="56" y="142" fill="#38e8f8" font-family="Segoe UI, sans-serif" font-size="12" font-weight="700">01 • INGEST &amp; CAPTURE</text>
+  <text x="56" y="168" fill="#ffffff" font-family="Segoe UI, sans-serif" font-size="17" font-weight="700">Media &amp; Live Studio</text>
+  <text x="56" y="195" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Native Explorer Drag &amp; Drop</text>
+  <text x="56" y="217" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Screen, Webcam &amp; Mic Rec</text>
+  <text x="56" y="239" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• AI Video / Music / SFX Gen</text>
+  <text x="56" y="261" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Instant FFprobe Stream Sync</text>
+
+  <!-- Card 2 -->
+  <rect x="318" y="108" width="220" height="186" rx="14" fill="#141925" stroke="#28344b" stroke-width="1.5"/>
+  <rect x="318" y="108" width="220" height="5" rx="3" fill="url(#purpleGlow)"/>
+  <text x="336" y="142" fill="#c084fc" font-family="Segoe UI, sans-serif" font-size="12" font-weight="700">02 • 60 FPS TIMELINE &amp; COLOR</text>
+  <text x="336" y="168" fill="#ffffff" font-family="Segoe UI, sans-serif" font-size="17" font-weight="700">Cinema 3D LUTs &amp; VFX</text>
+  <text x="336" y="195" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Kodak 2383 / Teal &amp; Orange</text>
+  <text x="336" y="217" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Live Split-Wipe &amp; RGB Scopes</text>
+  <text x="336" y="239" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Bezier Keyframes &amp; Chroma</text>
+  <text x="336" y="261" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Resizable UI (70% – 150%)</text>
+
+  <!-- Card 3 -->
+  <rect x="598" y="108" width="220" height="186" rx="14" fill="#141925" stroke="#28344b" stroke-width="1.5"/>
+  <rect x="598" y="108" width="220" height="5" rx="3" fill="url(#amberGlow)"/>
+  <text x="616" y="142" fill="#fbbf24" font-family="Segoe UI, sans-serif" font-size="12" font-weight="700">03 • CUSTOM API &amp; AGENTS</text>
+  <text x="616" y="168" fill="#ffffff" font-family="Segoe UI, sans-serif" font-size="17" font-weight="700">BYO Model + MCP</text>
+  <text x="616" y="195" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Custom API Key &amp; Base URL</text>
+  <text x="616" y="217" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Live /models Fetch &amp; Search</text>
+  <text x="616" y="239" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• OpenRouter / DeepSeek / Local</text>
+  <text x="616" y="261" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• Built-in MCP + CLI Server</text>
+
+  <!-- Card 4 -->
+  <rect x="878" y="108" width="284" height="186" rx="14" fill="#141925" stroke="#28344b" stroke-width="1.5"/>
+  <rect x="878" y="108" width="284" height="5" rx="3" fill="url(#greenGlow)"/>
+  <text x="896" y="142" fill="#34d399" font-family="Segoe UI, sans-serif" font-size="12" font-weight="700">04 • MASTERING &amp; DELIVERY</text>
+  <text x="896" y="168" fill="#ffffff" font-family="Segoe UI, sans-serif" font-size="17" font-weight="700">GPU Render &amp; Self-Update</text>
+  <text x="896" y="195" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• NVENC / AMF / QSV Hardware Encode</text>
+  <text x="896" y="217" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• H.264, HEVC, ProRes 422, VP9, GIF</text>
+  <text x="896" y="239" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• DaVinci Resolve EDL &amp; FCPXML</text>
+  <text x="896" y="261" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12.5">• 1-Click In-Place NSIS Updater</text>
+</svg>
