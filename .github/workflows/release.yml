@@ -1,0 +1,30 @@
+name: Release Vedit Installer
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build --prefix apps/desktop && npx --prefix apps/desktop tauri build
+      - shell: pwsh
+        run: |
+          $nsis = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          $msi  = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1
+          if ($nsis) { Copy-Item $nsis Vedit_installer.exe }
+          if ($msi) { Copy-Item $msi Vedit_installer.msi }
+          dir Vedit_*
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Vedit_installer.exe
+            Vedit_installer.msi
