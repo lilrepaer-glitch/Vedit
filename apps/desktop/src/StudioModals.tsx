@@ -519,6 +519,9 @@ export interface CatalogItem {
   title: string;
   subtitle: string;
   gradient: string;
+  thumbUrl?: string;
+  previewFilter?: string;
+  overlayKind?: "pip" | "split";
   run: () => void;
 }
 
@@ -586,7 +589,50 @@ export const CapCutCatalogBrowser = memo(function CapCutCatalogBrowser({
             onClick={item.run}
             title={`${item.title} — ${item.subtitle}`}
           >
-            <div className="capcut-card-thumb" style={{ background: item.gradient }}>
+            <div
+              className="capcut-card-thumb"
+              style={{
+                background: item.gradient,
+              }}
+            >
+              {item.thumbUrl && (
+                <img
+                  src={item.thumbUrl}
+                  alt=""
+                  loading="lazy"
+                  className="capcut-card-img"
+                  style={{ filter: item.previewFilter }}
+                />
+              )}
+              {item.overlayKind === "pip" && (
+                <span
+                  style={{
+                    position: "absolute",
+                    right: 7,
+                    bottom: 6,
+                    width: 34,
+                    height: 21,
+                    border: "1.5px solid #00e5ff",
+                    borderRadius: 3,
+                    background: "rgba(0, 229, 255, 0.22)",
+                    zIndex: 2,
+                  }}
+                />
+              )}
+              {item.overlayKind === "split" && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    bottom: 0,
+                    left: "50%",
+                    width: 2,
+                    background: "#00e5ff",
+                    boxShadow: "0 0 8px #00e5ff",
+                    zIndex: 2,
+                  }}
+                />
+              )}
               <span className="capcut-card-badge">{item.badge}</span>
               <span className="capcut-card-plus">+</span>
             </div>
@@ -619,6 +665,233 @@ export const CapCutCatalogBrowser = memo(function CapCutCatalogBrowser({
           No matching items for &ldquo;{query}&rdquo;
         </div>
       )}
+    </div>
+  );
+});
+
+// ---------- Interactive Visual Studio Showcase Gallery Modal ----------
+
+export const ShowcaseModal = memo(function ShowcaseModal({
+  onClose,
+  onLoadDemoScene,
+  onOpenApi,
+}: {
+  onClose: () => void;
+  onLoadDemoScene: (scene: "cinema" | "action" | "podcast") => void;
+  onOpenApi: () => void;
+}) {
+  const [tab, setTab] = useState<"scenes" | "gallery">("scenes");
+  const [zoomShot, setZoomShot] = useState<string | null>(null);
+
+  const cards = [
+    {
+      id: "cinema" as const,
+      badge: "35MM FILM LUT",
+      title: "Prague Golden Twilight Cinema",
+      desc: "Loads HD cinema plate + Kodak 2383 3D .cube LUT + animated broadcast lower-third title.",
+      img: "/showcase/hero-cinema.jpg",
+      filter: "sepia(0.24) contrast(1.14) saturate(1.25)",
+    },
+    {
+      id: "action" as const,
+      badge: "CYBERPUNK VFX",
+      title: "Neon Hypercar Motion Cut",
+      desc: "Loads high-speed action frame + Cyberpunk Neon 3D LUT + smooth 0.5s dissolve & zoom motion.",
+      img: "/showcase/motion-neon.jpg",
+      filter: "contrast(1.18) saturate(1.35)",
+    },
+    {
+      id: "podcast" as const,
+      badge: "AI COPILOT + AUDIO",
+      title: "Studio Broadcast & Captions",
+      desc: "Sets up broadcast audio scene with subtitles at playhead ready for AI Voiceover & Auto-Ducking.",
+      img: "/showcase/audio-wave.jpg",
+      filter: "contrast(1.1) saturate(1.2)",
+    },
+  ];
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card" style={{ maxWidth: 760 }} onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-head"
+          style={{
+            backgroundImage:
+              "linear-gradient(90deg, rgba(11,13,17,0.92), rgba(11,13,17,0.68)), url('/showcase/ai-gen-banner.jpg')",
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+            padding: "18px 20px",
+          }}
+        >
+          <div>
+            <span className="badge badge-video" style={{ marginBottom: 6, display: "inline-block" }}>
+              VEDIT STUDIO SHOWCASE
+            </span>
+            <h2 style={{ margin: 0, fontSize: 18, color: "#fff" }}>
+              ✨ Visual Presets &amp; Interactive Studio Demos
+            </h2>
+            <div className="muted" style={{ marginTop: 3, color: "#cbd5e1" }}>
+              Click any scene below to load real HD visuals, 3D LUT color grading, and titles straight onto your timeline
+            </div>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <button
+              type="button"
+              className={tab === "scenes" ? "btn-accent" : undefined}
+              onClick={() => setTab("scenes")}
+            >
+              🎬 Interactive Demo Scenes
+            </button>
+            <button
+              type="button"
+              className={tab === "gallery" ? "btn-accent" : undefined}
+              onClick={() => setTab("gallery")}
+            >
+              🖼 App Screenshots &amp; Architecture
+            </button>
+          </div>
+
+          {tab === "gallery" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+                {[
+                  {
+                    src: "/showcase/shot-01-editor.jpg",
+                    title: "CapCut 4-Zone Multi-Track Editor",
+                    sub: "60 FPS timeline, filmstrips, waveforms & curves",
+                  },
+                  {
+                    src: "/showcase/shot-02-color-scopes.jpg",
+                    title: "3D .cube LUTs & Split-Wipe Scopes",
+                    sub: "Real-time RGB Parade, Waveform & Before/After wipe",
+                  },
+                  {
+                    src: "/showcase/shot-03-ai-copilot.jpg",
+                    title: "Custom API, Models & AI Copilot",
+                    sub: "OpenAI / OpenRouter / DeepSeek / Ollama integration",
+                  },
+                ].map((s) => (
+                  <div
+                    key={s.src}
+                    onClick={() => setZoomShot(zoomShot === s.src ? null : s.src)}
+                    style={{
+                      background: "var(--panel-2)",
+                      border: zoomShot === s.src ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                      borderRadius: 10,
+                      overflow: "hidden",
+                      cursor: "pointer",
+                    }}
+                    title="Click to enlarge preview"
+                  >
+                    <img src={s.src} alt={s.title} style={{ width: "100%", height: 122, objectFit: "cover", display: "block" }} />
+                    <div style={{ padding: "8px 10px" }}>
+                      <div style={{ fontWeight: 700, fontSize: 12 }}>{s.title}</div>
+                      <div className="muted" style={{ fontSize: 11 }}>{s.sub}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {zoomShot && (
+                <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid var(--accent)" }}>
+                  <img src={zoomShot} alt="Enlarged Studio View" style={{ width: "100%", display: "block" }} />
+                </div>
+              )}
+
+              <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid var(--border)" }}>
+                <img
+                  src="/showcase/architecture.svg"
+                  alt="Vedit Studio Architecture"
+                  style={{ width: "100%", display: "block" }}
+                />
+              </div>
+            </div>
+          ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+            {cards.map((c) => (
+              <div
+                key={c.id}
+                style={{
+                  background: "var(--panel-2)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 11,
+                  overflow: "hidden",
+                  display: "flex",
+                  flexDirection: "column",
+                }}
+              >
+                <div style={{ position: "relative", height: 124, overflow: "hidden" }}>
+                  <img
+                    src={c.img}
+                    alt={c.title}
+                    style={{ width: "100%", height: "100%", objectFit: "cover", filter: c.filter, display: "block" }}
+                  />
+                  <span
+                    className="capcut-card-badge"
+                    style={{ position: "absolute", top: 8, left: 8 }}
+                  >
+                    {c.badge}
+                  </span>
+                </div>
+                <div style={{ padding: 11, display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>{c.title}</div>
+                  <div className="muted" style={{ fontSize: 11.5, lineHeight: 1.45, flex: 1 }}>
+                    {c.desc}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-accent"
+                    style={{ width: "100%", marginTop: 4 }}
+                    onClick={() => {
+                      onLoadDemoScene(c.id);
+                      onClose();
+                    }}
+                  >
+                    ▶ Load Scene onto Timeline
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          )}
+
+          <div
+            style={{
+              marginTop: 14,
+              padding: "10px 14px",
+              borderRadius: 10,
+              background: "rgba(0, 200, 215, 0.08)",
+              border: "1px solid rgba(0, 200, 215, 0.28)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+            }}
+          >
+            <div>
+              <strong style={{ fontSize: 12.5 }}>🤖 Want AI to edit automatically using your own model?</strong>
+              <div className="muted" style={{ fontSize: 11.5 }}>
+                Connect OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, or local Ollama in 10 seconds.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenApi();
+              }}
+            >
+              ⚙ Configure API &amp; Model
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 });

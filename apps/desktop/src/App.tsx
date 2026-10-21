@@ -14,7 +14,7 @@ import {
   type Project,
 } from "./api";
 import { AiPanel, GenPanel, Inspector, JobsPanel, MediaPool, Preview, StudioPanel, Timeline, fmt } from "./components";
-import { ApiSettingsModal, CapCutCatalogBrowser, ExportModal, type CatalogItem } from "./StudioModals";
+import { ApiSettingsModal, CapCutCatalogBrowser, ExportModal, ShowcaseModal, type CatalogItem } from "./StudioModals";
 
 interface Selection {
   trackId: string;
@@ -76,6 +76,7 @@ export function App() {
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const [showApiModal, setShowApiModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showShowcaseModal, setShowShowcaseModal] = useState(false);
   const [apiSettings, setApiSettings] = useState<ApiSettingsResponse | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -460,6 +461,8 @@ export function App() {
         title: "Kodak 2383 Film",
         subtitle: "Warm Hollywood print film stock",
         gradient: "linear-gradient(135deg, #92400e, #f59e0b)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "sepia(0.28) contrast(1.16) saturate(1.26)",
         run: withClip((cid) => api.applyLut(cid, "kodak-2383"), "Applied Kodak 2383 3D LUT"),
       },
       {
@@ -469,6 +472,8 @@ export function App() {
         title: "Teal & Orange",
         subtitle: "Blockbuster cinema color contrast",
         gradient: "linear-gradient(135deg, #0f766e, #ea580c)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "hue-rotate(-14deg) contrast(1.26) saturate(1.48)",
         run: withClip((cid) => api.applyLut(cid, "teal-orange-blockbuster"), "Applied Teal & Orange LUT"),
       },
       {
@@ -478,6 +483,8 @@ export function App() {
         title: "Fuji Eterna Soft",
         subtitle: "Soft highlight roll-off look",
         gradient: "linear-gradient(135deg, #065f46, #34d399)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "brightness(1.07) contrast(0.92) saturate(0.86)",
         run: withClip((cid) => api.applyLut(cid, "fuji-eterna-soft"), "Applied Fuji Eterna LUT"),
       },
       {
@@ -487,6 +494,8 @@ export function App() {
         title: "Cyberpunk Neon",
         subtitle: "Electric magenta & cyan night",
         gradient: "linear-gradient(135deg, #7e22ce, #06b6d4)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "hue-rotate(38deg) saturate(1.85) contrast(1.22)",
         run: withClip((cid) => api.applyLut(cid, "cyberpunk-neon"), "Applied Cyberpunk Neon LUT"),
       },
       {
@@ -496,6 +505,8 @@ export function App() {
         title: "Silver Bleach",
         subtitle: "Grit high-contrast bleach bypass",
         gradient: "linear-gradient(135deg, #334155, #94a3b8)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "grayscale(0.72) contrast(1.44) brightness(0.95)",
         run: withClip((cid) => api.applyLut(cid, "bleach-bypass"), "Applied Bleach Bypass LUT"),
       },
       {
@@ -505,6 +516,8 @@ export function App() {
         title: "Cinematic Punch",
         subtitle: "Rich contrast & saturation boost",
         gradient: "linear-gradient(135deg, #1d4ed8, #7c3aed)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "contrast(1.32) saturate(1.35)",
         run: withClip((cid) => api.colorGrade(cid, "cinematic-contrast"), "Applied Cinematic Punch grade"),
       },
       {
@@ -514,6 +527,8 @@ export function App() {
         title: "Golden Hour",
         subtitle: "Sunlit warm skin tones",
         gradient: "linear-gradient(135deg, #b45309, #fde047)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "sepia(0.35) brightness(1.06) saturate(1.32)",
         run: withClip((cid) => api.colorGrade(cid, "warm-golden"), "Applied Golden Hour grade"),
       },
       {
@@ -523,6 +538,8 @@ export function App() {
         title: "Moody Cool Noir",
         subtitle: "Deep shadows & cool steel",
         gradient: "linear-gradient(135deg, #0f172a, #38bdf8)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "hue-rotate(175deg) saturate(0.75) contrast(1.25)",
         run: withClip((cid) => api.colorGrade(cid, "cool-noir"), "Applied Cool Noir grade"),
       },
       {
@@ -532,6 +549,8 @@ export function App() {
         title: "Green Screen Key",
         subtitle: "Chroma key + automatic spill removal",
         gradient: "linear-gradient(135deg, #15803d, #22c55e)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "hue-rotate(92deg) saturate(1.5)",
         run: withClip((cid) => api.chromaKey(cid, "#00ff00"), "Applied Green Screen Chroma Key"),
       },
       {
@@ -541,6 +560,8 @@ export function App() {
         title: "Video Stabilizer",
         subtitle: "Smooth handheld camera shake",
         gradient: "linear-gradient(135deg, #0369a1, #2dd4bf)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "contrast(1.1)",
         run: withClip((cid) => api.stabilizeClip(cid), "Stabilized video clip"),
       },
     ];
@@ -553,6 +574,8 @@ export function App() {
         title: "Smooth Dissolve",
         subtitle: "0.5s fade in & out transition",
         gradient: "linear-gradient(135deg, #1e293b, #00c8d7)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "brightness(1.12) contrast(1.08)",
         run: withClip((cid) => api.fadeClip(cid, 0.5, 0.5), "Added 0.5s Fade In/Out"),
       },
       ...presets.map((p) => ({
@@ -562,6 +585,8 @@ export function App() {
         title: p.label,
         subtitle: "Keyframe motion animation",
         gradient: "linear-gradient(135deg, #1e3a8a, #6366f1)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "saturate(1.25)",
         run: withClip((cid) => api.applyPreset(cid, p.id), `Applied ${p.label}`),
       })),
       {
@@ -571,6 +596,8 @@ export function App() {
         title: "Slow Motion 0.5×",
         subtitle: "Smooth cinematic slow-mo",
         gradient: "linear-gradient(135deg, #0f766e, #0ea5e9)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "hue-rotate(-18deg) brightness(1.05)",
         run: withClip((cid) => api.setClipSpeed(cid, 0.5), "Set speed 0.5×"),
       },
       {
@@ -580,6 +607,8 @@ export function App() {
         title: "Fast Cut 2×",
         subtitle: "Snappy double-speed ramp",
         gradient: "linear-gradient(135deg, #b91c1c, #f97316)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "contrast(1.3) saturate(1.55)",
         run: withClip((cid) => api.setClipSpeed(cid, 2), "Set speed 2×"),
       },
       {
@@ -589,6 +618,8 @@ export function App() {
         title: "Reverse Clip",
         subtitle: "Play video & audio backwards",
         gradient: "linear-gradient(135deg, #4338ca, #ec4899)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        previewFilter: "hue-rotate(155deg) saturate(1.3)",
         run: withClip((cid) => api.reverseClip(cid), "Reversed clip"),
       },
       {
@@ -598,6 +629,8 @@ export function App() {
         title: "Freeze Frame 1.5s",
         subtitle: "Hold still frame at playhead",
         gradient: "linear-gradient(135deg, #0284c7, #bae6fd)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        previewFilter: "saturate(0.55) brightness(1.12) contrast(1.15)",
         run: withClip((cid) => api.freezeClip(cid, playheadRef.current, 1.5), "Inserted 1.5s Freeze Frame"),
       },
       {
@@ -607,6 +640,8 @@ export function App() {
         title: "PiP Facecam Corner",
         subtitle: "Bottom-right Picture-in-Picture",
         gradient: "linear-gradient(135deg, #334155, #00c8d7)",
+        thumbUrl: "/showcase/hero-cinema.jpg",
+        overlayKind: "pip",
         run: withClip((cid) => api.applyLayout(cid, "pip-bottom-right"), "Applied PiP Bottom-Right"),
       },
       {
@@ -616,6 +651,8 @@ export function App() {
         title: "Split Screen 50/50",
         subtitle: "Side-by-side comparison frame",
         gradient: "linear-gradient(135deg, #4f46e5, #14b8a6)",
+        thumbUrl: "/showcase/motion-neon.jpg",
+        overlayKind: "split",
         run: withClip((cid) => api.applyLayout(cid, "split-left"), "Applied Split Screen Left"),
       },
     ];
@@ -857,8 +894,17 @@ export function App() {
           </div>
         </div>
 
-        {/* Right Corner: API & Models + UI Scaling + Panel Toggles + Export + FULLSCREEN */}
+        {/* Right Corner: Showcase + API & Models + UI Scaling + Panel Toggles + Export + FULLSCREEN */}
         <div className="topbar-right">
+          <button
+            type="button"
+            onClick={() => setShowShowcaseModal(true)}
+            title="Visual Studio Presets & Interactive Demo Scenes"
+            style={{ borderColor: "rgba(0, 200, 215, 0.45)" }}
+          >
+            ✨ Showcase
+          </button>
+
           <button
             type="button"
             onClick={() => setShowApiModal(true)}
@@ -1002,16 +1048,73 @@ export function App() {
                     }
                   />
                 ) : activeTab === "media" ? (
-                  <MemoMediaPool
-                    project={project}
-                    projectId={project.id}
-                    playhead={quantizedStopTime}
-                    onImported={(msg) => {
-                      void refresh();
-                      if (msg) flash(msg);
-                    }}
-                    onQuickAdd={handleQuickAddAsset}
-                  />
+                  <>
+                    <div
+                      className="hero-showcase-banner"
+                      style={{
+                        backgroundImage:
+                          "linear-gradient(125deg, rgba(11,13,17,0.92), rgba(11,13,17,0.58)), url('/showcase/ai-gen-banner.jpg')",
+                      }}
+                    >
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>
+                        🎬 Vedit Cinema Studio
+                      </div>
+                      <div className="muted" style={{ fontSize: 11, color: "#cbd5e1", margin: "2px 0 8px" }}>
+                        Drop media anywhere or click to load HD demo plates onto timeline:
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="btn-accent"
+                          style={{ padding: "3px 8px", fontSize: 11 }}
+                          onClick={() =>
+                            void act(async () => {
+                              const resp = await fetch("/showcase/hero-cinema.jpg");
+                              const blob = await resp.blob();
+                              const file = new File([blob], "prague-cinema-35mm.jpg", { type: "image/jpeg" });
+                              await api.uploadAssetFile(file, playheadRef.current, true);
+                              flash("Loaded Prague 35mm Cinema plate onto timeline!");
+                            })
+                          }
+                        >
+                          + Cinema Scene
+                        </button>
+                        <button
+                          type="button"
+                          style={{ padding: "3px 8px", fontSize: 11 }}
+                          onClick={() =>
+                            void act(async () => {
+                              const resp = await fetch("/showcase/motion-neon.jpg");
+                              const blob = await resp.blob();
+                              const file = new File([blob], "neon-hypercar-shot.jpg", { type: "image/jpeg" });
+                              await api.uploadAssetFile(file, playheadRef.current, true);
+                              flash("Loaded Neon Hypercar shot onto timeline!");
+                            })
+                          }
+                        >
+                          + Neon Action
+                        </button>
+                        <button
+                          type="button"
+                          style={{ padding: "3px 8px", fontSize: 11 }}
+                          onClick={() => setShowShowcaseModal(true)}
+                        >
+                          ✨ Gallery
+                        </button>
+                      </div>
+                    </div>
+
+                    <MemoMediaPool
+                      project={project}
+                      projectId={project.id}
+                      playhead={quantizedStopTime}
+                      onImported={(msg) => {
+                        void refresh();
+                        if (msg) flash(msg);
+                      }}
+                      onQuickAdd={handleQuickAddAsset}
+                    />
+                  </>
                 ) : activeTab === "effects" ? (
                   <CapCutCatalogBrowser
                     title="Cinema 3D LUTs & Video Effects"
@@ -1128,6 +1231,20 @@ export function App() {
                   </div>
                 ) : activeTab === "audio" ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div
+                      className="hero-showcase-banner"
+                      style={{
+                        backgroundImage:
+                          "linear-gradient(125deg, rgba(11,13,17,0.9), rgba(11,13,17,0.52)), url('/showcase/audio-wave.jpg')",
+                      }}
+                    >
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>
+                        🎙 Broadcast Voiceover, Whisper STT &amp; Audio DSP
+                      </div>
+                      <div className="muted" style={{ fontSize: 11, color: "#cbd5e1", marginTop: 2 }}>
+                        Generate studio TTS narration, auto-transcribe subtitles, enhance vocals &amp; beat-sync cuts.
+                      </div>
+                    </div>
                     <MemoAiPanel
                       caps={aiCaps}
                       assets={project.assets}
@@ -1579,6 +1696,48 @@ export function App() {
             })
           }
           onClose={() => setShowExportModal(false)}
+        />
+      )}
+
+      {/* Interactive Studio Visual Showcase Modal */}
+      {showShowcaseModal && (
+        <ShowcaseModal
+          onClose={() => setShowShowcaseModal(false)}
+          onOpenApi={() => setShowApiModal(true)}
+          onLoadDemoScene={(scene) => {
+            void act(async () => {
+              const imgPath =
+                scene === "action"
+                  ? "/showcase/motion-neon.jpg"
+                  : scene === "podcast"
+                    ? "/showcase/audio-wave.jpg"
+                    : "/showcase/hero-cinema.jpg";
+              const name =
+                scene === "action"
+                  ? "neon-hypercar-scene.jpg"
+                  : scene === "podcast"
+                    ? "studio-broadcast-stage.jpg"
+                    : "prague-cinema-twilight.jpg";
+              const resp = await fetch(imgPath);
+              const blob = await resp.blob();
+              const file = new File([blob], name, { type: "image/jpeg" });
+              const uploaded = await api.uploadAssetFile(file, 0, true);
+              if (uploaded.clip) {
+                if (scene === "cinema") {
+                  await api.applyLut(uploaded.clip.id, "kodak-2383");
+                  await api.addCaption({ text: "Vedit Studio • Kodak 2383 Cinema Grade", start: 0, end: 4 });
+                } else if (scene === "action") {
+                  await api.applyLut(uploaded.clip.id, "cyberpunk-neon");
+                  await api.fadeClip(uploaded.clip.id, 0.5, 0.5);
+                  await api.addCaption({ text: "Cyberpunk Neon VFX • 60 FPS Timeline", start: 0, end: 4 });
+                } else {
+                  await api.addCaption({ text: "Broadcast Voice & Auto-Captions Ready", start: 0, end: 4 });
+                }
+              }
+              setPlayhead(0.8);
+              flash(`Loaded "${name}" demo scene onto timeline!`);
+            });
+          }}
         />
       )}
 

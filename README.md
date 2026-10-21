@@ -1,62 +1,88 @@
-# Vedit
+<div align="center">
 
-**Vedit** is a native desktop video editor for PC with a **built-in MCP server and REST/WebSocket API** — edit on the timeline manually, automate workflows via CLI, or let AI agents drive full productions end-to-end.
+<img src="./docs/screenshots/hero-banner.jpg" alt="Vedit Studio Banner" width="100%" style="border-radius: 14px;" />
 
-📖 **[PLAN.md](./PLAN.md)** — architecture & roadmap specification (**F0 – F5 complete**).
+# Vedit Studio (`v0.6.1`)
 
-> **Status: v0.1.0 — F0, F1, F2, F3, F4 & F5 Complete**
-> Multi-track non-destructive editor with full undo/redo, real FFmpeg multi-codec render pipeline (**H.264, H.265/HEVC, Apple ProRes 422 `.mov`, WebM VP9 `.webm`**), batch export queue & watch folders, **AI Voiceover + Speech-to-Text Captions**, **AI Editing** (silence removal, highlight reels, beat-sync, motion tracking & auto-reframe), **Vedit Gen Studio** (Veo 3.1, Kling 3.0, Seedance, Runway, Luma, MiniMax, Wan, Hunyuan + offline FFmpeg synth), **Marketplace** (parametric templates & `.veditpack.json` plugins), **Team Collaboration** (version checkpoints, structural `project.diff`, multi-editor merge, timecoded review notes, YouTube chapters, audit log), **MCP Server** (tools + resources + workflow prompts), and **NSIS Windows Installer (`Vedit_installer.exe`)**.
+**CapCut-Clean Desktop NLE Video Editor for Windows PC • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU FFmpeg Render • Built-In MCP Server**
 
-## Repository Structure
+[![Latest Release](https://img.shields.io/github/v/release/lilrepaer-glitch/Vedit?color=00c8d7&label=Download%20Windows%20Installer&logo=windows)](https://github.com/lilrepaer-glitch/Vedit/releases/latest)
+[![Tests](https://img.shields.io/badge/Vitest-91%2F91%20Passing-22c55e?logo=vitest)](./test)
+[![Codecs](https://img.shields.io/badge/FFmpeg-NVENC%20%7C%20AMF%20%7C%20QSV%20%7C%20ProRes-3b82f6)](#)
+[![MCP Ready](https://img.shields.io/badge/MCP-Claude%20%7C%20Cursor%20%7C%20Agents-8b5cf6)](#mcp-server-claude-desktop--cursor--ai-agents)
 
-```
-src/core/        Core engine: data model (.vedit JSON), timeline editing, undo/redo, FFmpeg probing
-src/render/      Multi-codec FFmpeg render pipeline (H.264, H.265, ProRes 422, VP9 + presets)
-src/ai/          Speech (TTS/ASR), AI editing (silences/highlights/beats/motion), Vedit Gen
-src/ext/         Collaboration/diff/merge, Marketplace packs, Batch Queue & Watch Folders
-src/server/      Local REST API + WebSocket server (bearer token auth)
-src/mcp/         MCP server — stdio + Streamable HTTP (tools, resources & workflow prompts)
-src/cli/         CLI `vedit`
-apps/desktop/    English Desktop Editor UI (React + Vite) + Tauri v2 native desktop shell
-test/            End-to-end Vitest suite (Core, Server, Render, Media, Speech, AI Edit, Gen, F5)
-```
+### [⬇ Download `Vedit_installer.exe` (Windows 10 / 11 — Self-Contained, Zero Dependencies)](https://github.com/lilrepaer-glitch/Vedit/releases/latest/download/Vedit_installer.exe)
 
-## Windows Installer (`Vedit_installer.exe`)
+</div>
 
-Install Vedit on Windows in one PowerShell command:
+---
+
+## Visual Studio Showcase
+
+<p align="center">
+  <img src="./docs/screenshots/shot-01-editor.jpg" alt="Vedit CapCut-Style 4-Zone Multi-Track Editor" width="100%" />
+</p>
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="./docs/screenshots/shot-02-color-scopes.jpg" alt="Cinema 3D LUTs & Broadcast Scopes" width="100%" />
+      <p align="center"><strong>Cinema 3D <code>.cube</code> LUTs, Split-Wipe Compare &amp; Broadcast RGB Scopes</strong><br/><sub>Kodak 2383, Teal &amp; Orange, Fuji Eterna, Bleach Bypass, Cyberpunk Neon + live Before/After wipe</sub></p>
+    </td>
+    <td width="50%">
+      <img src="./docs/screenshots/shot-03-ai-copilot.jpg" alt="Custom API, Model Picker & AI Copilot" width="100%" />
+      <p align="center"><strong>Custom API Key, Base URL &amp; Model Configurator</strong><br/><sub>OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama / LM Studio + live <code>/models</code> search</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="./apps/desktop/public/showcase/hero-cinema.jpg" alt="35mm Film Look Demo" width="100%" />
+      <p align="center"><strong>Built-In 35mm Cinema Plates &amp; Interactive Demo Scenes</strong><br/><sub>One-click demo timelines right inside Vedit's <code>✨ Showcase</code> studio modal</sub></p>
+    </td>
+    <td width="50%">
+      <img src="./apps/desktop/public/showcase/motion-neon.jpg" alt="High-Speed VFX & Motion Presets" width="100%" />
+      <p align="center"><strong>60 FPS GPU Playhead, Speed Ramps, Keyframes &amp; PiP Layouts</strong><br/><sub>Smooth drag splitters, UI scaling (<code>70%–150%</code>), and native Win32 <code>F11</code> Fullscreen</sub></p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## Architecture Overview
+
+<p align="center">
+  <img src="./docs/graphics/architecture.svg" alt="Vedit Studio Architecture" width="100%" />
+</p>
+
+---
+
+## Highlights in `v0.6.1`
+
+- **CapCut-Clean 4-Zone Resizable Studio Workspace**: Dedicated section rail (*Media*, *Audio*, *Text*, *Effects*, *Motion*, *AI Edit*, *AI Gen*, *Studio*), photographic live-filtered LUT/VFX preview cards, universal `Ctrl+K` instant search, smooth drag resizers between all panels, global UI zoom (`70% – 150%`), and top-right native Win32 **Fullscreen (`⛶` / `F11`)**.
+- **Interactive Before / After Split-Wipe & Broadcast Scopes**: Compare raw vs. color-graded video directly inside the Player monitor (`⇆ Split Wipe`) alongside live RGB Histograms & IRE Waveforms (`📊 Scopes`).
+- **Bring Your Own API Key, Base URL & AI Model (`⚙ API & Model`)**: Connect OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama, LM Studio, or any custom OpenAI-compatible `/v1` endpoint with live `/models` discovery, connection testing, and natural-language AI Copilot execution.
+- **In-Place NSIS `Update` Installer + 1-Click App Self-Updater**: `Vedit_installer.exe` detects existing installations and updates cleanly in place while keeping all user projects & API settings intact — or update directly from the top bar via **`🔄 Update`**.
+
+---
+
+## One-Line Windows PowerShell Install / Update
 
 ```powershell
 irm https://raw.githubusercontent.com/lilrepaer-glitch/Vedit/main/vedit-install.ps1 | iex
 ```
 
-Or download **`Vedit_installer.exe`** directly from **[GitHub Releases](https://github.com/lilrepaer-glitch/Vedit/releases/latest)** (per-user NSIS LZMA installer with `English`, `German`, `Russian`, and `Simplified Chinese` setup wizard, bundled Node.js sidecar, and bundled FFmpeg/ffprobe binaries — zero external setup required).
+Or download **`Vedit_installer.exe`** directly from **[GitHub Releases](https://github.com/lilrepaer-glitch/Vedit/releases/latest)**.
+
+---
 
 ## Quick Start (Development)
 
 ```bash
 npm ci
-npm test                        # Run full Vitest test suite
-npm run build                   # Compile TypeScript backend + CLI + MCP to dist/
-npm run dev:api                 # Start REST + WS server on http://127.0.0.1:47000
-npm run dev:ui                  # Start Desktop UI dev server on http://localhost:5173
-npm run dist:desktop            # Build native desktop bundle for current OS
-```
-
-## CLI Examples
-
-```bash
-npx tsx src/cli/index.ts init "My Project"
-npx tsx src/cli/index.ts import clip.mp4 --kind video
-npx tsx src/cli/index.ts timeline
-npx tsx src/cli/index.ts cut <clipId> --at 4.5
-npx tsx src/cli/index.ts export-presets
-npx tsx src/cli/index.ts batch-export --out-dir ./renders --presets youtube-1080p,tiktok-reels
-npx tsx src/cli/index.ts watch --inbox ./inbox --out-dir ./rendered --preset youtube-1080p
-npx tsx src/cli/index.ts marketplace
-npx tsx src/cli/index.ts apply-template tpl-youtube-intro
-npx tsx src/cli/index.ts diff --snapshot <snapshotId>
-npx tsx src/cli/index.ts serve
-npx tsx src/cli/index.ts mcp
+npm test                        # Run all 91 end-to-end Vitest tests
+npm run build                   # Build TypeScript backend + CLI + MCP
+npm run dev:api                 # Start local Vedit Engine on http://127.0.0.1:47000
+npm run dev:ui                  # Start React + Vite Studio UI on http://localhost:5173
 ```
 
 ## MCP Server (Claude Desktop / Cursor / AI Agents)
@@ -72,8 +98,6 @@ npx tsx src/cli/index.ts mcp
   }
 }
 ```
-
-Or Streamable HTTP transport: `node dist/cli/index.js mcp-http` → `http://127.0.0.1:47001/mcp`.
 
 ## License
 
