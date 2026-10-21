@@ -1,26 +1,41 @@
-// Reálný render pipeline F1 + F5 — timeline → FFmpeg → multi-codec export & platform presets
-// (PLAN.md §3.6, §13: H.264 / H.265 / ProRes / WebM, YouTube / TikTok / Reels / LinkedIn presets)
+// Real Render Pipeline F1 + F5 + F6 — Timeline → FFmpeg → Multi-Codec, GPU HwAccel, Pro VFX & Loudness
+//
+// Supported features:
+//   • Video codecs: H.264, H.265/HEVC, Apple ProRes 422 (.mov), WebM VP9 (.webm)
+//   • Hardware GPU acceleration: NVENC / AMF / QSV / VideoToolbox / VAAPI with safe CPU fallback
+//   • Platform presets: YouTube 1080p/4K, TikTok/Reels, Instagram Square, LinkedIn, ProRes Master, WebM VP9
+//   • Multi-track compositing, transforms, keyframe animation (x / y / opacity), burned-in SRT subtitles
+//   • F6 Pro VFX: chroma-key + despill, speed control (0.25x–4x + chained atempo), color-grade, blur,
+//     grayscale, sharpen, vignette, crop, fade-in/out transitions
+//   • F6 Pro Audio: per-clip volume/denoise/EQ + master bus EBU R128 loudness normalization (-14 / -16 / -23 LUFS)
 
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
-import type { Asset, Clip, Project, Sequence } from "../core/types.js";
-import { clipEnd, sequenceDuration } from "../core/types.js";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, extname, resolve as resolvePath } from "node:path";
+import { ffmpegPath, probeMedia } from "../core/media.js";
 import { captionsToSrt } from "../core/presets.js";
-import { ffmpegPath, run } from "../core/media.js";
+import {
+  sequenceDuration,
+  type Asset,
+  type Clip,
+  type Project,
+  type Sequence,
+} from "../core/types.js";
+import { resolveVideoEncoder, type HwAccelBackend } from "./hwaccel.js";
 
 export type VideoCodecId = "h264" | "h265" | "prores" | "vp9";
-export type ContainerFormat = "mp4" | "mov" | "webm";
 
 export interface ExportPreset {
   id: string;
   label: string;
-  platform: string;
-  format: ContainerFormat;
+  description: string;
+  width: number;
+  height: number;
+  fps: number;
   codec: VideoCodecId;
-  width?: number;
-  height?: number;
-  fps?: number;
+  format: "mp4" | "mov" | "webm";
+  ext: ".mp4" | ".mov" | ".webm";
   crf?: number;
   audioBitrate?: string;
 }
@@ -29,96 +44,111 @@ export const EXPORT_PRESETS: ExportPreset[] = [
   {
     id: "youtube-1080p",
     label: "YouTube 1080p HD (16:9 H.264)",
-    platform: "YouTube",
-    format: "mp4",
-    codec: "h264",
+    description: "Standard 1920×1080 H.264 + AAC faststart MP4",
     width: 1920,
     height: 1080,
     fps: 30,
+    codec: "h264",
+    format: "mp4",
+    ext: ".mp4",
     crf: 19,
     audioBitrate: "192k",
   },
   {
     id: "youtube-4k",
     label: "YouTube 4K UHD (16:9 H.265/HEVC)",
-    platform: "YouTube",
-    format: "mp4",
-    codec: "h265",
+    description: "Ultra HD 3840×2160 H.265/HEVC 10-bit ready MP4",
     width: 3840,
     height: 2160,
-    fps: 60,
+    fps: 30,
+    codec: "h265",
+    format: "mp4",
+    ext: ".mp4",
     crf: 22,
     audioBitrate: "256k",
   },
   {
     id: "tiktok-reels",
     label: "TikTok / Reels / Shorts (9:16 Vertical)",
-    platform: "TikTok / Reels",
-    format: "mp4",
-    codec: "h264",
+    description: "Vertical 1080×1920 30fps mobile-optimized MP4",
     width: 1080,
     height: 1920,
     fps: 30,
+    codec: "h264",
+    format: "mp4",
+    ext: ".mp4",
     crf: 20,
-    audioBitrate: "192k",
+    audioBitrate: "160k",
   },
   {
     id: "instagram-square",
     label: "Instagram / Feed Square (1:1)",
-    platform: "Instagram",
-    format: "mp4",
-    codec: "h264",
+    description: "1080×1080 square social video MP4",
     width: 1080,
     height: 1080,
     fps: 30,
+    codec: "h264",
+    format: "mp4",
+    ext: ".mp4",
     crf: 20,
     audioBitrate: "160k",
   },
   {
     id: "linkedin-hd",
     label: "LinkedIn Business HD (16:9)",
-    platform: "LinkedIn",
-    format: "mp4",
-    codec: "h264",
+    description: "1920×1080 crisp presentation & promo MP4",
     width: 1920,
     height: 1080,
     fps: 30,
+    codec: "h264",
+    format: "mp4",
+    ext: ".mp4",
     crf: 20,
-    audioBitrate: "192k",
+    audioBitrate: "160k",
   },
   {
     id: "prores-master",
     label: "Apple ProRes 422 Studio Master (.mov)",
-    platform: "Broadcast / NLE Master",
-    format: "mov",
+    description: "Mezzanine studio master 10-bit 4:2:2 + uncompressed PCM audio",
+    width: 1920,
+    height: 1080,
+    fps: 30,
     codec: "prores",
+    format: "mov",
+    ext: ".mov",
   },
   {
     id: "webm-vp9",
     label: "WebM VP9 + Opus (.webm)",
-    platform: "Web / Open Codec",
-    format: "webm",
+    description: "Open royalty-free web streaming container",
+    width: 1920,
+    height: 1080,
+    fps: 30,
     codec: "vp9",
+    format: "webm",
+    ext: ".webm",
     crf: 30,
-    audioBitrate: "160k",
+    audioBitrate: "128k",
   },
 ];
 
-export function resolveExportPreset(presetId?: string): ExportPreset | undefined {
-  if (!presetId) return undefined;
-  return EXPORT_PRESETS.find((p) => p.id === presetId);
+export function resolveExportPreset(id?: string): ExportPreset | undefined {
+  if (!id) return undefined;
+  return EXPORT_PRESETS.find((p) => p.id === id);
 }
 
 export interface RenderOptions {
   outPath: string;
   preset?: string;
   codec?: VideoCodecId;
-  format?: ContainerFormat;
+  /** F6: hardware encoder selection ("auto" | "cpu" | "nvenc" | "amf" | "qsv" | "videotoolbox" | "vaapi") */
+  hwAccel?: HwAccelBackend;
+  /** F6: target integrated loudness in LUFS (e.g. -14 streaming, -16 podcast, -23 EBU R128 broadcast) */
+  loudnessLufs?: number;
   width?: number;
   height?: number;
   fps?: number;
   crf?: number;
-  /** volitelně jen konkrétní sekvence */
   sequenceId?: string;
   onProgress?: (percent: number) => void;
 }
@@ -130,6 +160,8 @@ export interface RenderResult {
   height: number;
   fps: number;
   codec: VideoCodecId;
+  encoder?: string;
+  hwBackend?: string;
   preset?: string;
   sizeBytes: number;
   warnings: string[];
@@ -143,8 +175,9 @@ export interface RenderPlan {
   height: number;
   fps: number;
   codec: VideoCodecId;
+  encoder?: string;
+  hwBackend?: string;
   warnings: string[];
-  /** titulky se před renderem zapíší do tohoto souboru */
   srt?: { path: string; content: string };
 }
 
@@ -152,9 +185,34 @@ interface RenderClip {
   clip: Clip;
   asset: Asset;
   inputIndex: number;
+  speed: number;
 }
 
-/** lineární interpolace mezi keyframy → výraz pro overlay x/y (globální t) */
+/** Builds a valid FFmpeg `atempo` chain for any speed in [0.1 .. 8.0] (each stage within [0.5 .. 2.0]). */
+export function buildAtempoChain(speed: number): string[] {
+  const filters: string[] = [];
+  let rem = Math.max(0.1, Math.min(8, speed));
+  while (rem > 2.0 + 1e-6) {
+    filters.push("atempo=2.0");
+    rem /= 2.0;
+  }
+  while (rem < 0.5 - 1e-6) {
+    filters.push("atempo=0.5");
+    rem /= 0.5;
+  }
+  if (Math.abs(rem - 1.0) > 1e-3) {
+    filters.push(`atempo=${rem.toFixed(4)}`);
+  }
+  return filters;
+}
+
+function getClipSpeed(clip: Clip): number {
+  const eff = clip.effects.find((e) => e.type === "speed");
+  const raw = Number(eff?.params?.rate ?? eff?.params?.speed ?? 1);
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  return Math.max(0.1, Math.min(8, raw));
+}
+
 function keyframeExpr(clip: Clip, property: "x" | "y" | "opacity", fallback: number): string {
   const keys = clip.keyframes.filter((k) => k.property === property && typeof k.value === "number");
   if (keys.length === 0) return String(fallback);
@@ -179,8 +237,20 @@ function clipStaticValue(clip: Clip, property: "x" | "y", fallback: number): num
   return Number(keys[0]!.value);
 }
 
-function clipVideoFilters(clip: Clip, warnings: string[]): string[] {
-  const f: string[] = ["setpts=PTS-STARTPTS"];
+function normalizeHexColor(color: unknown): string {
+  const str = String(color ?? "0x00ff00").trim();
+  if (/^#?[0-9a-fA-F]{6}$/.test(str)) {
+    return `0x${str.replace(/^#/, "")}`;
+  }
+  if (/^0x[0-9a-fA-F]{6}$/.test(str)) return str;
+  if (str.toLowerCase() === "blue") return "0x0000ff";
+  return "0x00ff00";
+}
+
+function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string[] {
+  const f: string[] = [
+    Math.abs(speed - 1) > 1e-3 ? `setpts=(PTS-STARTPTS)/${speed.toFixed(4)}` : "setpts=PTS-STARTPTS",
+  ];
   const sx = clip.transform.scaleX;
   const sy = clip.transform.scaleY;
   if (sx !== 1 || sy !== 1) {
@@ -190,16 +260,22 @@ function clipVideoFilters(clip: Clip, warnings: string[]): string[] {
     const rad = (clip.transform.rotation * Math.PI) / 180;
     f.push(`rotate=${rad.toFixed(5)}:ow=rotw(iw):oh=roth(ih):c=black@0`);
   }
+  let hasAlpha = false;
   for (const effect of clip.effects) {
     const p = effect.params as Record<string, number | boolean | string>;
     switch (effect.type) {
+      case "speed":
+      case "audio-volume":
+      case "audio-denoise":
+      case "audio-eq":
+        break;
       case "blur":
         f.push(`gblur=sigma=${Number(p.sigma ?? p.radius ?? 5)}`);
         break;
       case "color":
       case "color-grade": {
         const args: string[] = [];
-        if (p.brightness != null) args.push(`b=${Number(p.brightness)}`);
+        if (p.brightness != null) args.push(`brightness=${Number(p.brightness)}`);
         if (p.contrast != null) args.push(`contrast=${Number(p.contrast)}`);
         if (p.saturation != null) args.push(`saturation=${Number(p.saturation)}`);
         if (p.gamma != null) args.push(`gamma=${Number(p.gamma)}`);
@@ -210,17 +286,78 @@ function clipVideoFilters(clip: Clip, warnings: string[]): string[] {
       case "black-and-white":
         f.push("hue=s=0");
         break;
+      case "chroma-key":
+      case "chromakey": {
+        const hex = normalizeHexColor(p.color);
+        const similarity = Math.max(0.01, Math.min(1, Number(p.similarity ?? 0.28)));
+        const blend = Math.max(0, Math.min(1, Number(p.blend ?? 0.08)));
+        f.push(`colorkey=${hex}:${similarity.toFixed(3)}:${blend.toFixed(3)}`);
+        hasAlpha = true;
+        if (p.despill !== false) {
+          const spillType = hex.toLowerCase().endsWith("ff") && !hex.toLowerCase().includes("ff00") ? "blue" : "green";
+          f.push(`despill=type=${spillType}`);
+        }
+        break;
+      }
+      case "sharpen": {
+        const amount = Math.max(-1.5, Math.min(3.5, Number(p.amount ?? 1.0)));
+        f.push(`unsharp=5:5:${amount.toFixed(2)}:5:5:0.0`);
+        break;
+      }
+      case "vignette": {
+        const angle = Math.max(0.05, Math.min(1.5, Number(p.angle ?? 0.5)));
+        f.push(`vignette=angle=${angle.toFixed(3)}`);
+        break;
+      }
+      case "crop": {
+        const cw = p.w ?? "iw";
+        const ch = p.h ?? "ih";
+        const cx = p.x ?? 0;
+        const cy = p.y ?? 0;
+        f.push(`crop=${cw}:${ch}:${cx}:${cy}`);
+        break;
+      }
+      case "fade": {
+        const fadeIn = Number(p.inDuration ?? p.fadeIn ?? 0);
+        const fadeOut = Number(p.outDuration ?? p.fadeOut ?? 0);
+        if (fadeIn > 0) {
+          f.push(`fade=t=in:st=0:d=${fadeIn.toFixed(3)}`);
+        }
+        if (fadeOut > 0 && clip.duration > fadeOut) {
+          f.push(`fade=t=out:st=${Math.max(0, clip.duration - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}`);
+        }
+        break;
+      }
       default:
-        warnings.push(`efekt "${effect.type}" zatím není renderovaný (F1: blur/color/grayscale)`);
+        warnings.push(`Effect "${effect.type}" is stored as metadata only (not rendered by FFmpeg filter graph)`);
     }
   }
   if (clip.transform.opacity < 1) {
-    f.push("format=yuva420p", `colorchannelmixer=aa=${clip.transform.opacity.toFixed(3)}`);
+    if (!hasAlpha) f.push("format=yuva420p");
+    f.push(`colorchannelmixer=aa=${clip.transform.opacity.toFixed(3)}`);
   }
   return f;
 }
 
-function codecArgsFor(codec: VideoCodecId, fps: number, crf?: number, audioBitrate = "160k"): string[] {
+function clipAudioFilters(clip: Clip, speed: number): string[] {
+  const af: string[] = [...buildAtempoChain(speed)];
+  for (const effect of clip.effects) {
+    const p = effect.params as Record<string, number | boolean | string>;
+    if (effect.type === "audio-volume" && p.gainDb != null) {
+      af.push(`volume=${Number(p.gainDb).toFixed(2)}dB`);
+    } else if (effect.type === "audio-denoise") {
+      const nf = Math.max(-80, Math.min(-20, Number(p.noiseFloor ?? -25)));
+      af.push("highpass=f=80", `afftdn=nf=${nf}`);
+    } else if (effect.type === "audio-eq") {
+      const freq = Number(p.frequency ?? 3000);
+      const gain = Number(p.gainDb ?? 3);
+      af.push(`equalizer=f=${freq}:t=q:w=1.2:g=${gain}`);
+    }
+  }
+  return af;
+}
+
+function defaultCodecArgs(codec: VideoCodecId, fps: number, crf?: number, audioBitrate = "160k"): string[] {
   switch (codec) {
     case "h265":
       return [
@@ -271,8 +408,12 @@ function codecArgsFor(codec: VideoCodecId, fps: number, crf?: number, audioBitra
   }
 }
 
-/** Sestaví kompletní ffmpeg argumenty pro render timeline (bez spuštění). */
-export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPlan {
+/** Builds complete FFmpeg render arguments synchronously (pure plan builder; uses custom codecArgs when provided). */
+export function buildRenderArgs(
+  project: Project,
+  opts: RenderOptions,
+  customCodecArgs?: string[],
+): RenderPlan {
   const preset = resolveExportPreset(opts.preset);
   const seq: Sequence =
     (opts.sequenceId && project.sequences.find((s) => s.id === opts.sequenceId)) ||
@@ -281,15 +422,13 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
   const height = opts.height ?? preset?.height ?? seq.height;
   const fps = opts.fps ?? preset?.fps ?? seq.fps;
   const ext = extname(opts.outPath).toLowerCase();
-  const inferredCodec: VideoCodecId =
-    ext === ".webm" ? "vp9" : "h264";
+  const inferredCodec: VideoCodecId = ext === ".webm" ? "vp9" : "h264";
   const codec: VideoCodecId = opts.codec ?? preset?.codec ?? inferredCodec;
   const warnings: string[] = [];
 
   const duration = Math.max(sequenceDuration(seq), ...seq.captions.map((c) => c.end), 1);
   const assetOf = (clip: Clip): Asset | undefined => project.assets.find((a) => a.id === clip.assetId);
 
-  // ---- vstupy (base canvas = input 0, pak klipy v pořadí stop) ----
   const args: string[] = [
     "-hide_banner", "-loglevel", "error", "-y",
     "-f", "lavfi", "-i", `color=c=black:size=${width}x${height}:rate=${fps}`,
@@ -304,27 +443,29 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
     for (const clip of [...track.clips].sort((a, b) => a.start - b.start)) {
       const asset = assetOf(clip);
       if (!asset) {
-        warnings.push(`klip "${clip.name}" nemá asset — přeskočeno`);
+        warnings.push(`Clip "${clip.name}" has no backing asset — skipped`);
         continue;
       }
       if (!existsSync(asset.path)) {
-        warnings.push(`offline médium "${asset.name}" (${asset.path}) — přeskočeno`);
+        warnings.push(`offline médium "${asset.name}" (${asset.path}) — skipped`);
         continue;
       }
-      const rc: RenderClip = { clip, asset, inputIndex };
+      const speed = getClipSpeed(clip);
+      const sourceSpan = Math.max(0.05, clip.duration * speed);
+      const rc: RenderClip = { clip, asset, inputIndex, speed };
       if (isAudioTrack) {
         if (asset.kind !== "audio" && !asset.hasAudio) {
-          warnings.push(`klip "${clip.name}" nemá audio stopu — přeskočeno`);
+          warnings.push(`Clip "${clip.name}" has no audio stream — skipped`);
           continue;
         }
-        args.push("-ss", clip.in.toFixed(3), "-t", clip.duration.toFixed(3), "-i", asset.path);
+        args.push("-ss", clip.in.toFixed(3), "-t", sourceSpan.toFixed(3), "-i", asset.path);
         audioClips.push(rc);
         inputIndex++;
       } else {
         if (asset.kind === "image") {
           args.push("-loop", "1", "-t", clip.duration.toFixed(3), "-i", asset.path);
         } else {
-          args.push("-ss", clip.in.toFixed(3), "-t", clip.duration.toFixed(3), "-i", asset.path);
+          args.push("-ss", clip.in.toFixed(3), "-t", sourceSpan.toFixed(3), "-i", asset.path);
         }
         visual.push(rc);
         inputIndex++;
@@ -333,66 +474,76 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
     }
   }
 
-  // ---- video řetězec: base → overlay klipy → titulky ----
   const filters: string[] = [`[0:v]setpts=PTS-STARTPTS[base]`];
   let current = "base";
   visual.forEach((rc, n) => {
-    const { clip } = rc;
-    const vf = clipVideoFilters(clip, warnings);
-    filters.push(`[${rc.inputIndex}:v:0]${vf.join(",")}[v${n}]`);
-    const xExpr = keyframeExpr(clip, "x", clipStaticValue(clip, "x", 0));
-    const yExpr = keyframeExpr(clip, "y", clipStaticValue(clip, "y", 0));
-    const x = `'(W-w)/2+${xExpr}'`;
-    const y = `'(H-h)/2+${yExpr}'`;
-    const out = `ov${n}`;
+    const vLabel = `v${n}`;
+    const outLabel = `o${n}`;
+    const vf = clipVideoFilters(rc.clip, rc.speed, warnings);
+    vf.push(`setpts=PTS+${rc.clip.start.toFixed(3)}/TB`);
+    filters.push(`[${rc.inputIndex}:v]${vf.join(",")}[${vLabel}]`);
+
+    const hasKeysX = rc.clip.keyframes.some((k) => k.property === "x");
+    const hasKeysY = rc.clip.keyframes.some((k) => k.property === "y");
+    const baseX = `(W-w)/2+${rc.clip.transform.x.toFixed(2)}`;
+    const baseY = `(H-h)/2+${rc.clip.transform.y.toFixed(2)}`;
+    const xExpr = hasKeysX
+      ? `(W-w)/2+(${keyframeExpr(rc.clip, "x", clipStaticValue(rc.clip, "x", rc.clip.transform.x))})`
+      : baseX;
+    const yExpr = hasKeysY
+      ? `(H-h)/2+(${keyframeExpr(rc.clip, "y", clipStaticValue(rc.clip, "y", rc.clip.transform.y))})`
+      : baseY;
+    const end = (rc.clip.start + rc.clip.duration).toFixed(3);
     filters.push(
-      `[${current}][v${n}]overlay=x=${x}:y=${y}:enable='between(t,${clip.start.toFixed(3)},${clipEnd(clip).toFixed(3)})'[${out}]`,
+      `[${current}][${vLabel}]overlay=x='${xExpr}':y='${yExpr}':eof_action=pass:enable='between(t,${rc.clip.start.toFixed(3)},${end})'[${outLabel}]`,
     );
-    current = out;
+    current = outLabel;
   });
 
-  let srt: RenderPlan["srt"];
-  let videoOut = current;
+  let srt: { path: string; content: string } | undefined;
   if (seq.captions.length > 0) {
-    const srtPath = join(dirname(opts.outPath), `sub_${Date.now().toString(36)}.srt`);
+    const srtPath = `${resolvePath(opts.outPath)}.vedit-subs.srt`;
     srt = { path: srtPath, content: captionsToSrt(seq.captions) };
-    filters.push(
-      `[${current}]subtitles=${srtPath.replace(/\\/g, "/").replace(/:/g, "\\:")}:force_style='FontSize=20,PrimaryColour=&HFFFFFF&,OutlineColour=&H80000000&,Outline=2'[vout]`,
-    );
-    videoOut = "vout";
-  } else {
-    filters.push(`[${current}]null[vout]`);
-    videoOut = "vout";
+    const escaped = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+    filters.push(`[${current}]subtitles='${escaped}'[vsub]`);
+    current = "vsub";
   }
 
-  // ---- audio řetězec ----
-  const audioLabels: string[] = [];
-  audioClips.forEach((rc, n) => {
-    const label = `a${n}`;
-    const delayMs = Math.round(rc.clip.start * 1000);
+  const loudnessChain =
+    opts.loudnessLufs != null
+      ? `,loudnorm=I=${Math.max(-36, Math.min(-5, opts.loudnessLufs)).toFixed(1)}:TP=-1.5:LRA=11`
+      : "";
+
+  let audioMap: string;
+  if (audioClips.length > 0) {
+    const labels: string[] = [];
+    audioClips.forEach((rc, n) => {
+      const aLabel = `a${n}`;
+      const delayMs = Math.round(rc.clip.start * 1000);
+      const af = clipAudioFilters(rc.clip, rc.speed);
+      af.push(`adelay=${delayMs}|${delayMs}`, "apad");
+      filters.push(`[${rc.inputIndex}:a]${af.join(",")}[${aLabel}]`);
+      labels.push(`[${aLabel}]`);
+    });
     filters.push(
-      `[${rc.inputIndex}:a:0]asetpts=PTS-STARTPTS,atrim=0:${rc.clip.duration.toFixed(3)},volume=1,adelay=${delayMs}|${delayMs},apad,atrim=0:${duration.toFixed(3)}[${label}]`,
+      `${labels.join("")}amix=inputs=${labels.length}:dropout_transition=0,atrim=0:${duration.toFixed(3)},asetpts=PTS-STARTPTS${loudnessChain}[aout]`,
     );
-    audioLabels.push(label);
-  });
-  if (audioLabels.length === 0) {
+    audioMap = "[aout]";
+  } else {
     filters.push(`anullsrc=r=48000:cl=stereo,atrim=0:${duration.toFixed(3)}[aout]`);
-  } else if (audioLabels.length === 1) {
-    filters.push(`[${audioLabels[0]}]anull[aout]`);
-  } else {
-    const mixInputs = audioLabels.map((l) => `[${l}]`).join("");
-    filters.push(
-      `${mixInputs}amix=inputs=${audioLabels.length}:dropout_transition=0,volume=${audioLabels.length}[aout]`,
-    );
+    audioMap = "[aout]";
   }
 
-  // ---- výstup ----
+  const encArgs =
+    customCodecArgs ??
+    defaultCodecArgs(codec, fps, opts.crf ?? preset?.crf, preset?.audioBitrate ?? "160k");
+
   args.push(
     "-filter_complex", filters.join(";"),
-    "-map", `[${videoOut}]`,
-    "-map", "[aout]",
-    ...codecArgsFor(codec, fps, opts.crf ?? preset?.crf, preset?.audioBitrate ?? "160k"),
+    "-map", `[${current}]`,
+    "-map", audioMap,
     "-t", duration.toFixed(3),
+    ...encArgs,
     "-progress", "pipe:1", "-nostats",
     opts.outPath,
   );
@@ -400,44 +551,76 @@ export function buildRenderArgs(project: Project, opts: RenderOptions): RenderPl
   return { args, duration, width, height, fps, codec, warnings, srt };
 }
 
-/** Spustí reálný render timeline přes FFmpeg. */
+/** Runs real FFmpeg sequence render with multi-codec + GPU hardware acceleration + loudness support. */
 export async function renderSequence(project: Project, opts: RenderOptions): Promise<RenderResult> {
-  await mkdir(dirname(opts.outPath), { recursive: true });
-  const plan = buildRenderArgs(project, opts);
-  if (plan.srt) {
-    await mkdir(dirname(plan.srt.path), { recursive: true });
-    await writeFile(plan.srt.path, plan.srt.content, "utf8");
+  await mkdir(dirname(resolvePath(opts.outPath)), { recursive: true });
+  const preset = resolveExportPreset(opts.preset);
+  const seq: Sequence =
+    (opts.sequenceId && project.sequences.find((s) => s.id === opts.sequenceId)) ||
+    project.sequences.find((s) => s.id === project.activeSequenceId)!;
+  const fps = opts.fps ?? preset?.fps ?? seq.fps;
+  const ext = extname(opts.outPath).toLowerCase();
+  const inferredCodec: VideoCodecId = ext === ".webm" ? "vp9" : "h264";
+  const codec: VideoCodecId = opts.codec ?? preset?.codec ?? inferredCodec;
+
+  const resolvedEncoder = await resolveVideoEncoder(
+    codec,
+    opts.hwAccel ?? "cpu",
+    fps,
+    opts.crf ?? preset?.crf,
+    preset?.audioBitrate ?? "160k",
+  );
+
+  const plan = buildRenderArgs(project, opts, resolvedEncoder.args);
+  if (resolvedEncoder.fallbackReason) {
+    plan.warnings.push(resolvedEncoder.fallbackReason);
+  }
+  if (plan.srt) await writeFile(plan.srt.path, plan.srt.content, "utf-8");
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(ffmpegPath(), plan.args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      let buf = "";
+      child.stdout.setEncoding("utf-8");
+      child.stderr.setEncoding("utf-8");
+      child.stderr.on("data", (c) => (stderr += c));
+      child.stdout.on("data", (chunk: string) => {
+        buf += chunk;
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          const m = /^out_time_us=(\d+)/.exec(line.trim());
+          if (m && opts.onProgress) {
+            const sec = Number(m[1]) / 1e6;
+            opts.onProgress(Math.min(99, Math.round((sec / plan.duration) * 100)));
+          }
+        }
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`ffmpeg render failed (code ${code}): ${stderr.trim().split("\n").slice(-4).join(" | ")}`));
+      });
+    });
+  } finally {
+    if (plan.srt) await rm(plan.srt.path, { force: true });
   }
 
-  let lastPct = -1;
-  const res = await run(ffmpegPath(), plan.args, {
-    onStdout: (chunk) => {
-      if (!opts.onProgress) return;
-      const text = chunk.toString();
-      const m = /out_time_ms=(\d+)/.exec(text);
-      if (m) {
-        const pct = Math.min(99, Math.round((Number(m[1]) / 1e6 / plan.duration) * 100));
-        if (pct !== lastPct) {
-          lastPct = pct;
-          opts.onProgress(pct);
-        }
-      }
-    },
-  });
-  if (res.code !== 0) {
-    throw new Error(`render selhal: ${res.stderr.trim().split("\n").slice(-3).join(" | ")}`);
-  }
-  const sizeBytes = (await stat(opts.outPath)).size;
   opts.onProgress?.(100);
+  const info = await probeMedia(opts.outPath);
+  const st = await stat(opts.outPath);
   return {
     outPath: opts.outPath,
-    duration: plan.duration,
-    width: plan.width,
-    height: plan.height,
-    fps: plan.fps,
+    duration: info.duration,
+    width: info.width ?? plan.width,
+    height: info.height ?? plan.height,
+    fps: info.fps ?? plan.fps,
     codec: plan.codec,
+    encoder: resolvedEncoder.encoder,
+    hwBackend: resolvedEncoder.backend,
     preset: opts.preset,
-    sizeBytes,
+    sizeBytes: st.size,
     warnings: plan.warnings,
     args: plan.args,
   };

@@ -220,11 +220,80 @@ export const api = {
       duration,
       real: true,
     }),
-  exportRender: (preset?: string) =>
-    req<{ jobId: string }>("POST", `/projects/${currentId}/export`, preset ? { preset } : { format: "mp4" }),
+  exportRender: (preset?: string, hwAccel = "auto", loudnessLufs?: number) =>
+    req<{ jobId: string }>("POST", `/projects/${currentId}/export`, {
+      ...(preset ? { preset } : { format: "mp4" }),
+      hwAccel,
+      ...(loudnessLufs != null ? { loudnessLufs } : {}),
+    }),
   exportPresets: () => req<{ presets: ExportPresetInfo[] }>("GET", "/export/presets"),
+  exportEncoders: () =>
+    req<{
+      recommendedBackend: string;
+      usableBackends: string[];
+      encoders: Array<{ encoder: string; codec: string; backend: string; label: string; usable: boolean }>;
+    }>("GET", "/export/encoders"),
   batchExport: (presets: string[]) =>
     req<{ batchId: string; jobIds: string[] }>("POST", `/projects/${currentId}/export/batch`, { presets }),
+  saveProjectDisk: () =>
+    req<{ filePath: string; sizeBytes: number; savedAt: string }>("POST", `/projects/${currentId}/save`, {}),
+  savedProjects: () =>
+    req<{ saved: Array<{ fileName: string; filePath: string; name: string; id: string; updatedAt: string }> }>(
+      "GET",
+      "/projects-saved",
+    ),
+  openProjectDisk: (filePath: string) =>
+    req<{ project: Project }>("POST", "/projects/open", { filePath }),
+  uploadAssetFile: async (file: File, at?: number, insert = true): Promise<{ asset: Asset; clip: Clip | null }> => {
+    const buf = await file.arrayBuffer();
+    const qs = new URLSearchParams({
+      name: file.name,
+      insert: String(insert),
+      ...(at != null ? { at: String(at) } : {}),
+    });
+    const res = await fetch(apiUrl(`/projects/${currentId}/assets/upload?${qs.toString()}`), {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        Authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: buf,
+    });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try {
+        msg = (await res.json()).error ?? msg;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    return res.json() as Promise<{ asset: Asset; clip: Clip | null }>;
+  },
+  removeEffect: (clipId: string, effectId: string) =>
+    req<{ ok: boolean }>("DELETE", `/projects/${currentId}/clips/${clipId}/effects/${effectId}`),
+  colorGrade: (clipId: string, preset: string) =>
+    req<{ effect: { id: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/color-grade`, { preset }),
+  chromaKey: (clipId: string, color = "#00ff00", similarity = 0.28) =>
+    req<{ effect: { id: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/chroma-key`, {
+      color,
+      similarity,
+      despill: true,
+    }),
+  setClipSpeed: (clipId: string, speed: number) =>
+    req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/speed`, { speed }),
+  fadeClip: (clipId: string, fadeIn = 0.5, fadeOut = 0.5) =>
+    req<{ effect: { id: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/fade`, { fadeIn, fadeOut }),
+  enhanceAudio: (clipId?: string) =>
+    req<{ outPath: string; duration: number }>(`POST`, `/projects/${currentId}/audio/enhance`, {
+      ...(clipId ? { clipId } : {}),
+    }),
+  duckAudio: (musicClipId: string, voiceClipId?: string) =>
+    req<{ speechIntervals: Array<{ start: number; end: number }>; reductionDb: number }>(
+      `POST`,
+      `/projects/${currentId}/audio/duck`,
+      { musicClipId, ...(voiceClipId ? { voiceClipId } : {}) },
+    ),
   marketplaceList: () => req<{ packs: MarketplacePackInfo[] }>("GET", `/marketplace?projectId=${currentId}`),
   applyTemplate: (templateId: string, params: Record<string, string> = {}) =>
     req<{ appliedName: string; captionsAdded: number }>(

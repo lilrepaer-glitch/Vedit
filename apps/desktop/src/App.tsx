@@ -21,7 +21,9 @@ interface Selection {
 export function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [playhead, setPlayhead] = useState(2);
+  const [playhead, setPlayhead] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [shuttleRate, setShuttleRate] = useState(1);
   const [zoom, setZoom] = useState(60);
   const [toast, setToast] = useState<string | null>(null);
   const [presets, setPresets] = useState<Array<{ id: string; label: string }>>([]);
@@ -33,6 +35,8 @@ export function App() {
   const [cameraMoves, setCameraMoves] = useState<CameraMoveInfo[]>([]);
   const [exportPresets, setExportPresets] = useState<ExportPresetInfo[]>([]);
   const [exportPresetId, setExportPresetId] = useState("youtube-1080p");
+  const [hwAccel, setHwAccel] = useState("auto");
+  const [loudnessLufs, setLoudnessLufs] = useState<string>("-14");
   const [packs, setPacks] = useState<MarketplacePackInfo[]>([]);
 
   const flash = useCallback((message: string) => {
@@ -88,6 +92,110 @@ export function App() {
   }, [refresh, flash]);
 
   const seq = project?.sequences.find((s) => s.id === project.activeSequenceId) ?? null;
+
+  const totalSeqDuration = useMemo(() => {
+    if (!seq) return 10;
+    return Math.max(
+      1,
+      ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)),
+      ...seq.captions.map((c) => c.end),
+    );
+  }, [seq]);
+
+  // Real-time 60Hz transport loop when playing
+  useEffect(() => {
+    if (!playing) return;
+    let last = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      setPlayhead((prev) => {
+        const next = prev + dt * shuttleRate;
+        if (next >= totalSeqDuration) {
+          setPlaying(false);
+          return totalSeqDuration;
+        }
+        if (next <= 0) {
+          setPlaying(false);
+          return 0;
+        }
+        return next;
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, shuttleRate, totalSeqDuration]);
+
+  const act = useCallback(
+    async (fn: () => Promise<unknown>, okMessage?: string) => {
+      setBusy(true);
+      try {
+        await fn();
+        await refresh();
+        if (okMessage) flash(okMessage);
+      } catch (err) {
+        flash(`Error: ${(err as Error).message}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh, flash],
+  );
+
+  // Global NLE keyboard shortcuts (Space, J/K/L, Frame Step, Save, Undo/Redo)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      const fps = seq?.fps || 30;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void act(async () => {
+          const saved = await api.saveProjectDisk();
+          flash(`Saved → ${saved.filePath.split(/[\\/]/).pop()}`);
+        });
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        void act(() => api.undo(), "Undo");
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        void act(() => api.redo(), "Redo");
+        return;
+      }
+      if (e.code === "Space") {
+        e.preventDefault();
+        setShuttleRate(1);
+        setPlaying((p) => !p);
+      } else if (e.key.toLowerCase() === "k") {
+        setPlaying(false);
+      } else if (e.key.toLowerCase() === "l") {
+        setPlaying((wasPlaying) => {
+          setShuttleRate((r) => (!wasPlaying || r < 0 ? 1 : Math.min(4, r * 2)));
+          return true;
+        });
+      } else if (e.key.toLowerCase() === "j") {
+        setShuttleRate(-1);
+        setPlaying(true);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setPlaying(false);
+        setPlayhead((p) => Math.max(0, p - 1 / fps));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setPlaying(false);
+        setPlayhead((p) => Math.min(totalSeqDuration, p + 1 / fps));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [seq, totalSeqDuration, act, flash]);
+
   const selected: { clip: Clip; trackId: string } | null = useMemo(() => {
     if (!seq || !selection) return null;
     for (const track of seq.tracks) {
@@ -121,22 +229,6 @@ export function App() {
     );
   }, [project, activeClip, playhead]);
 
-  const act = useCallback(
-    async (fn: () => Promise<unknown>, okMessage?: string) => {
-      setBusy(true);
-      try {
-        await fn();
-        await refresh();
-        if (okMessage) flash(okMessage);
-      } catch (err) {
-        flash(`Error: ${(err as Error).message}`);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refresh, flash],
-  );
-
   if (!project || !seq) {
     return <div className="app loading">Connecting to Vedit Engine…</div>;
   }
@@ -152,6 +244,37 @@ export function App() {
           <span className="muted">{project.name}</span>
         </div>
         <div className="toolbar-group">
+          <button
+            disabled={busy}
+            title="Save .vedit project to disk (Ctrl+S)"
+            onClick={() =>
+              act(async () => {
+                const saved = await api.saveProjectDisk();
+                flash(`Saved → ${saved.filePath.split(/[\\/]/).pop()}`);
+              })
+            }
+          >
+            💾 Save
+          </button>
+          <button
+            disabled={busy}
+            title="Open most recent saved .vedit project"
+            onClick={() =>
+              act(async () => {
+                const { saved } = await api.savedProjects();
+                if (!saved.length) {
+                  flash("No saved .vedit projects on disk yet");
+                  return;
+                }
+                const opened = await api.openProjectDisk(saved[0]!.filePath);
+                setCurrentId(opened.project.id);
+                setProject(opened.project);
+                flash(`Opened "${opened.project.name}"`);
+              })
+            }
+          >
+            📂 Open
+          </button>
           <button disabled={busy} onClick={() => act(() => api.undo(), "Undo")}>
             ↶ Undo
           </button>
@@ -226,12 +349,26 @@ export function App() {
               </option>
             ))}
           </select>
+          <select value={hwAccel} onChange={(e) => setHwAccel(e.target.value)} title="Hardware GPU Encoder">
+            <option value="auto">⚡ Auto GPU/CPU</option>
+            <option value="nvenc">NVIDIA NVENC</option>
+            <option value="amf">AMD AMF</option>
+            <option value="qsv">Intel QuickSync</option>
+            <option value="cpu">CPU Software</option>
+          </select>
+          <select value={loudnessLufs} onChange={(e) => setLoudnessLufs(e.target.value)} title="Audio Loudness Target">
+            <option value="-14">-14 LUFS (Web)</option>
+            <option value="-16">-16 LUFS (Voice)</option>
+            <option value="-23">-23 LUFS (EBU)</option>
+            <option value="off">Raw Audio</option>
+          </select>
           <button
             disabled={busy}
             onClick={() =>
               act(async () => {
-                const res = await api.exportRender(exportPresetId);
-                flash(`Export (${exportPresetId}) job ${res.jobId.slice(0, 8)}…`);
+                const lufs = loudnessLufs === "off" ? undefined : Number(loudnessLufs);
+                const res = await api.exportRender(exportPresetId, hwAccel, lufs);
+                flash(`Export (${exportPresetId}, ${hwAccel}) job ${res.jobId.slice(0, 8)}…`);
               })
             }
           >
@@ -254,7 +391,35 @@ export function App() {
 
       <main className="main">
         <div className="left-col">
-          <MediaPool project={project} projectId={project.id} onImported={() => void refresh()} />
+          <MediaPool
+            project={project}
+            projectId={project.id}
+            playhead={playhead}
+            onImported={(msg) => {
+              void refresh();
+              if (msg) flash(msg);
+            }}
+            onQuickAdd={(asset) =>
+              act(async () => {
+                const isAud = asset.kind === "audio";
+                let track = seq.tracks.find((t) => t.kind === (isAud ? "audio" : "video") && !t.locked);
+                if (!track) {
+                  const created = await api.addTrack(isAud ? "audio" : "video", isAud ? "A1" : "V1");
+                  track = created.track;
+                }
+                const dur = asset.duration ?? 5;
+                await api.addClip({
+                  trackId: track.id,
+                  assetId: asset.id,
+                  start: playhead,
+                  duration: dur,
+                  in: 0,
+                  out: dur,
+                });
+                flash(`Added "${asset.name}" @ ${fmt(playhead)}`);
+              })
+            }
+          />
           <AiPanel
             caps={aiCaps}
             assets={project.assets}
@@ -306,7 +471,22 @@ export function App() {
           />
           <JobsPanel project={project} />
         </div>
-        <Preview project={project} clip={activeClip} playhead={playhead} frameUrl={frameUrl} />
+        <Preview
+          project={project}
+          clip={activeClip}
+          playhead={playhead}
+          playing={playing}
+          shuttleRate={shuttleRate}
+          frameUrl={frameUrl}
+          onTogglePlay={() => {
+            setShuttleRate(1);
+            setPlaying((p) => !p);
+          }}
+          onSeek={(t) => {
+            setPlaying(false);
+            setPlayhead(t);
+          }}
+        />
         <div className="right-col">
           <GenPanel
             providers={genProviders}
@@ -326,10 +506,7 @@ export function App() {
             playhead={playhead}
             busy={busy}
             onApplyTemplate={(templateId, title) =>
-              act(
-                () => api.applyTemplate(templateId, title ? { title } : {}),
-                "Template applied",
-              )
+              act(() => api.applyTemplate(templateId, title ? { title } : {}), "Template applied")
             }
             onRunPlugin={(pluginId) => act(() => api.runPlugin(pluginId), `Plugin ${pluginId} finished`)}
             onSaveSnapshot={(label) => act(() => api.saveSnapshot(label), `Checkpoint "${label}" saved`)}
@@ -342,6 +519,50 @@ export function App() {
             clip={selected?.clip ?? null}
             asset={selectedAsset}
             captions={seq.captions}
+            onProAction={(action, payload) => {
+              if (!clipId) return;
+              switch (action) {
+                case "speed":
+                  void act(
+                    () => api.setClipSpeed(clipId, Number(payload?.speed ?? 1)),
+                    `Clip speed set to ${payload?.speed}×`,
+                  );
+                  break;
+                case "color-grade":
+                  void act(
+                    () => api.colorGrade(clipId, String(payload?.preset ?? "cinematic-contrast")),
+                    `Color grade "${payload?.preset}" applied`,
+                  );
+                  break;
+                case "chroma-key":
+                  void act(
+                    () => api.chromaKey(clipId, String(payload?.color ?? "#00ff00")),
+                    `Chroma key (${payload?.color}) applied`,
+                  );
+                  break;
+                case "fade":
+                  void act(
+                    () => api.fadeClip(clipId, Number(payload?.fadeIn ?? 0.5), Number(payload?.fadeOut ?? 0.5)),
+                    "Fade transition applied",
+                  );
+                  break;
+                case "enhance-audio":
+                  void act(
+                    () => api.enhanceAudio(clipId),
+                    "Voice enhanced (FFT denoise + EQ + -16 LUFS)",
+                  );
+                  break;
+                case "duck-audio":
+                  void act(async () => {
+                    const res = await api.duckAudio(clipId);
+                    flash(`Music auto-ducked across ${res.speechIntervals.length} speech segment(s)`);
+                  });
+                  break;
+                case "remove-effect":
+                  void act(() => api.removeEffect(clipId, String(payload?.effectId ?? "")), "Effect removed");
+                  break;
+              }
+            }}
             onPatch={(patch) => {
               if (!clipId) return;
               const nested: Record<string, unknown> = {};
@@ -364,7 +585,10 @@ export function App() {
         selection={selection}
         onSelect={(trackId, clipId) => setSelection({ trackId, clipId })}
         playhead={playhead}
-        onSeek={setPlayhead}
+        onSeek={(t) => {
+          setPlaying(false);
+          setPlayhead(t);
+        }}
         zoom={zoom}
         onZoom={setZoom}
       />

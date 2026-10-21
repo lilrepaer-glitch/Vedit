@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   Asset,
   CameraMoveInfo,
@@ -10,26 +10,88 @@ import type {
   Project,
   Track,
 } from "./api";
-import { apiUrl, withToken } from "./api";
+import { api, apiUrl, withToken } from "./api";
 
 export function fmt(t: number): string {
   return `${t.toFixed(2)}s`;
 }
 
-// ---------- MediaPool ----------
+// ---------- MediaPool (F6: Drag & Drop + File Picker + Quick Timeline Insert) ----------
 
 export function MediaPool({
   project,
   projectId,
+  playhead,
   onImported,
+  onQuickAdd,
 }: {
   project: Project;
   projectId: string;
-  onImported: () => void;
+  playhead: number;
+  onImported: (msg?: string) => void;
+  onQuickAdd: (asset: Asset) => void;
 }) {
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      let cursor = playhead;
+      for (const file of Array.from(files)) {
+        const res = await api.uploadAssetFile(file, cursor, true);
+        cursor += res.asset.duration ?? 5;
+      }
+      onImported(`Imported ${files.length} file${files.length > 1 ? "s" : ""} onto timeline`);
+    } catch (err) {
+      alert(`Import failed: ${(err as Error).message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   return (
     <section className="panel">
       <h2>Media Pool</h2>
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          void handleFiles(e.dataTransfer.files);
+        }}
+        onClick={() => fileInputRef.current?.click()}
+        style={{
+          border: `1px dashed ${dragging ? "#4f8cff" : "#3a4256"}`,
+          background: dragging ? "rgba(79, 140, 255, 0.12)" : "rgba(255,255,255,0.03)",
+          borderRadius: 6,
+          padding: "10px 8px",
+          textAlign: "center",
+          cursor: "pointer",
+          marginBottom: 8,
+          fontSize: 12,
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="video/*,audio/*,image/*"
+          style={{ display: "none" }}
+          onChange={(e) => void handleFiles(e.target.files)}
+        />
+        <strong>{uploading ? "⏳ Importing & probing media…" : "📂 Drop Video / Audio / Image Files"}</strong>
+        <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+          or click to browse files on your PC (auto-added to timeline)
+        </div>
+      </div>
+
       <ul className="asset-list">
         {project.assets.map((a) => (
           <li key={a.id} className="asset">
@@ -50,10 +112,23 @@ export function MediaPool({
                 {a.source.simulated ? "offline" : a.source.provider ?? "AI"}
               </span>
             )}
+            <button
+              type="button"
+              title="Insert onto timeline at playhead"
+              style={{ padding: "1px 6px", fontSize: 11 }}
+              onClick={() => onQuickAdd(a)}
+            >
+              + Add
+            </button>
           </li>
         ))}
       </ul>
-      <ImportForm projectId={projectId} onImported={onImported} />
+      <details style={{ marginTop: 6 }}>
+        <summary className="muted" style={{ cursor: "pointer", fontSize: 11 }}>
+          Import by local disk path
+        </summary>
+        <ImportForm projectId={projectId} onImported={() => onImported("Media linked")} />
+      </details>
     </section>
   );
 }
@@ -62,6 +137,7 @@ function ImportForm({ projectId, onImported }: { projectId: string; onImported: 
   return (
     <form
       className="import-form"
+      style={{ marginTop: 6 }}
       onSubmit={async (e) => {
         e.preventDefault();
         const form = e.currentTarget;
@@ -85,7 +161,6 @@ function ImportForm({ projectId, onImported }: { projectId: string; onImported: 
         }
       }}
     >
-      <h3>Import Media</h3>
       <input name="name" placeholder="name.mp4" required />
       <input name="path" placeholder="C:\\Videos\\clip.mp4" required />
       <select name="kind" defaultValue="video">
@@ -94,33 +169,132 @@ function ImportForm({ projectId, onImported }: { projectId: string; onImported: 
         <option value="image">image</option>
       </select>
       <input name="duration" type="number" placeholder="duration (s)" defaultValue={10} min={0} step={0.1} />
-      <button type="submit">+ Import</button>
+      <button type="submit">+ Link Path</button>
     </form>
   );
 }
 
-// ---------- Preview ----------
+// ---------- Preview (F6: Real-Time Streaming Video + Audio Playback, Transport Bar, Live FX & Captions, Fullscreen) ----------
 
 export function Preview({
   project,
   clip,
   playhead,
+  playing,
+  shuttleRate,
   frameUrl,
+  onTogglePlay,
+  onSeek,
 }: {
   project: Project;
   clip: Clip | null;
   playhead: number;
+  playing: boolean;
+  shuttleRate: number;
   frameUrl: string | null;
+  onTogglePlay: () => void;
+  onSeek: (t: number) => void;
 }) {
   const seq = project.sequences.find((s) => s.id === project.activeSequenceId)!;
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const activeAsset = clip ? project.assets.find((a) => a.id === clip.assetId) ?? null : null;
+  const streamSrc =
+    clip && activeAsset && activeAsset.kind !== "image"
+      ? withToken(`/api/v1/projects/${project.id}/assets/${clip.assetId}/stream`)
+      : null;
+
+  // Find active background audio clip on audio tracks at current playhead
+  const activeAudioClip =
+    seq.tracks
+      .filter((t) => t.kind === "audio" && !t.muted)
+      .flatMap((t) => t.clips)
+      .find((c) => playhead >= c.start && playhead < c.start + c.duration) ?? null;
+  const audioStreamSrc = activeAudioClip
+    ? withToken(`/api/v1/projects/${project.id}/assets/${activeAudioClip.assetId}/stream`)
+    : null;
+
+  const clipSpeedEff = Number(clip?.effects.find((e) => e.type === "speed")?.params?.rate ?? 1) || 1;
+
+  // Keep HTML5 <video> element synced with playhead & playing state
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !clip || !streamSrc) return;
+    const mediaTime = Math.max(0, clip.in + (playhead - clip.start) * clipSpeedEff);
+    if (!playing) {
+      v.pause();
+      if (Number.isFinite(mediaTime) && Math.abs(v.currentTime - mediaTime) > 0.08) {
+        try {
+          v.currentTime = mediaTime;
+        } catch {
+          /* metadata still loading */
+        }
+      }
+    } else {
+      v.playbackRate = Math.max(0.25, Math.min(4, Math.abs(shuttleRate) * clipSpeedEff));
+      if (Math.abs(v.currentTime - mediaTime) > 0.35) {
+        try {
+          v.currentTime = mediaTime;
+        } catch {
+          /* ignore */
+        }
+      }
+      void v.play().catch(() => undefined);
+    }
+  }, [playing, playhead, clip, streamSrc, shuttleRate, clipSpeedEff]);
+
+  // Keep HTML5 background <audio> synced during real-time playback
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a || !activeAudioClip || !audioStreamSrc) return;
+    const audioTime = Math.max(0, activeAudioClip.in + (playhead - activeAudioClip.start));
+    if (!playing) {
+      a.pause();
+    } else {
+      a.playbackRate = Math.max(0.25, Math.min(4, Math.abs(shuttleRate)));
+      if (Math.abs(a.currentTime - audioTime) > 0.4) {
+        try {
+          a.currentTime = audioTime;
+        } catch {
+          /* ignore */
+        }
+      }
+      void a.play().catch(() => undefined);
+    }
+  }, [playing, playhead, activeAudioClip, audioStreamSrc, shuttleRate]);
+
+  // Live CSS preview filter chain for color-grade, grayscale, blur
+  const cssFilters: string[] = [];
+  if (clip) {
+    for (const eff of clip.effects) {
+      const p = eff.params as Record<string, number>;
+      if (eff.type === "grayscale" || eff.type === "black-and-white") cssFilters.push("grayscale(100%)");
+      if (eff.type === "blur") cssFilters.push(`blur(${Math.max(1, Number(p.sigma ?? 4))}px)`);
+      if (eff.type === "color" || eff.type === "color-grade") {
+        if (p.brightness != null) cssFilters.push(`brightness(${(1 + Number(p.brightness)).toFixed(2)})`);
+        if (p.contrast != null) cssFilters.push(`contrast(${Number(p.contrast).toFixed(2)})`);
+        if (p.saturation != null) cssFilters.push(`saturate(${Number(p.saturation).toFixed(2)})`);
+      }
+    }
+  }
+
+  const activeCaptions = seq.captions.filter((c) => playhead >= c.start && playhead <= c.end);
   const t = clip?.transform;
+  const frameStep = 1 / Math.max(1, seq.fps || 30);
+
   return (
     <section className="panel preview-panel">
       <h2>
-        Preview <span className="muted">— live frame decoder (FFmpeg)</span>
+        Preview <span className="muted">— Real-Time Stream + FFmpeg Decoder</span>
       </h2>
-      <div className="preview-stage" style={{ aspectRatio: `${seq.width} / ${seq.height}` }}>
-        {clip && frameUrl ? (
+      <div
+        ref={stageRef}
+        className="preview-stage"
+        style={{ aspectRatio: `${seq.width} / ${seq.height}`, position: "relative" }}
+      >
+        {clip && (streamSrc || frameUrl) ? (
           <div
             className="preview-clip preview-frame"
             style={{
@@ -128,28 +302,114 @@ export function Preview({
                 ? `translate(${t.x}px, ${t.y}px) rotate(${t.rotation}deg) scale(${t.scaleX}, ${t.scaleY})`
                 : undefined,
               opacity: t?.opacity ?? 1,
+              filter: cssFilters.length ? cssFilters.join(" ") : undefined,
             }}
           >
-            <img
-              src={frameUrl}
-              alt={clip.name}
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).style.display = "none";
-              }}
-            />
+            {streamSrc ? (
+              <video
+                ref={videoRef}
+                src={streamSrc}
+                playsInline
+                preload="auto"
+                style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+              />
+            ) : frameUrl ? (
+              <img
+                src={frameUrl}
+                alt={clip.name}
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).style.display = "none";
+                }}
+              />
+            ) : null}
             <div className="frame-label">
               <strong>{clip.name}</strong>
               <div className="muted">
-                {fmt(clip.start)} → {fmt(clip.start + clip.duration)} • {clip.keyframes.length} kf
+                {fmt(clip.start)} → {fmt(clip.start + clip.duration)} • {clipSpeedEff !== 1 ? `${clipSpeedEff}× • ` : ""}
+                {clip.effects.length} fx • {clip.keyframes.length} kf
               </div>
             </div>
           </div>
         ) : (
           <div className="preview-empty">Select a clip or move playhead over a clip</div>
         )}
+
+        {activeCaptions.length > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 18,
+              left: "8%",
+              right: "8%",
+              textAlign: "center",
+              pointerEvents: "none",
+            }}
+          >
+            {activeCaptions.map((c) => (
+              <div
+                key={c.id}
+                style={{
+                  display: "inline-block",
+                  background: "rgba(0, 0, 0, 0.78)",
+                  color: "#fff",
+                  padding: "4px 12px",
+                  borderRadius: 5,
+                  fontSize: 15,
+                  fontWeight: 600,
+                  marginTop: 4,
+                  textShadow: "0 1px 3px #000",
+                }}
+              >
+                {c.text}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {audioStreamSrc && <audio ref={audioRef} src={audioStreamSrc} preload="auto" />}
       </div>
-      <div className="preview-meta">
-        {seq.width}×{seq.height} • {seq.fps} fps • playhead {fmt(playhead)}
+
+      {/* Pro NLE Transport Bar */}
+      <div
+        className="preview-meta"
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}
+      >
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <button type="button" title="Jump to start (Home)" onClick={() => onSeek(0)}>
+            ⏮
+          </button>
+          <button type="button" title="Previous frame (←)" onClick={() => onSeek(Math.max(0, playhead - frameStep))}>
+            ⏪ -1f
+          </button>
+          <button
+            type="button"
+            title="Play / Pause (Space, J/K/L shuttle)"
+            onClick={onTogglePlay}
+            style={{ fontWeight: 700, minWidth: 74 }}
+          >
+            {playing ? "⏸ Pause" : "▶ Play"}
+          </button>
+          <button type="button" title="Next frame (→)" onClick={() => onSeek(playhead + frameStep)}>
+            +1f ⏩
+          </button>
+          <button
+            type="button"
+            title="Toggle Fullscreen Monitor"
+            onClick={() => {
+              if (document.fullscreenElement) {
+                void document.exitFullscreen();
+              } else {
+                void stageRef.current?.requestFullscreen?.();
+              }
+            }}
+          >
+            ⛶ Fullscreen
+          </button>
+        </div>
+        <span>
+          {seq.width}×{seq.height} • {seq.fps} fps • playhead <strong>{fmt(playhead)}</strong>
+          {playing && shuttleRate !== 1 ? ` (${shuttleRate}×)` : ""}
+        </span>
       </div>
     </section>
   );
@@ -724,24 +984,30 @@ export function Inspector({
   clip,
   asset,
   onPatch,
+  onProAction,
   captions,
 }: {
   clip: Clip | null;
   asset: Asset | null;
   onPatch: (patch: Record<string, unknown>) => void;
+  onProAction: (
+    action: "speed" | "color-grade" | "chroma-key" | "fade" | "enhance-audio" | "duck-audio" | "remove-effect",
+    payload?: Record<string, unknown>,
+  ) => void;
   captions: Caption[];
 }) {
   if (!clip) {
     return (
       <section className="panel">
         <h2>Inspector</h2>
-        <p className="muted">Nothing selected.</p>
+        <p className="muted">Select any video or audio clip on the timeline to edit transforms, speed, VFX, or audio DSP.</p>
         <Captions captions={captions} />
       </section>
     );
   }
+  const currentSpeed = Number(clip.effects.find((e) => e.type === "speed")?.params?.rate ?? 1) || 1;
   const field = (label: string, key: string, value: number | string, step = 0.1) => (
-    <label key={key}>
+    <label key={`${clip.id}-${key}-${value}`}>
       {label}
       <input
         defaultValue={value}
@@ -757,7 +1023,7 @@ export function Inspector({
   );
   return (
     <section className="panel">
-      <h2>Inspector</h2>
+      <h2>Inspector &amp; Pro FX</h2>
       <div className="inspector-grid">
         {field("name", "name", clip.name)}
         {field("start (s)", "start", clip.start)}
@@ -769,6 +1035,93 @@ export function Inspector({
         {field("rotation", "transform.rotation", clip.transform.rotation, 1)}
         {field("opacity", "transform.opacity", clip.transform.opacity)}
       </div>
+
+      <h3>Speed Control ({currentSpeed}×)</h3>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        {[0.5, 1, 1.5, 2, 4].map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => onProAction("speed", { speed: s })}
+            style={{ fontWeight: Math.abs(currentSpeed - s) < 0.01 ? 700 : 400 }}
+          >
+            {s}×
+          </button>
+        ))}
+      </div>
+
+      <h3>Color Grading, Chroma Key &amp; Transitions</h3>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        <select
+          defaultValue=""
+          onChange={(e) => {
+            if (e.target.value) {
+              onProAction("color-grade", { preset: e.target.value });
+              e.target.value = "";
+            }
+          }}
+        >
+          <option value="">🎨 Color Grade Preset…</option>
+          <option value="cinematic-contrast">Cinematic Punch</option>
+          <option value="warm-golden">Golden Hour Warm</option>
+          <option value="cool-noir">Moody Cool Noir</option>
+          <option value="vivid-social">Vivid Social Pop</option>
+          <option value="neutral">Reset Neutral Rec.709</option>
+        </select>
+        <button type="button" onClick={() => onProAction("chroma-key", { color: "#00ff00" })}>
+          🟩 Green Key
+        </button>
+        <button type="button" onClick={() => onProAction("chroma-key", { color: "blue" })}>
+          🟦 Blue Key
+        </button>
+        <button type="button" onClick={() => onProAction("fade", { fadeIn: 0.5, fadeOut: 0.5 })}>
+          🌅 Fade In/Out
+        </button>
+      </div>
+
+      <h3>Pro Audio DSP</h3>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+        <button
+          type="button"
+          title="FFT spectral denoise + vocal EQ + compressor + -16 LUFS normalize"
+          onClick={() => onProAction("enhance-audio")}
+        >
+          🎙 Enhance Voice
+        </button>
+        <button
+          type="button"
+          title="Automatically lower background music during active speech"
+          onClick={() => onProAction("duck-audio")}
+        >
+          🔉 Duck Music
+        </button>
+      </div>
+
+      {clip.effects.length > 0 && (
+        <>
+          <h3>Active Effects ({clip.effects.length})</h3>
+          <ul className="kf-list">
+            {clip.effects.map((ef) => (
+              <li key={ef.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>
+                  <strong>{ef.type}</strong>{" "}
+                  <span className="muted" style={{ fontSize: 11 }}>
+                    {JSON.stringify(ef.params)}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  style={{ padding: "0 5px", fontSize: 11 }}
+                  onClick={() => onProAction("remove-effect", { effectId: ef.id })}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
       {asset?.source?.prompt && (
         <>
           <h3>Generation Metadata</h3>
