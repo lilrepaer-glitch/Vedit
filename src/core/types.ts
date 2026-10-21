@@ -8,6 +8,10 @@ export interface AssetSource {
   provider?: string;
   model?: string;
   prompt?: string;
+  directedPrompt?: string;
+  cameraMove?: string;
+  seed?: number;
+  continuityFrom?: string;
   simulated?: boolean;
 }
 
