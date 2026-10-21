@@ -129,6 +129,27 @@ export interface GenProviderInfo {
   models: string[];
 }
 
+export interface ApiPresetInfo {
+  id: string;
+  label: string;
+  baseUrl: string;
+  requiresKey: boolean;
+  suggestedModels: string[];
+}
+
+export interface ApiSettingsResponse {
+  providerPreset: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  maskedApiKey: string;
+  model: string;
+  visionModel: string;
+  temperature: number;
+  configuredProviderKeys: string[];
+  updatedAt?: string;
+  presets: ApiPresetInfo[];
+}
+
 export interface CameraMoveInfo {
   id: string;
   label: string;
@@ -463,6 +484,27 @@ export const api = {
     req<{ keyframes: number }>("POST", `/projects/${currentId}/clips/${clipId}/auto-reframe`, {}),
   trackMotion: (clipId: string, sourceAssetId: string) =>
     req<{ keyframes: number }>("POST", `/projects/${currentId}/clips/${clipId}/track-motion`, { sourceAssetId }),
+  getApiSettings: () => req<ApiSettingsResponse>("GET", "/settings/api"),
+  saveApiSettings: (body: {
+    providerPreset?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+    model?: string;
+    visionModel?: string;
+    temperature?: number;
+    providerKeys?: Record<string, string>;
+  }) => req<ApiSettingsResponse>("PUT", "/settings/api", body),
+  fetchApiModels: (body: { baseUrl?: string; apiKey?: string }) =>
+    req<{ models: string[]; source: string; baseUrl: string }>("POST", "/settings/api/models", body),
+  testApiSettings: (body: { baseUrl?: string; apiKey?: string; model?: string }) =>
+    req<{ ok: boolean; model: string; baseUrl: string; latencyMs: number; reply: string }>(
+      "POST",
+      "/settings/api/test",
+      body,
+    ),
+  windowFullscreen: (mode: "toggle" | "on" | "off" | "state" = "toggle") =>
+    req<{ supported: boolean; fullscreen: boolean }>("POST", "/window/fullscreen", { mode }),
 };
 
 export let currentId = "";
@@ -477,18 +519,26 @@ export function connectWs(onChange: () => void): () => void {
   let ws: WebSocket | null = null;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let coalesceTimer: ReturnType<typeof setTimeout> | undefined;
+  const triggerCoalesced = () => {
+    if (coalesceTimer) return;
+    coalesceTimer = setTimeout(() => {
+      coalesceTimer = undefined;
+      onChange();
+    }, 90);
+  };
 
   const open = () => {
     if (closed) return;
     try {
       ws = new WebSocket(wsUrl);
       ws.onopen = () => {
-        onChange();
+        triggerCoalesced();
       };
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(String(event.data));
-          if (msg.type === "hello" || msg.type === "change" || msg.type === "job") onChange();
+          if (msg.type === "hello" || msg.type === "change" || msg.type === "job") triggerCoalesced();
         } catch {
           /* ignore malformed frame */
         }

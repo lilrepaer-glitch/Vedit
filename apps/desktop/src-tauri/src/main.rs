@@ -142,7 +142,13 @@ fn wait_for_healthy(port: u16, timeout_ms: u64) -> bool {
     is_vedit_healthy(port)
 }
 
-fn spawn_sidecar_once(res: &Path, data_dir: &Path, log_path: &Path, port: u16) -> Result<Child, String> {
+fn spawn_sidecar_once(
+    res: &Path,
+    data_dir: &Path,
+    log_path: &Path,
+    port: u16,
+    shell_port: u16,
+) -> Result<Child, String> {
     let node = find_executable(res, "node/node");
     let entry = find_resource(res, "server/dist/cli/index.js");
     let ffmpeg = find_executable(res, "bin/ffmpeg");
@@ -186,6 +192,7 @@ fn spawn_sidecar_once(res: &Path, data_dir: &Path, log_path: &Path, port: u16) -
         .unwrap_or_else(|_| Stdio::null());
 
     let port_str = port.to_string();
+    let shell_port_str = shell_port.to_string();
     let mut cmd = Command::new(&node);
     cmd.arg(&entry)
         .args([
@@ -204,6 +211,7 @@ fn spawn_sidecar_once(res: &Path, data_dir: &Path, log_path: &Path, port: u16) -
         .env("VEDIT_DATA", data_dir)
         .env("VEDIT_FFMPEG", &ffmpeg)
         .env("VEDIT_FFPROBE", &ffprobe)
+        .env("VEDIT_SHELL_PORT", &shell_port_str)
         .env("VEDIT_PYTHON", "");
 
     #[cfg(windows)]
@@ -240,8 +248,45 @@ fn main() {
             let chosen_port = pick_sidecar_port();
             setup_state.port.store(chosen_port, Ordering::SeqCst);
 
+            // Bind native OS window bridge socket (used for instant Win32 borderless Fullscreen toggle!)
+            let shell_listener = TcpListener::bind(("127.0.0.1", 0)).ok();
+            let shell_port = shell_listener
+                .as_ref()
+                .and_then(|l| l.local_addr().ok())
+                .map(|a| a.port())
+                .unwrap_or(0);
+
+            if let Some(listener) = shell_listener {
+                let win_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        let mut s = stream;
+                        let _ = s.set_read_timeout(Some(Duration::from_millis(250)));
+                        let mut req_buf = [0u8; 128];
+                        let n = s.read(&mut req_buf).unwrap_or(0);
+                        let cmd_txt = String::from_utf8_lossy(&req_buf[..n]).trim().to_string();
+                        let mut is_fs = false;
+                        if let Some(win) = win_handle.webview_windows().values().next() {
+                            let cur = win.is_fullscreen().unwrap_or(false);
+                            let target = match cmd_txt.as_str() {
+                                "on" => true,
+                                "off" => false,
+                                "state" => cur,
+                                _ => !cur,
+                            };
+                            if cmd_txt != "state" {
+                                let _ = win.set_fullscreen(target);
+                            }
+                            is_fs = win.is_fullscreen().unwrap_or(target);
+                        }
+                        let resp = format!("{{\"fullscreen\":{is_fs}}}\n");
+                        let _ = s.write_all(resp.as_bytes());
+                    }
+                });
+            }
+
             if !is_vedit_healthy(chosen_port) {
-                match spawn_sidecar_once(&res, &data_dir, &log_path, chosen_port) {
+                match spawn_sidecar_once(&res, &data_dir, &log_path, chosen_port, shell_port) {
                     Ok(child) => {
                         *setup_state.child.lock().unwrap() = Some(child);
                     }
@@ -328,7 +373,7 @@ fn main() {
                     let next_port = pick_sidecar_port();
                     sup_state.port.store(next_port, Ordering::SeqCst);
                     if !is_vedit_healthy(next_port) {
-                        match spawn_sidecar_once(&res, &data_dir, &log_path, next_port) {
+                        match spawn_sidecar_once(&res, &data_dir, &log_path, next_port, shell_port) {
                             Ok(child) => {
                                 *sup_state.child.lock().unwrap() = Some(child);
                             }

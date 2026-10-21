@@ -1,6 +1,6 @@
 [package]
 name = "vedit-desktop"
-version = "0.5.3"
+version = "0.6.0"
 description = "Vedit — AI-powered desktop video editor"
 authors = ["Vedit"]
 edition = "2021"

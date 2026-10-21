@@ -36,6 +36,14 @@ import { exportEdl, exportFcpXml } from "../pro/interchange.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { analyzeFrameScopes } from "../pro/scopes.js";
 import { VEDIT_VERSION, checkForUpdates, downloadAndInstallUpdate } from "../pro/updater.js";
+import {
+  fetchRemoteModels,
+  initApiSettings,
+  saveApiSettings,
+  testApiConnection,
+  toPublicApiConfig,
+} from "../pro/api-settings.js";
+import { connect as connectSocket } from "node:net";
 import { runStudioCopilot } from "../ai/orchestrator.js";
 import { sequenceDuration } from "../core/types.js";
 import {
@@ -541,6 +549,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
 } {
   const registry = opts.registry ?? new ProjectRegistry(opts);
   const dataDir = opts.dataDir ?? resolvePath(process.cwd(), ".vedit");
+  void initApiSettings(dataDir).catch(() => undefined);
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
@@ -572,6 +581,81 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
 
   app.get("/api/v1/health", (_req, res) => {
     res.json({ ok: true, name: "vedit", version: VEDIT_VERSION, scope: "F0–F9 Broadcast Studio" });
+  });
+
+  // Custom API Key, Base URL & Model Configuration (persisted in <dataDir>/settings/api-config.json)
+  app.get("/api/v1/settings/api", (_req, res) => {
+    res.json(toPublicApiConfig());
+  });
+
+  app.put("/api/v1/settings/api", async (req, res) => {
+    try {
+      const saved = await saveApiSettings(req.body ?? {}, dataDir);
+      res.json(saved);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  });
+
+  app.post("/api/v1/settings/api/models", async (req, res) => {
+    try {
+      const result = await fetchRemoteModels({
+        baseUrl: req.body?.baseUrl ? String(req.body.baseUrl) : undefined,
+        apiKey: req.body?.apiKey ? String(req.body.apiKey) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  });
+
+  app.post("/api/v1/settings/api/test", async (req, res) => {
+    try {
+      const result = await testApiConnection({
+        baseUrl: req.body?.baseUrl ? String(req.body.baseUrl) : undefined,
+        apiKey: req.body?.apiKey ? String(req.body.apiKey) : undefined,
+        model: req.body?.model ? String(req.body.model) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  });
+
+  // Native Desktop Window Borderless Fullscreen Bridge (Win32 Tauri shell + WebView fallback)
+  app.post("/api/v1/window/fullscreen", async (req, res) => {
+    const shellPort = Number(process.env.VEDIT_SHELL_PORT || 0);
+    if (!shellPort) {
+      res.json({ supported: false, fullscreen: false });
+      return;
+    }
+    const mode = req.body?.mode === "on" || req.body?.mode === "off" || req.body?.mode === "state" ? req.body.mode : "toggle";
+    try {
+      const reply = await new Promise<{ fullscreen: boolean }>((resolve, reject) => {
+        const sock = connectSocket({ host: "127.0.0.1", port: shellPort });
+        let raw = "";
+        sock.setTimeout(1500);
+        sock.on("connect", () => sock.write(`${mode}\n`));
+        sock.on("data", (chunk) => {
+          raw += chunk.toString("utf8");
+        });
+        sock.on("end", () => {
+          try {
+            resolve(JSON.parse(raw.trim()) as { fullscreen: boolean });
+          } catch {
+            resolve({ fullscreen: mode === "on" });
+          }
+        });
+        sock.on("timeout", () => {
+          sock.destroy();
+          reject(new Error("shell fullscreen timeout"));
+        });
+        sock.on("error", reject);
+      });
+      res.json({ supported: true, fullscreen: Boolean(reply.fullscreen) });
+    } catch {
+      res.json({ supported: false, fullscreen: false });
+    }
   });
 
   // Self-Updater API (GitHub Releases check + one-click NSIS `/P /UPDATE /R` download & launch)

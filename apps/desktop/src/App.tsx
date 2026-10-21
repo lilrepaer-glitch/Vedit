@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   connectWs,
   setCurrentId,
   withToken,
+  type ApiSettingsResponse,
+  type Asset,
   type CameraMoveInfo,
   type Clip,
   type ExportPresetInfo,
@@ -12,24 +14,49 @@ import {
   type Project,
 } from "./api";
 import { AiPanel, GenPanel, Inspector, JobsPanel, MediaPool, Preview, StudioPanel, Timeline, fmt } from "./components";
+import { ApiSettingsModal, CapCutCatalogBrowser, ExportModal, type CatalogItem } from "./StudioModals";
 
 interface Selection {
   trackId: string;
   clipId: string;
 }
 
+type LeftTabId = "media" | "audio" | "text" | "effects" | "transitions" | "ai" | "gen" | "templates";
+
+const RAIL_TABS: Array<{ id: LeftTabId; icon: string; label: string }> = [
+  { id: "media", icon: "📂", label: "Media" },
+  { id: "audio", icon: "🎵", label: "Audio" },
+  { id: "text", icon: "🔤", label: "Text" },
+  { id: "effects", icon: "✨", label: "Effects" },
+  { id: "transitions", icon: "🔀", label: "Motion" },
+  { id: "ai", icon: "🤖", label: "AI Edit" },
+  { id: "gen", icon: "🎬", label: "AI Gen" },
+  { id: "templates", icon: "📦", label: "Studio" },
+];
+
+// Memoized heavy studio panels so 60 FPS playback NEVER re-renders side drawers!
+const MemoMediaPool = memo(MediaPool);
+const MemoAiPanel = memo(AiPanel);
+const MemoGenPanel = memo(GenPanel);
+const MemoStudioPanel = memo(StudioPanel);
+const MemoInspector = memo(Inspector);
+const MemoJobsPanel = memo(JobsPanel);
+
 export function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [playhead, setPlayhead] = useState(0);
+  const playheadRef = useRef(0);
+  playheadRef.current = playhead;
+
   const [playing, setPlaying] = useState(false);
   const [shuttleRate, setShuttleRate] = useState(1);
-  const [zoom, setZoom] = useState(60);
+  const [zoom, setZoom] = useState(64);
   const [toast, setToast] = useState<string | null>(null);
   const [presets, setPresets] = useState<Array<{ id: string; label: string }>>([]);
-  const [presetId, setPresetId] = useState("fade-in");
-  const [prompt, setPrompt] = useState("fireworks over Prague, night skyline");
-  const [copilotPrompt, setCopilotPrompt] = useState("Apply Kodak 2383 LUT, add lower third \"Vedit Studio\", duck music");
+  const [copilotPrompt, setCopilotPrompt] = useState(
+    'Apply Kodak 2383 LUT, add lower third "Vedit Studio", duck music',
+  );
   const [busy, setBusy] = useState(false);
   const [aiCaps, setAiCaps] = useState<Awaited<ReturnType<typeof api.aiCaps>> | null>(null);
   const [genProviders, setGenProviders] = useState<GenProviderInfo[]>([]);
@@ -42,6 +69,36 @@ export function App() {
   const [bootStatus, setBootStatus] = useState<string>("Starting local Vedit Studio engine…");
   const [bootNonce, setBootNonce] = useState<number>(0);
   const [windowDragOver, setWindowDragOver] = useState<boolean>(false);
+
+  // CapCut Workspace Navigation, Search, Modals, Fullscreen & Multi-Pane Resizable Scaling
+  const [activeTab, setActiveTab] = useState<LeftTabId>("media");
+  const [sectionSearch, setSectionSearch] = useState<string>("");
+  const globalSearchRef = useRef<HTMLInputElement | null>(null);
+  const [showApiModal, setShowApiModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [apiSettings, setApiSettings] = useState<ApiSettingsResponse | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const [uiScale, setUiScale] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("vedit.uiScale") || 100);
+    return Number.isFinite(saved) && saved >= 70 && saved <= 150 ? saved : 100;
+  });
+  const [leftWidth, setLeftWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("vedit.leftWidth") || 320);
+    return Number.isFinite(saved) && saved >= 190 && saved <= 620 ? saved : 320;
+  });
+  const [rightWidth, setRightWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("vedit.rightWidth") || 315);
+    return Number.isFinite(saved) && saved >= 200 && saved <= 620 ? saved : 315;
+  });
+  const [timelineHeight, setTimelineHeight] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("vedit.timelineHeight") || 255);
+    return Number.isFinite(saved) && saved >= 130 && saved <= 620 ? saved : 255;
+  });
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [draggingSplitter, setDraggingSplitter] = useState<"left" | "right" | "bottom" | null>(null);
+
   const [updateInfo, setUpdateInfo] = useState<{
     currentVersion: string;
     latestVersion: string;
@@ -49,22 +106,69 @@ export function App() {
     downloadUrl: string | null;
   } | null>(null);
 
+  useEffect(() => {
+    localStorage.setItem("vedit.uiScale", String(uiScale));
+  }, [uiScale]);
+  useEffect(() => {
+    localStorage.setItem("vedit.leftWidth", String(leftWidth));
+  }, [leftWidth]);
+  useEffect(() => {
+    localStorage.setItem("vedit.rightWidth", String(rightWidth));
+  }, [rightWidth]);
+  useEffect(() => {
+    localStorage.setItem("vedit.timelineHeight", String(timelineHeight));
+  }, [timelineHeight]);
+
   const flash = useCallback((message: string) => {
     setToast(message);
-    setTimeout(() => setToast(null), 3500);
+    setTimeout(() => setToast(null), 3200);
   }, []);
 
+  const refreshInFlightRef = useRef(false);
   const refresh = useCallback(async () => {
-    const { projects } = await api.listProjects();
-    let id = projects[0]?.id;
-    if (!id) {
-      const created = await api.createProject("My Vedit Project", true);
-      id = created.project.id;
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
+      const { projects } = await api.listProjects();
+      let id = projects[0]?.id;
+      if (!id) {
+        const created = await api.createProject("My Vedit Project", true);
+        id = created.project.id;
+      }
+      setCurrentId(id);
+      const { project } = await api.getProject(id);
+      setProject(project);
+      (window as unknown as { __veditProject: string }).__veditProject = id;
+    } finally {
+      refreshInFlightRef.current = false;
     }
-    setCurrentId(id);
-    const { project } = await api.getProject(id);
-    setProject(project);
-    (window as unknown as { __veditProject: string }).__veditProject = id;
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      const native = await api.windowFullscreen("toggle");
+      if (native.supported) {
+        setIsFullscreen(native.fullscreen);
+        return;
+      }
+    } catch {
+      /* fallback to browser Fullscreen API below */
+    }
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => undefined);
+      setIsFullscreen(false);
+    } else {
+      await document.documentElement.requestFullscreen?.().catch(() => undefined);
+      setIsFullscreen(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      if (document.fullscreenElement) setIsFullscreen(true);
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
 
   useEffect(() => {
@@ -76,7 +180,6 @@ export function App() {
         try {
           await refresh();
           if (cancelled) return;
-          // Load non-blocking studio catalogs in parallel without ever blocking editor mount!
           void api.presets().then((r) => !cancelled && setPresets(r.presets)).catch(() => {});
           void api.aiCaps().then((r) => !cancelled && setAiCaps(r)).catch(() => {});
           void api
@@ -91,6 +194,8 @@ export function App() {
           void api.exportPresets().then((r) => !cancelled && setExportPresets(r.presets)).catch(() => {});
           void api.marketplaceList().then((r) => !cancelled && setPacks(r.packs)).catch(() => {});
           void api.checkUpdate().then((u) => !cancelled && setUpdateInfo(u)).catch(() => {});
+          void api.getApiSettings().then((s) => !cancelled && setApiSettings(s)).catch(() => {});
+          void api.windowFullscreen("state").then((fs) => !cancelled && fs.supported && setIsFullscreen(fs.fullscreen)).catch(() => {});
           return;
         } catch (err) {
           if (attempt >= 3) {
@@ -98,10 +203,10 @@ export function App() {
             setBootStatus(
               diag
                 ? `Engine diagnostic: ${diag}`
-                : `Waiting for local engine on 127.0.0.1:47000 (attempt #${attempt} — Windows SmartScreen / Defender may still be scanning node.exe on first launch: ${(err as Error).message})`,
+                : `Waiting for local engine on 127.0.0.1:47000 (attempt #${attempt}: ${(err as Error).message})`,
             );
           }
-          await new Promise((r) => setTimeout(r, 400));
+          await new Promise((r) => setTimeout(r, 350));
         }
       }
     })();
@@ -123,7 +228,7 @@ export function App() {
     );
   }, [seq]);
 
-  // Real-time 60Hz transport loop when playing
+  // Smooth 60 FPS transport loop
   useEffect(() => {
     if (!playing) return;
     let last = performance.now();
@@ -165,9 +270,46 @@ export function App() {
     [refresh, flash],
   );
 
-  // Global NLE keyboard shortcuts (Space, J/K/L, Frame Step, Save, Undo/Redo)
+  // Global Studio Keyboard Shortcuts (Space, J/K/L, Arrows, Ctrl+K Search, Ctrl+-/+/0 Scale, F11 Fullscreen)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "F11") {
+        e.preventDefault();
+        void toggleFullscreen();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (showApiModal) {
+          setShowApiModal(false);
+          return;
+        }
+        if (showExportModal) {
+          setShowExportModal(false);
+          return;
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        globalSearchRef.current?.focus();
+        globalSearchRef.current?.select();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        setUiScale((s) => Math.min(150, s + 10));
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "-") {
+        e.preventDefault();
+        setUiScale((s) => Math.max(70, s - 10));
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "0") {
+        e.preventDefault();
+        setUiScale(100);
+        return;
+      }
+
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
       const fps = seq?.fps || 30;
@@ -214,7 +356,7 @@ export function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
         e.preventDefault();
         if (selection?.clipId) {
-          void act(() => api.splitClip(selection.clipId, playhead), "Split clip at playhead");
+          void act(() => api.splitClip(selection.clipId, playheadRef.current), "Split clip at playhead");
         }
       } else if (e.key === "Delete" && selection?.clipId) {
         e.preventDefault();
@@ -223,7 +365,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [seq, totalSeqDuration, selection, playhead, act, flash]);
+  }, [seq, totalSeqDuration, selection, act, flash, toggleFullscreen, showApiModal, showExportModal]);
 
   const selected: { clip: Clip; trackId: string } | null = useMemo(() => {
     if (!seq || !selection) return null;
@@ -250,18 +392,274 @@ export function App() {
     return selected?.clip ?? null;
   }, [seq, selected, playhead]);
 
+  // ZERO-LAG FIX: Never spawn 60 FFmpeg frame extractions/sec for streaming videos!
+  // Only request still frame fallback for static image assets (quantized when stopped).
+  const activeClipAsset = useMemo(
+    () => (project && activeClip ? project.assets.find((a) => a.id === activeClip.assetId) ?? null : null),
+    [project, activeClip],
+  );
+  const quantizedStopTime = playing ? 0 : Math.round(playhead * 4) / 4;
   const frameUrl = useMemo(() => {
-    if (!project || !activeClip) return null;
-    const t = activeClip.in + Math.min(Math.max(0, playhead - activeClip.start), activeClip.duration);
-    return withToken(
-      `/api/v1/projects/${project.id}/assets/${activeClip.assetId}/frame?t=${t.toFixed(2)}&width=640`,
-    );
-  }, [project, activeClip, playhead]);
+    if (!project || !activeClip || !activeClipAsset) return null;
+    if (activeClipAsset.kind !== "image") return null;
+    const t = activeClip.in + Math.min(Math.max(0, quantizedStopTime - activeClip.start), activeClip.duration);
+    return withToken(`/api/v1/projects/${project.id}/assets/${activeClip.assetId}/frame?t=${t.toFixed(2)}&width=640`);
+  }, [project, activeClip, activeClipAsset, quantizedStopTime]);
+
+  // Target clip helper: uses selected clip, or active clip under playhead, or lead video clip automatically!
+  const resolveTargetClipId = useCallback((): string | null => {
+    if (selection?.clipId) return selection.clipId;
+    if (activeClip?.id) return activeClip.id;
+    const first = seq?.tracks.flatMap((t) => t.clips)[0];
+    return first?.id ?? null;
+  }, [selection, activeClip, seq]);
+
+  // Stable memoized callbacks (using playheadRef so side panels NEVER re-render during playback!)
+  const handleQuickAddAsset = useCallback(
+    (asset: Asset) => {
+      if (!seq) return;
+      void act(async () => {
+        const at = playheadRef.current;
+        const isAud = asset.kind === "audio";
+        let track = seq.tracks.find((t) => t.kind === (isAud ? "audio" : "video") && !t.locked);
+        if (!track) {
+          const created = await api.addTrack(isAud ? "audio" : "video", isAud ? "A1" : "V1");
+          track = created.track;
+        }
+        const dur = asset.duration ?? 5;
+        await api.addClip({
+          trackId: track.id,
+          assetId: asset.id,
+          start: at,
+          duration: dur,
+          in: 0,
+          out: dur,
+        });
+        flash(`Added "${asset.name}" @ ${fmt(at)}`);
+      });
+    },
+    [seq, act, flash],
+  );
+
+  // CapCut Visual Preset Cards for Effects, LUTs, Motion/Transitions, Text & Smart Tools
+  const catalogItems: CatalogItem[] = useMemo(() => {
+    const withClip = (fn: (cid: string) => Promise<unknown>, msg: string) => () => {
+      const cid = resolveTargetClipId();
+      if (!cid) {
+        flash("Add or select a clip on the timeline first");
+        return;
+      }
+      void act(() => fn(cid), msg);
+    };
+
+    const effectCards: CatalogItem[] = [
+      {
+        id: "lut-kodak",
+        section: "effects",
+        badge: "3D LUT",
+        title: "Kodak 2383 Film",
+        subtitle: "Warm Hollywood print film stock",
+        gradient: "linear-gradient(135deg, #92400e, #f59e0b)",
+        run: withClip((cid) => api.applyLut(cid, "kodak-2383"), "Applied Kodak 2383 3D LUT"),
+      },
+      {
+        id: "lut-teal",
+        section: "effects",
+        badge: "3D LUT",
+        title: "Teal & Orange",
+        subtitle: "Blockbuster cinema color contrast",
+        gradient: "linear-gradient(135deg, #0f766e, #ea580c)",
+        run: withClip((cid) => api.applyLut(cid, "teal-orange-blockbuster"), "Applied Teal & Orange LUT"),
+      },
+      {
+        id: "lut-fuji",
+        section: "effects",
+        badge: "3D LUT",
+        title: "Fuji Eterna Soft",
+        subtitle: "Soft highlight roll-off look",
+        gradient: "linear-gradient(135deg, #065f46, #34d399)",
+        run: withClip((cid) => api.applyLut(cid, "fuji-eterna-soft"), "Applied Fuji Eterna LUT"),
+      },
+      {
+        id: "lut-cyber",
+        section: "effects",
+        badge: "3D LUT",
+        title: "Cyberpunk Neon",
+        subtitle: "Electric magenta & cyan night",
+        gradient: "linear-gradient(135deg, #7e22ce, #06b6d4)",
+        run: withClip((cid) => api.applyLut(cid, "cyberpunk-neon"), "Applied Cyberpunk Neon LUT"),
+      },
+      {
+        id: "lut-bleach",
+        section: "effects",
+        badge: "3D LUT",
+        title: "Silver Bleach",
+        subtitle: "Grit high-contrast bleach bypass",
+        gradient: "linear-gradient(135deg, #334155, #94a3b8)",
+        run: withClip((cid) => api.applyLut(cid, "bleach-bypass"), "Applied Bleach Bypass LUT"),
+      },
+      {
+        id: "grade-punch",
+        section: "effects",
+        badge: "GRADE",
+        title: "Cinematic Punch",
+        subtitle: "Rich contrast & saturation boost",
+        gradient: "linear-gradient(135deg, #1d4ed8, #7c3aed)",
+        run: withClip((cid) => api.colorGrade(cid, "cinematic-contrast"), "Applied Cinematic Punch grade"),
+      },
+      {
+        id: "grade-golden",
+        section: "effects",
+        badge: "GRADE",
+        title: "Golden Hour",
+        subtitle: "Sunlit warm skin tones",
+        gradient: "linear-gradient(135deg, #b45309, #fde047)",
+        run: withClip((cid) => api.colorGrade(cid, "warm-golden"), "Applied Golden Hour grade"),
+      },
+      {
+        id: "grade-noir",
+        section: "effects",
+        badge: "GRADE",
+        title: "Moody Cool Noir",
+        subtitle: "Deep shadows & cool steel",
+        gradient: "linear-gradient(135deg, #0f172a, #38bdf8)",
+        run: withClip((cid) => api.colorGrade(cid, "cool-noir"), "Applied Cool Noir grade"),
+      },
+      {
+        id: "key-green",
+        section: "effects",
+        badge: "KEYING",
+        title: "Green Screen Key",
+        subtitle: "Chroma key + automatic spill removal",
+        gradient: "linear-gradient(135deg, #15803d, #22c55e)",
+        run: withClip((cid) => api.chromaKey(cid, "#00ff00"), "Applied Green Screen Chroma Key"),
+      },
+      {
+        id: "stabilize",
+        section: "effects",
+        badge: "PRO",
+        title: "Video Stabilizer",
+        subtitle: "Smooth handheld camera shake",
+        gradient: "linear-gradient(135deg, #0369a1, #2dd4bf)",
+        run: withClip((cid) => api.stabilizeClip(cid), "Stabilized video clip"),
+      },
+    ];
+
+    const transitionCards: CatalogItem[] = [
+      {
+        id: "tr-fade",
+        section: "transitions",
+        badge: "FADE",
+        title: "Smooth Dissolve",
+        subtitle: "0.5s fade in & out transition",
+        gradient: "linear-gradient(135deg, #1e293b, #00c8d7)",
+        run: withClip((cid) => api.fadeClip(cid, 0.5, 0.5), "Added 0.5s Fade In/Out"),
+      },
+      ...presets.map((p) => ({
+        id: `anim-${p.id}`,
+        section: "transitions" as const,
+        badge: "MOTION",
+        title: p.label,
+        subtitle: "Keyframe motion animation",
+        gradient: "linear-gradient(135deg, #1e3a8a, #6366f1)",
+        run: withClip((cid) => api.applyPreset(cid, p.id), `Applied ${p.label}`),
+      })),
+      {
+        id: "spd-05",
+        section: "transitions",
+        badge: "SPEED",
+        title: "Slow Motion 0.5×",
+        subtitle: "Smooth cinematic slow-mo",
+        gradient: "linear-gradient(135deg, #0f766e, #0ea5e9)",
+        run: withClip((cid) => api.setClipSpeed(cid, 0.5), "Set speed 0.5×"),
+      },
+      {
+        id: "spd-20",
+        section: "transitions",
+        badge: "SPEED",
+        title: "Fast Cut 2×",
+        subtitle: "Snappy double-speed ramp",
+        gradient: "linear-gradient(135deg, #b91c1c, #f97316)",
+        run: withClip((cid) => api.setClipSpeed(cid, 2), "Set speed 2×"),
+      },
+      {
+        id: "reverse-clip",
+        section: "transitions",
+        badge: "TIME",
+        title: "Reverse Clip",
+        subtitle: "Play video & audio backwards",
+        gradient: "linear-gradient(135deg, #4338ca, #ec4899)",
+        run: withClip((cid) => api.reverseClip(cid), "Reversed clip"),
+      },
+      {
+        id: "freeze-clip",
+        section: "transitions",
+        badge: "TIME",
+        title: "Freeze Frame 1.5s",
+        subtitle: "Hold still frame at playhead",
+        gradient: "linear-gradient(135deg, #0284c7, #bae6fd)",
+        run: withClip((cid) => api.freezeClip(cid, playheadRef.current, 1.5), "Inserted 1.5s Freeze Frame"),
+      },
+      {
+        id: "pip-br",
+        section: "transitions",
+        badge: "LAYOUT",
+        title: "PiP Facecam Corner",
+        subtitle: "Bottom-right Picture-in-Picture",
+        gradient: "linear-gradient(135deg, #334155, #00c8d7)",
+        run: withClip((cid) => api.applyLayout(cid, "pip-bottom-right"), "Applied PiP Bottom-Right"),
+      },
+      {
+        id: "split-lr",
+        section: "transitions",
+        badge: "LAYOUT",
+        title: "Split Screen 50/50",
+        subtitle: "Side-by-side comparison frame",
+        gradient: "linear-gradient(135deg, #4f46e5, #14b8a6)",
+        run: withClip((cid) => api.applyLayout(cid, "split-left"), "Applied Split Screen Left"),
+      },
+    ];
+
+    return [...effectCards, ...transitionCards];
+  }, [presets, resolveTargetClipId, act, flash]);
+
+  // Smooth mouse drag handlers for Left Drawer, Right Inspector, and Bottom Timeline Splitters!
+  const startSplitterDrag = (which: "left" | "right" | "bottom", e: React.MouseEvent) => {
+    e.preventDefault();
+    setDraggingSplitter(which);
+    const scaleFactor = uiScale / 100;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origLeft = leftWidth;
+    const origRight = rightWidth;
+    const origBottom = timelineHeight;
+
+    const onMove = (ev: MouseEvent) => {
+      const dx = (ev.clientX - startX) / scaleFactor;
+      const dy = (ev.clientY - startY) / scaleFactor;
+      if (which === "left") {
+        setLeftCollapsed(false);
+        setLeftWidth(Math.max(190, Math.min(620, Math.round(origLeft + dx))));
+      } else if (which === "right") {
+        setRightCollapsed(false);
+        setRightWidth(Math.max(200, Math.min(620, Math.round(origRight - dx))));
+      } else {
+        setTimelineHeight(Math.max(130, Math.min(620, Math.round(origBottom - dy))));
+      }
+    };
+    const onUp = () => {
+      setDraggingSplitter(null);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   if (!project || !seq) {
     return (
       <div className="app loading" style={{ flexDirection: "column", gap: 12, textAlign: "center", padding: 24 }}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>Connecting to Vedit Engine…</div>
+        <div style={{ fontSize: 18, fontWeight: 700 }}>Starting Vedit Studio…</div>
         <div className="muted" style={{ maxWidth: 560, fontSize: 12 }}>
           {bootStatus}
         </div>
@@ -272,12 +670,35 @@ export function App() {
     );
   }
 
-  const clipId = selection?.clipId;
-  const captionText = `Caption @ ${fmt(playhead)}`;
+  const clipId = selection?.clipId ?? null;
+  const searchTrimmed = sectionSearch.trim().toLowerCase();
+  const matchingAssets = searchTrimmed
+    ? project.assets.filter(
+        (a) =>
+          a.name.toLowerCase().includes(searchTrimmed) ||
+          (a.tags ?? []).some((tg) => tg.toLowerCase().includes(searchTrimmed)),
+      )
+    : [];
+  const matchingPacks = searchTrimmed
+    ? packs.filter(
+        (p) => p.name.toLowerCase().includes(searchTrimmed) || p.description.toLowerCase().includes(searchTrimmed),
+      )
+    : [];
+
+  const scaleCss =
+    uiScale === 100
+      ? undefined
+      : ({
+          zoom: uiScale / 100,
+        } as React.CSSProperties);
 
   return (
     <div
       className="app"
+      style={{
+        ...scaleCss,
+        ...(windowDragOver ? { outline: "2px dashed #00e5ff", outlineOffset: -4 } : {}),
+      }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("Files")) {
           e.preventDefault();
@@ -294,7 +715,7 @@ export function App() {
         if (!files || files.length === 0) return;
         e.preventDefault();
         void act(async () => {
-          let cursor = playhead;
+          let cursor = playheadRef.current;
           for (const file of Array.from(files)) {
             const res = await api.uploadAssetFile(file, cursor, true);
             cursor += res.asset.duration ?? 5;
@@ -302,88 +723,41 @@ export function App() {
           flash(`Imported ${files.length} file${files.length > 1 ? "s" : ""} onto timeline`);
         });
       }}
-      style={
-        windowDragOver
-          ? { outline: "2px dashed #4f8cff", outlineOffset: -4 }
-          : undefined
-      }
     >
       {windowDragOver && (
         <div
           style={{
             position: "fixed",
-            top: 8,
+            top: 10,
             left: "50%",
             transform: "translateX(-50%)",
             zIndex: 9999,
-            background: "#1d4ed8",
+            background: "linear-gradient(135deg, #00c8d7, #2563eb)",
             color: "#fff",
             padding: "6px 16px",
             borderRadius: 999,
             fontWeight: 700,
-            fontSize: 13,
+            fontSize: 12.5,
             pointerEvents: "none",
-            boxShadow: "0 6px 24px rgba(0,0,0,0.45)",
+            boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
           }}
         >
-          📂 Drop video, audio, or image files anywhere (or onto a specific Timeline track)
+          📂 Drop video, audio, or image files anywhere onto Vedit
         </div>
       )}
+
+      {/* ==================== CAPCUT CLEAN TOP HEADER BAR ==================== */}
       <header className="toolbar">
-        <div className="brand">
+        {/* Left: Brand + Project + Undo/Redo + Self-Update */}
+        <div className="topbar-left">
           <span className="logo">Vedit</span>
-          <span className="muted">{project.name}</span>
+          <span className="muted" style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {project.name}
+          </span>
           <button
             type="button"
             disabled={busy}
-            title={
-              updateInfo?.updateAvailable
-                ? `Download & install Vedit v${updateInfo.latestVersion} automatically in place`
-                : "Check GitHub Releases for a newer Vedit version (or repair/re-update current installation)"
-            }
-            style={
-              updateInfo?.updateAvailable
-                ? { background: "#15803d", color: "#fff", fontWeight: 700, fontSize: 11, padding: "2px 8px" }
-                : { fontSize: 11, padding: "2px 8px" }
-            }
-            onClick={() =>
-              act(async () => {
-                const latest = await api.checkUpdate();
-                setUpdateInfo(latest);
-                if (latest.updateAvailable) {
-                  flash(`Downloading Vedit v${latest.latestVersion} installer…`);
-                  const res = await api.installUpdate(latest.downloadUrl ?? undefined);
-                  flash(
-                    res.launched
-                      ? `Launching Vedit v${res.latestVersion} in-place updater — Vedit will restart automatically…`
-                      : `Installer downloaded → ${res.installerPath}`,
-                  );
-                } else if (
-                  latest.downloadUrl &&
-                  window.confirm(
-                    `Vedit v${latest.currentVersion} is already up to date (latest: v${latest.latestVersion}).\n\nDownload and run in-place repair/re-update anyway?`,
-                  )
-                ) {
-                  flash(`Downloading Vedit v${latest.latestVersion} repair installer…`);
-                  const res = await api.installUpdate(latest.downloadUrl);
-                  flash(
-                    res.launched
-                      ? `Launching Vedit v${res.latestVersion} updater — Vedit will restart automatically…`
-                      : `Installer downloaded → ${res.installerPath}`,
-                  );
-                } else {
-                  flash(`Vedit v${latest.currentVersion} is up to date ✓`);
-                }
-              })
-            }
-          >
-            {updateInfo?.updateAvailable ? `⬆ Update v${updateInfo.latestVersion}` : "🔄 Update"}
-          </button>
-        </div>
-        <div className="toolbar-group">
-          <button
-            disabled={busy}
-            title="Save .vedit project to disk (Ctrl+S)"
+            title="Save project (Ctrl+S)"
             onClick={() =>
               act(async () => {
                 const saved = await api.saveProjectDisk();
@@ -394,8 +768,9 @@ export function App() {
             💾 Save
           </button>
           <button
+            type="button"
             disabled={busy}
-            title="Open most recent saved .vedit project"
+            title="Open saved project"
             onClick={() =>
               act(async () => {
                 const { saved } = await api.savedProjects();
@@ -412,411 +787,688 @@ export function App() {
           >
             📂 Open
           </button>
-          <button disabled={busy} onClick={() => act(() => api.undo(), "Undo")}>
-            ↶ Undo
+          <button type="button" className="icon-btn" disabled={busy} title="Undo (Ctrl+Z)" onClick={() => act(() => api.undo(), "Undo")}>
+            ↶
           </button>
-          <button disabled={busy} onClick={() => act(() => api.redo(), "Redo")}>
-            ↷ Redo
+          <button type="button" className="icon-btn" disabled={busy} title="Redo (Ctrl+Y)" onClick={() => act(() => api.redo(), "Redo")}>
+            ↷
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            title={
+              updateInfo?.updateAvailable
+                ? `Install Vedit v${updateInfo.latestVersion} update in place`
+                : "Check GitHub Releases for updates"
+            }
+            style={
+              updateInfo?.updateAvailable
+                ? { background: "#15803d", color: "#fff", borderColor: "#22c55e", fontWeight: 700 }
+                : undefined
+            }
+            onClick={() =>
+              act(async () => {
+                const latest = await api.checkUpdate();
+                setUpdateInfo(latest);
+                if (latest.updateAvailable) {
+                  flash(`Downloading Vedit v${latest.latestVersion}…`);
+                  const res = await api.installUpdate(latest.downloadUrl ?? undefined);
+                  flash(res.launched ? `Updating to v${res.latestVersion}…` : `Saved → ${res.installerPath}`);
+                } else if (
+                  latest.downloadUrl &&
+                  window.confirm(
+                    `Vedit v${latest.currentVersion} is up to date (latest: v${latest.latestVersion}).\n\nDownload and run in-place repair installer anyway?`,
+                  )
+                ) {
+                  const res = await api.installUpdate(latest.downloadUrl);
+                  flash(res.launched ? "Launching repair installer…" : `Saved → ${res.installerPath}`);
+                } else {
+                  flash(`Vedit v${latest.currentVersion} is up to date ✓`);
+                }
+              })
+            }
+          >
+            {updateInfo?.updateAvailable ? `⬆ v${updateInfo.latestVersion}` : "🔄 Update"}
           </button>
         </div>
-        <div className="toolbar-group">
-          <button
-            disabled={busy || !clipId}
-            title="Split selected clip at playhead"
-            onClick={() => clipId && act(() => api.splitClip(clipId, playhead), `Split @ ${fmt(playhead)}`)}
-          >
-            ✂ Split @ playhead
-          </button>
-          <button disabled={busy || !clipId} onClick={() => clipId && act(() => api.deleteClip(clipId), "Clip deleted")}>
-            🗑 Delete
-          </button>
-          <button
-            disabled={busy || !clipId}
-            onClick={() => clipId && act(() => api.deleteClip(clipId, true), "Clip deleted (ripple)")}
-          >
-            Ripple delete
-          </button>
+
+        {/* Center: Instant Universal CapCut Search Bar (Ctrl+K) */}
+        <div className="topbar-center">
+          <div className="global-search">
+            <input
+              ref={globalSearchRef}
+              value={sectionSearch}
+              onChange={(e) => {
+                setSectionSearch(e.target.value);
+                if (leftCollapsed) setLeftCollapsed(false);
+              }}
+              placeholder="🔍 Search media, effects, 3D LUTs, transitions, templates… (Ctrl+K)"
+            />
+            {sectionSearch && (
+              <button
+                type="button"
+                className="global-search-clear"
+                onClick={() => setSectionSearch("")}
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
-        <div className="toolbar-group">
-          <select value={presetId} onChange={(e) => setPresetId(e.target.value)}>
-            {presets.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+
+        {/* Right Corner: API & Models + UI Scaling + Panel Toggles + Export + FULLSCREEN */}
+        <div className="topbar-right">
           <button
-            disabled={busy || !clipId}
-            onClick={() => clipId && act(() => api.applyPreset(clipId, presetId), `Animation ${presetId}`)}
+            type="button"
+            onClick={() => setShowApiModal(true)}
+            title="Configure Custom API Key, Base URL & AI Model"
+            style={{
+              borderColor: apiSettings?.hasApiKey ? "rgba(34, 197, 94, 0.55)" : undefined,
+            }}
           >
-            ✨ Animation
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: apiSettings?.hasApiKey ? "#22c55e" : "#64748b",
+                display: "inline-block",
+              }}
+            />
+            ⚙ API {apiSettings?.model ? `(${apiSettings.model.split("/").pop()})` : "& Model"}
+          </button>
+
+          {/* UI Scaling Control (70% – 150%) */}
+          <div className="scale-pill" title="Scale Entire Interface (Ctrl - / Ctrl + / Ctrl 0)">
+            <button type="button" onClick={() => setUiScale((s) => Math.max(70, s - 10))} title="Scale UI Down (Ctrl -)">
+              −
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setUiScale(100);
+                setLeftWidth(320);
+                setRightWidth(315);
+                setTimelineHeight(255);
+                setLeftCollapsed(false);
+                setRightCollapsed(false);
+              }}
+              title="Click to reset UI scale (100%) & default panel layout"
+              style={{ minWidth: 44, fontWeight: 600 }}
+            >
+              {uiScale}%
+            </button>
+            <button type="button" onClick={() => setUiScale((s) => Math.min(150, s + 10))} title="Scale UI Up (Ctrl +)">
+              +
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className="icon-btn"
+            title={leftCollapsed ? "Show Left Browser Drawer" : "Collapse Left Browser Drawer"}
+            onClick={() => setLeftCollapsed((c) => !c)}
+          >
+            ◧
           </button>
           <button
-            disabled={busy}
-            onClick={() =>
-              act(() => api.addCaption({ text: captionText, start: playhead, end: playhead + 2 }), "Caption added")
-            }
+            type="button"
+            className="icon-btn"
+            title={rightCollapsed ? "Show Right Inspector" : "Collapse Right Inspector"}
+            onClick={() => setRightCollapsed((c) => !c)}
           >
-            💬 Caption
+            ◨
           </button>
-        </div>
-        <div className="toolbar-group">
-          <input
-            className="prompt"
-            value={copilotPrompt}
-            onChange={(e) => setCopilotPrompt(e.target.value)}
-            placeholder='AI Copilot: e.g. "Apply Kodak LUT & duck music"'
-          />
+
           <button
-            disabled={busy || !copilotPrompt.trim()}
-            title="Execute multi-step AI Studio Copilot workflow with auto checkpoint"
-            onClick={() =>
-              act(async () => {
-                const res = await api.runCopilot(copilotPrompt);
-                flash(res.summary);
-              })
-            }
-          >
-            🤖 Copilot
-          </button>
-          <input
-            className="prompt"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Quick AI shot prompt…"
-          />
-          <button
-            disabled={busy}
-            title="Acoustically sync multi-camera angles & build switched Multicam Program track"
-            onClick={() =>
-              act(async () => {
-                const res = await api.syncMulticam(2.5);
-                flash(`Multicam synced ${res.angles.length} angles → ${res.segmentCount} program cuts`);
-              })
-            }
-          >
-            🎥 Multicam
-          </button>
-          <button
-            disabled={busy}
-            title="Generate AI video shot & insert onto timeline"
-            onClick={() =>
-              act(async () => {
-                const res = await api.genVideo(prompt, 5);
-                flash(`Vedit Gen job ${res.jobId.slice(0, 8)}… queued`);
-              })
-            }
-          >
-            🎬 Gen Video
-          </button>
-          <select value={exportPresetId} onChange={(e) => setExportPresetId(e.target.value)} title="Export preset">
-            {exportPresets.map((ep) => (
-              <option key={ep.id} value={ep.id}>
-                {ep.label}
-              </option>
-            ))}
-          </select>
-          <select value={hwAccel} onChange={(e) => setHwAccel(e.target.value)} title="Hardware GPU Encoder">
-            <option value="auto">⚡ Auto GPU/CPU</option>
-            <option value="nvenc">NVIDIA NVENC</option>
-            <option value="amf">AMD AMF</option>
-            <option value="qsv">Intel QuickSync</option>
-            <option value="cpu">CPU Software</option>
-          </select>
-          <select value={loudnessLufs} onChange={(e) => setLoudnessLufs(e.target.value)} title="Audio Loudness Target">
-            <option value="-14">-14 LUFS (Web)</option>
-            <option value="-16">-16 LUFS (Voice)</option>
-            <option value="-23">-23 LUFS (EBU)</option>
-            <option value="off">Raw Audio</option>
-          </select>
-          <button
-            disabled={busy}
-            onClick={() =>
-              act(async () => {
-                const lufs = loudnessLufs === "off" ? undefined : Number(loudnessLufs);
-                const res = await api.exportRender(exportPresetId, hwAccel, lufs);
-                flash(`Export (${exportPresetId}, ${hwAccel}) job ${res.jobId.slice(0, 8)}…`);
-              })
-            }
+            type="button"
+            className="btn-accent"
+            onClick={() => setShowExportModal(true)}
+            title="Export Video, Batch Render, Thumbnails & EDL/XML"
           >
             📤 Export
           </button>
+
+          {/* TOP-RIGHT CORNER NATIVE FULLSCREEN BUTTON (F11) */}
           <button
-            disabled={busy}
-            title="Auto-select sharpest frame & export 1280×720 YouTube thumbnail"
-            onClick={() =>
-              act(async () => {
-                const res = await api.exportThumbnail();
-                flash(`Thumbnail saved (t=${res.selectedTime}s) → ${res.outPath.split(/[\\/]/).pop()}`);
-                window.open(withToken(`/api/v1/projects/${project.id}/thumbnail/image`), "_blank");
-              })
-            }
+            type="button"
+            className={`fullscreen-corner-btn ${isFullscreen ? "is-fs" : ""}`}
+            onClick={() => void toggleFullscreen()}
+            title={isFullscreen ? "Exit Fullscreen (F11)" : "Enter Fullscreen (F11)"}
           >
-            🖼 Thumbnail
-          </button>
-          <button
-            disabled={busy}
-            title="Render YouTube 16:9 + TikTok 9:16 + WebM simultaneously"
-            onClick={() =>
-              act(async () => {
-                const res = await api.batchExport(["youtube-1080p", "tiktok-reels", "webm-vp9"]);
-                flash(`Batch export queued (${res.jobIds.length} targets)`);
-              })
-            }
-          >
-            📦 Batch
-          </button>
-          <button
-            disabled={busy}
-            title="Export DaVinci Resolve / Premiere CMX 3600 .edl"
-            onClick={() => window.open(withToken(`/api/v1/projects/${project.id}/export/edl`), "_blank")}
-          >
-            🎞 EDL
-          </button>
-          <button
-            disabled={busy}
-            title="Export Final Cut Pro / DaVinci Resolve .fcpxml"
-            onClick={() => window.open(withToken(`/api/v1/projects/${project.id}/export/fcpxml`), "_blank")}
-          >
-            🎬 XML
+            {isFullscreen ? "🗗 Exit" : "⛶ Fullscreen"}
           </button>
         </div>
       </header>
 
-      <main className="main">
-        <div className="left-col">
-          <MediaPool
-            project={project}
-            projectId={project.id}
-            playhead={playhead}
-            onImported={(msg) => {
-              void refresh();
-              if (msg) flash(msg);
-            }}
-            onQuickAdd={(asset) =>
-              act(async () => {
-                const isAud = asset.kind === "audio";
-                let track = seq.tracks.find((t) => t.kind === (isAud ? "audio" : "video") && !t.locked);
-                if (!track) {
-                  const created = await api.addTrack(isAud ? "audio" : "video", isAud ? "A1" : "V1");
-                  track = created.track;
-                }
-                const dur = asset.duration ?? 5;
-                await api.addClip({
-                  trackId: track.id,
-                  assetId: asset.id,
-                  start: playhead,
-                  duration: dur,
-                  in: 0,
-                  out: dur,
-                });
-                flash(`Added "${asset.name}" @ ${fmt(playhead)}`);
-              })
-            }
-          />
-          <AiPanel
-            caps={aiCaps}
-            assets={project.assets}
-            busy={busy}
-            onVoiceover={(script, voice) =>
-              act(async () => {
-                const res = await api.voiceover(script, voice, playhead);
-                flash(`Voiceover job ${res.jobId.slice(0, 8)}… (TTS + captions)`);
-              })
-            }
-            onTranscribe={(assetId) =>
-              act(async () => {
-                const res = await api.transcribe(assetId);
-                flash(`Transcription job ${res.jobId.slice(0, 8)}…`);
-              })
-            }
-            selectedClipId={selection?.clipId ?? null}
-            onAiEdit={(action, params) =>
-              act(async () => {
-                switch (action) {
-                  case "remove-silences": {
-                    const res = await api.removeSilences(params.clipId);
-                    flash(`Silences removed: −${res.savedDuration.toFixed(2)}s`);
-                    break;
-                  }
-                  case "highlight": {
-                    const res = await api.highlight(15);
-                    flash(`Highlight ${res.totalDuration.toFixed(1)}s (${res.clips.length} clips)`);
-                    break;
-                  }
-                  case "beat-sync": {
-                    const res = await api.beatSync(params.clipId!, params.musicAssetId!);
-                    flash(`Beat-sync: ${res.beats.length} beats → ${res.splits.length} cuts`);
-                    break;
-                  }
-                  case "auto-reframe": {
-                    const res = await api.autoReframe(params.clipId!);
-                    flash(`Auto-reframe: ${res.keyframes} keyframes`);
-                    break;
-                  }
-                  case "track-motion": {
-                    const res = await api.trackMotion(params.clipId!, params.sourceAssetId!);
-                    flash(`Tracking: ${res.keyframes} keyframes`);
-                    break;
-                  }
-                }
-              })
-            }
-          />
-          <JobsPanel project={project} />
-        </div>
-        <Preview
-          project={project}
-          clip={activeClip}
-          playhead={playhead}
-          playing={playing}
-          shuttleRate={shuttleRate}
-          frameUrl={frameUrl}
-          onTogglePlay={() => {
-            setShuttleRate(1);
-            setPlaying((p) => !p);
-          }}
-          onSeek={(t) => {
-            setPlaying(false);
-            setPlayhead(t);
-          }}
-        />
-        <div className="right-col">
-          <GenPanel
-            providers={genProviders}
-            cameraMoves={cameraMoves}
-            selectedClipId={selection?.clipId ?? null}
-            busy={busy}
-            onGenerate={(req) =>
-              act(async () => {
-                const res = await api.generateMedia(req);
-                flash(`Vedit Gen (${req.kind}): job ${res.jobId.slice(0, 8)}…`);
-              })
-            }
-          />
-          <StudioPanel
-            packs={packs}
-            project={project}
-            playhead={playhead}
-            busy={busy}
-            onApplyTemplate={(templateId, title) =>
-              act(() => api.applyTemplate(templateId, title ? { title } : {}), "Template applied")
-            }
-            onRunPlugin={(pluginId) => act(() => api.runPlugin(pluginId), `Plugin ${pluginId} finished`)}
-            onAddGraphic={(kind, label, svgMarkup) =>
-              act(
-                () =>
-                  api.addGraphic({
-                    kind,
-                    label,
-                    svgMarkup,
-                    start: playhead,
-                    duration: 3,
-                    animationPreset: "fade-in",
-                  }),
-                `Graphic overlay "${kind}" added`,
-              )
-            }
-            onSaveSnapshot={(label) => act(() => api.saveSnapshot(label), `Checkpoint "${label}" saved`)}
-            onRestoreSnapshot={(snapshotId) => act(() => api.restoreSnapshot(snapshotId), "Checkpoint restored")}
-            onAddComment={(text, timecode) => act(() => api.addComment(text, timecode), "Review note added")}
-            onResolveComment={(id, resolved) => act(() => api.resolveComment(id, resolved))}
-            onSeek={setPlayhead}
-          />
-          <Inspector
-            clip={selected?.clip ?? null}
-            asset={selectedAsset}
-            playhead={playhead}
-            captions={seq.captions}
-            onProAction={(action, payload) => {
-              if (!clipId) return;
-              switch (action) {
-                case "speed":
-                  void act(
-                    () => api.setClipSpeed(clipId, Number(payload?.speed ?? 1)),
-                    `Clip speed set to ${payload?.speed}×`,
-                  );
-                  break;
-                case "reverse":
-                  void act(() => api.reverseClip(clipId), "Clip video & audio reversed");
-                  break;
-                case "freeze":
-                  void act(() => api.freezeClip(clipId, playhead, 1.5), "Inserted 1.5s freeze-frame hold");
-                  break;
-                case "color-grade":
-                  void act(
-                    () => api.colorGrade(clipId, String(payload?.preset ?? "cinematic-contrast")),
-                    `Color grade "${payload?.preset}" applied`,
-                  );
-                  break;
-                case "chroma-key":
-                  void act(
-                    () => api.chromaKey(clipId, String(payload?.color ?? "#00ff00")),
-                    `Chroma key (${payload?.color}) applied`,
-                  );
-                  break;
-                case "fade":
-                  void act(
-                    () => api.fadeClip(clipId, Number(payload?.fadeIn ?? 0.5), Number(payload?.fadeOut ?? 0.5)),
-                    "Fade transition applied",
-                  );
-                  break;
-                case "lut3d":
-                  void act(
-                    () => api.applyLut(clipId, String(payload?.lutId ?? "kodak-2383")),
-                    `3D .cube LUT "${payload?.lutId}" applied`,
-                  );
-                  break;
-                case "stabilize":
-                  void act(async () => {
-                    const res = await api.stabilizeClip(clipId);
-                    flash(`Stabilized clip (${res.method})`);
-                  });
-                  break;
-                case "layout":
-                  void act(
-                    () => api.applyLayout(clipId, String(payload?.layout ?? "pip-bottom-right")),
-                    `Layout "${payload?.layout}" applied`,
-                  );
-                  break;
-                case "enhance-audio":
-                  void act(
-                    () => api.enhanceAudio(clipId),
-                    "Voice enhanced (FFT denoise + EQ + -16 LUFS)",
-                  );
-                  break;
-                case "duck-audio":
-                  void act(async () => {
-                    const res = await api.duckAudio(clipId);
-                    flash(`Music auto-ducked across ${res.speechIntervals.length} speech segment(s)`);
-                  });
-                  break;
-                case "remove-effect":
-                  void act(() => api.removeEffect(clipId, String(payload?.effectId ?? "")), "Effect removed");
-                  break;
-              }
-            }}
-            onPatch={(patch) => {
-              if (!clipId) return;
-              const nested: Record<string, unknown> = {};
-              for (const [key, value] of Object.entries(patch)) {
-                if (key.startsWith("transform.")) {
-                  (nested.transform ??= {});
-                  (nested.transform as Record<string, unknown>)[key.slice("transform.".length)] = value;
+      {/* ==================== UPPER CAPCUT 4-ZONE RESIZABLE WORKSPACE ==================== */}
+      <div className="workspace-upper">
+        {/* 1. Far-Left CapCut Section Icon Rail */}
+        <nav className="capcut-rail" aria-label="Studio Sections">
+          {RAIL_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`rail-tab ${!leftCollapsed && activeTab === tab.id ? "active" : ""}`}
+              onClick={() => {
+                if (!leftCollapsed && activeTab === tab.id) {
+                  setLeftCollapsed(true);
                 } else {
-                  nested[key] = value;
+                  setActiveTab(tab.id);
+                  setLeftCollapsed(false);
                 }
-              }
-              void act(() => api.updateClip(clipId, nested), "Clip updated");
+              }}
+            >
+              <span className="rail-icon">{tab.icon}</span>
+              <span>{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        {/* 2. Resizable Left Section Drawer with Built-in Search */}
+        {!leftCollapsed && (
+          <>
+            <aside className="left-drawer" style={{ width: leftWidth }}>
+              <div className="drawer-search-bar">
+                <input
+                  value={sectionSearch}
+                  onChange={(e) => setSectionSearch(e.target.value)}
+                  placeholder={`🔍 Search ${RAIL_TABS.find((t) => t.id === activeTab)?.label ?? "studio"} or all presets…`}
+                />
+                {sectionSearch && (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => setSectionSearch("")}
+                    title="Clear filter"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              <div className="drawer-scroll">
+                {searchTrimmed ? (
+                  <CapCutCatalogBrowser
+                    title={`Search Results: "${sectionSearch}"`}
+                    query={sectionSearch}
+                    items={catalogItems}
+                    matchingAssets={matchingAssets}
+                    matchingPacks={matchingPacks}
+                    onQuickAddAsset={handleQuickAddAsset}
+                    onApplyTemplate={(tplId) =>
+                      void act(() => api.applyTemplate(tplId, {}), "Template applied")
+                    }
+                  />
+                ) : activeTab === "media" ? (
+                  <MemoMediaPool
+                    project={project}
+                    projectId={project.id}
+                    playhead={quantizedStopTime}
+                    onImported={(msg) => {
+                      void refresh();
+                      if (msg) flash(msg);
+                    }}
+                    onQuickAdd={handleQuickAddAsset}
+                  />
+                ) : activeTab === "effects" ? (
+                  <CapCutCatalogBrowser
+                    title="Cinema 3D LUTs & Video Effects"
+                    query=""
+                    items={catalogItems.filter((i) => i.section === "effects")}
+                    matchingAssets={[]}
+                    matchingPacks={[]}
+                    onQuickAddAsset={handleQuickAddAsset}
+                    onApplyTemplate={() => {}}
+                  />
+                ) : activeTab === "transitions" ? (
+                  <CapCutCatalogBrowser
+                    title="Transitions, Motion, Speed & Layouts"
+                    query=""
+                    items={catalogItems.filter((i) => i.section === "transitions")}
+                    matchingAssets={[]}
+                    matchingPacks={[]}
+                    onQuickAddAsset={handleQuickAddAsset}
+                    onApplyTemplate={() => {}}
+                  />
+                ) : activeTab === "text" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <h2>Text, Captions &amp; Lower-Thirds</h2>
+                    <div className="capcut-card-grid">
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() =>
+                          void act(
+                            () =>
+                              api.addCaption({
+                                text: `Subtitle @ ${fmt(playheadRef.current)}`,
+                                start: playheadRef.current,
+                                end: playheadRef.current + 2.5,
+                              }),
+                            "Subtitle added at playhead",
+                          )
+                        }
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #0284c7, #38bdf8)" }}>
+                          <span className="capcut-card-badge">SUBTITLE</span>
+                          <span className="capcut-card-plus">+</span>
+                        </div>
+                        <div className="capcut-card-title">Default Caption</div>
+                        <div className="capcut-card-sub">Add 2.5s subtitle @ playhead</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() =>
+                          void act(
+                            () =>
+                              api.addGraphic({
+                                kind: "lower-third-card",
+                                label: "Vedit Studio",
+                                start: playheadRef.current,
+                                duration: 3.5,
+                                animationPreset: "fade-in",
+                              }),
+                            "Lower-third title added",
+                          )
+                        }
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #7c3aed, #ec4899)" }}>
+                          <span className="capcut-card-badge">TITLE</span>
+                          <span className="capcut-card-plus">+</span>
+                        </div>
+                        <div className="capcut-card-title">Lower Third Bar</div>
+                        <div className="capcut-card-sub">Clean broadcast nameplate</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() =>
+                          void act(
+                            () =>
+                              api.addGraphic({
+                                kind: "callout-arrow",
+                                label: "Key Highlight",
+                                start: playheadRef.current,
+                                duration: 3,
+                                animationPreset: "zoom-in",
+                              }),
+                            "Callout badge added",
+                          )
+                        }
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #ea580c, #facc15)" }}>
+                          <span className="capcut-card-badge">CALLOUT</span>
+                          <span className="capcut-card-plus">+</span>
+                        </div>
+                        <div className="capcut-card-title">Pop Callout Badge</div>
+                        <div className="capcut-card-sub">Animated pointer badge</div>
+                      </button>
+                    </div>
+
+                    <h3>Active Captions ({seq.captions.length})</h3>
+                    {seq.captions.length === 0 ? (
+                      <div className="muted">No captions yet — click Default Caption above or auto-transcribe in Audio.</div>
+                    ) : (
+                      <ul className="caption-list" style={{ maxHeight: 260 }}>
+                        {seq.captions.map((c) => (
+                          <li key={c.id} className="asset" style={{ cursor: "pointer" }} onClick={() => setPlayhead(c.start)}>
+                            <span className="muted">
+                              {fmt(c.start)}–{fmt(c.end)}
+                            </span>
+                            <span className="asset-name">{c.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ) : activeTab === "audio" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <MemoAiPanel
+                      caps={aiCaps}
+                      assets={project.assets}
+                      busy={busy}
+                      onVoiceover={(script, voice) =>
+                        act(async () => {
+                          const res = await api.voiceover(script, voice, playheadRef.current);
+                          flash(`Voiceover job ${res.jobId.slice(0, 8)}… queued`);
+                        })
+                      }
+                      onTranscribe={(assetId) =>
+                        act(async () => {
+                          const res = await api.transcribe(assetId);
+                          flash(`Auto-captions job ${res.jobId.slice(0, 8)}…`);
+                        })
+                      }
+                      selectedClipId={clipId}
+                      onAiEdit={(action, params) =>
+                        act(async () => {
+                          if (action === "beat-sync") {
+                            const res = await api.beatSync(params.clipId!, params.musicAssetId!);
+                            flash(`Beat-sync: ${res.splits.length} cuts`);
+                          } else if (action === "remove-silences") {
+                            const res = await api.removeSilences(params.clipId);
+                            flash(`Removed ${res.savedDuration.toFixed(2)}s dead air`);
+                          }
+                        })
+                      }
+                    />
+                  </div>
+                ) : activeTab === "ai" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <h2 style={{ margin: 0 }}>AI Studio Copilot</h2>
+                      <button type="button" onClick={() => setShowApiModal(true)} style={{ fontSize: 11, padding: "3px 8px" }}>
+                        ⚙ {apiSettings?.hasApiKey ? apiSettings.model.split("/").pop() : "Set API & Model"}
+                      </button>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={copilotPrompt}
+                      onChange={(e) => setCopilotPrompt(e.target.value)}
+                      placeholder='Describe your edit in English or Czech — e.g. "Dej filmový Kodak LUT, přidej titulek Vítejte a ztiš hudbu pod hlasem"'
+                      style={{
+                        width: "100%",
+                        background: "var(--panel-2)",
+                        color: "var(--text)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: 8,
+                        fontSize: 12,
+                        fontFamily: "inherit",
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-accent"
+                      disabled={busy || !copilotPrompt.trim()}
+                      onClick={() =>
+                        act(async () => {
+                          const res = await api.runCopilot(copilotPrompt);
+                          flash(res.summary);
+                        })
+                      }
+                    >
+                      🤖 Run AI Copilot Edit (Auto Checkpoint)
+                    </button>
+
+                    <h3>1-Click Smart Actions</h3>
+                    <div className="capcut-card-grid">
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() =>
+                          act(async () => {
+                            const res = await api.removeSilences(clipId ?? undefined);
+                            flash(`Removed ${res.savedDuration.toFixed(2)}s of silence`);
+                          })
+                        }
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #0ea5e9, #2563eb)" }}>
+                          <span className="capcut-card-badge">SMART CUT</span>
+                          <span className="capcut-card-plus">⚡</span>
+                        </div>
+                        <div className="capcut-card-title">Remove Silences</div>
+                        <div className="capcut-card-sub">Strip dead air automatically</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() =>
+                          act(async () => {
+                            const res = await api.highlight(15);
+                            flash(`Built ${res.totalDuration.toFixed(1)}s highlight reel`);
+                          })
+                        }
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #7c3aed, #db2777)" }}>
+                          <span className="capcut-card-badge">HIGHLIGHT</span>
+                          <span className="capcut-card-plus">⚡</span>
+                        </div>
+                        <div className="capcut-card-title">15s Highlight Reel</div>
+                        <div className="capcut-card-sub">Best high-energy moments</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() =>
+                          act(async () => {
+                            const res = await api.syncMulticam(2.5);
+                            flash(`Synced ${res.angles.length} camera angles`);
+                          })
+                        }
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #0d9488, #16a34a)" }}>
+                          <span className="capcut-card-badge">MULTICAM</span>
+                          <span className="capcut-card-plus">🎥</span>
+                        </div>
+                        <div className="capcut-card-title">Auto Multicam Sync</div>
+                        <div className="capcut-card-sub">Audio cross-correlation cuts</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="capcut-card"
+                        onClick={() => {
+                          const cid = resolveTargetClipId();
+                          if (!cid) return flash("Select a clip first");
+                          void act(async () => {
+                            const res = await api.autoReframe(cid);
+                            flash(`Auto-reframed (${res.keyframes} keyframes)`);
+                          });
+                        }}
+                      >
+                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #d97706, #ef4444)" }}>
+                          <span className="capcut-card-badge">9:16 REELS</span>
+                          <span className="capcut-card-plus">📱</span>
+                        </div>
+                        <div className="capcut-card-title">Smart Reframe</div>
+                        <div className="capcut-card-sub">Track subject into vertical crop</div>
+                      </button>
+                    </div>
+
+                    <MemoJobsPanel project={project} />
+                  </div>
+                ) : activeTab === "gen" ? (
+                  <MemoGenPanel
+                    providers={genProviders}
+                    cameraMoves={cameraMoves}
+                    selectedClipId={clipId}
+                    busy={busy}
+                    onGenerate={(req) =>
+                      act(async () => {
+                        const res = await api.generateMedia(req);
+                        flash(`AI Gen (${req.kind}) job ${res.jobId.slice(0, 8)}…`);
+                      })
+                    }
+                  />
+                ) : (
+                  <MemoStudioPanel
+                    packs={packs}
+                    project={project}
+                    playhead={quantizedStopTime}
+                    busy={busy}
+                    onApplyTemplate={(templateId, title) =>
+                      act(() => api.applyTemplate(templateId, title ? { title } : {}), "Template applied")
+                    }
+                    onRunPlugin={(pluginId) => act(() => api.runPlugin(pluginId), `Plugin ${pluginId} finished`)}
+                    onAddGraphic={(kind, label, svgMarkup) =>
+                      act(
+                        () =>
+                          api.addGraphic({
+                            kind,
+                            label,
+                            svgMarkup,
+                            start: playheadRef.current,
+                            duration: 3,
+                            animationPreset: "fade-in",
+                          }),
+                        `Graphic overlay "${kind}" added`,
+                      )
+                    }
+                    onSaveSnapshot={(label) => act(() => api.saveSnapshot(label), `Checkpoint "${label}" saved`)}
+                    onRestoreSnapshot={(snapshotId) => act(() => api.restoreSnapshot(snapshotId), "Checkpoint restored")}
+                    onAddComment={(text, timecode) => act(() => api.addComment(text, timecode), "Review note added")}
+                    onResolveComment={(id, resolved) => act(() => api.resolveComment(id, resolved))}
+                    onSeek={setPlayhead}
+                  />
+                )}
+              </div>
+            </aside>
+
+            {/* Draggable Vertical Splitter #1 (Left Browser ↔ Center Monitor) */}
+            <div
+              className={`splitter-v ${draggingSplitter === "left" ? "dragging" : ""}`}
+              title="Drag to resize left browser panel (double-click to reset)"
+              onMouseDown={(e) => startSplitterDrag("left", e)}
+              onDoubleClick={() => setLeftWidth(320)}
+            />
+          </>
+        )}
+
+        {/* 3. Center Real-Time Video Player Stage */}
+        <div className="center-stage-col">
+          <Preview
+            project={project}
+            clip={activeClip}
+            playhead={playhead}
+            playing={playing}
+            shuttleRate={shuttleRate}
+            frameUrl={frameUrl}
+            onTogglePlay={() => {
+              setShuttleRate(1);
+              setPlaying((p) => !p);
+            }}
+            onSeek={(t) => {
+              setPlaying(false);
+              setPlayhead(t);
             }}
           />
         </div>
-      </main>
 
+        {/* 4. Draggable Vertical Splitter #2 + Right CapCut Property Inspector */}
+        {!rightCollapsed && (
+          <>
+            <div
+              className={`splitter-v ${draggingSplitter === "right" ? "dragging" : ""}`}
+              title="Drag to resize right Inspector panel (double-click to reset)"
+              onMouseDown={(e) => startSplitterDrag("right", e)}
+              onDoubleClick={() => setRightWidth(315)}
+            />
+            <aside className="right-drawer" style={{ width: rightWidth }}>
+              <div className="drawer-scroll">
+                <MemoInspector
+                  clip={selected?.clip ?? activeClip}
+                  asset={selectedAsset ?? activeClipAsset}
+                  playhead={quantizedStopTime}
+                  captions={seq.captions}
+                  onProAction={(action, payload) => {
+                    const targetId = clipId ?? activeClip?.id;
+                    if (!targetId) return;
+                    switch (action) {
+                      case "speed":
+                        void act(
+                          () => api.setClipSpeed(targetId, Number(payload?.speed ?? 1)),
+                          `Speed set to ${payload?.speed}×`,
+                        );
+                        break;
+                      case "reverse":
+                        void act(() => api.reverseClip(targetId), "Clip reversed");
+                        break;
+                      case "freeze":
+                        void act(() => api.freezeClip(targetId, playheadRef.current, 1.5), "1.5s freeze-frame added");
+                        break;
+                      case "color-grade":
+                        void act(
+                          () => api.colorGrade(targetId, String(payload?.preset ?? "cinematic-contrast")),
+                          `Grade "${payload?.preset}" applied`,
+                        );
+                        break;
+                      case "chroma-key":
+                        void act(
+                          () => api.chromaKey(targetId, String(payload?.color ?? "#00ff00")),
+                          `Chroma key applied`,
+                        );
+                        break;
+                      case "fade":
+                        void act(
+                          () => api.fadeClip(targetId, Number(payload?.fadeIn ?? 0.5), Number(payload?.fadeOut ?? 0.5)),
+                          "Fade transition applied",
+                        );
+                        break;
+                      case "lut3d":
+                        void act(
+                          () => api.applyLut(targetId, String(payload?.lutId ?? "kodak-2383")),
+                          `3D LUT "${payload?.lutId}" applied`,
+                        );
+                        break;
+                      case "stabilize":
+                        void act(async () => {
+                          const res = await api.stabilizeClip(targetId);
+                          flash(`Stabilized (${res.method})`);
+                        });
+                        break;
+                      case "layout":
+                        void act(
+                          () => api.applyLayout(targetId, String(payload?.layout ?? "pip-bottom-right")),
+                          `Layout "${payload?.layout}" applied`,
+                        );
+                        break;
+                      case "enhance-audio":
+                        void act(() => api.enhanceAudio(targetId), "Voice DSP enhanced");
+                        break;
+                      case "duck-audio":
+                        void act(async () => {
+                          const res = await api.duckAudio(targetId);
+                          flash(`Music auto-ducked (${res.speechIntervals.length} segments)`);
+                        });
+                        break;
+                      case "remove-effect":
+                        void act(() => api.removeEffect(targetId, String(payload?.effectId ?? "")), "Effect removed");
+                        break;
+                    }
+                  }}
+                  onPatch={(patch) => {
+                    const targetId = clipId ?? activeClip?.id;
+                    if (!targetId) return;
+                    const nested: Record<string, unknown> = {};
+                    for (const [key, value] of Object.entries(patch)) {
+                      if (key.startsWith("transform.")) {
+                        nested.transform ??= {};
+                        (nested.transform as Record<string, unknown>)[key.slice("transform.".length)] = value;
+                      } else {
+                        nested[key] = value;
+                      }
+                    }
+                    void act(() => api.updateClip(targetId, nested), "Clip updated");
+                  }}
+                />
+              </div>
+            </aside>
+          </>
+        )}
+      </div>
+
+      {/* Draggable Horizontal Splitter #3 (Upper Studio ↔ Multi-Track Timeline) */}
+      <div
+        className={`splitter-h ${draggingSplitter === "bottom" ? "dragging" : ""}`}
+        title="Drag up/down to resize Timeline height (double-click to reset)"
+        onMouseDown={(e) => startSplitterDrag("bottom", e)}
+        onDoubleClick={() => setTimelineHeight(255)}
+      />
+
+      {/* ==================== CAPCUT MULTI-TRACK TIMELINE ==================== */}
       <Timeline
+        heightPx={timelineHeight}
         project={project}
         selection={selection}
-        onSelect={(trackId, clipId) => setSelection({ trackId, clipId })}
+        onSelect={(trackId, id) => setSelection({ trackId, clipId: id })}
         playhead={playhead}
         onSeek={(t) => {
           setPlaying(false);
@@ -827,6 +1479,27 @@ export function App() {
         onAddTrack={(kind) => act(() => api.addTrack(kind), `Added ${kind} track`)}
         onUpdateTrack={(trackId, patch) => act(() => api.updateTrack(trackId, patch))}
         onClipEdit={(id, patch) => act(() => api.updateClip(id, patch), "Clip updated")}
+        onSplitAtPlayhead={() => {
+          const cid = resolveTargetClipId();
+          if (cid) void act(() => api.splitClip(cid, playheadRef.current), `Split @ ${fmt(playheadRef.current)}`);
+        }}
+        onDeleteSelected={() => {
+          if (clipId) void act(() => api.deleteClip(clipId), "Clip deleted");
+        }}
+        onRippleDeleteSelected={() => {
+          if (clipId) void act(() => api.deleteClip(clipId, true), "Ripple deleted");
+        }}
+        onAddCaptionAtPlayhead={() =>
+          void act(
+            () =>
+              api.addCaption({
+                text: `Caption @ ${fmt(playheadRef.current)}`,
+                start: playheadRef.current,
+                end: playheadRef.current + 2.5,
+              }),
+            "Caption added",
+          )
+        }
         onDropOnTrack={(trackId, start, files, assetId) => {
           if (assetId) {
             const asset = project.assets.find((a) => a.id === assetId);
@@ -853,6 +1526,61 @@ export function App() {
           }
         }}
       />
+
+      {/* Custom API Key, Base URL & Model Picker Modal */}
+      {showApiModal && (
+        <ApiSettingsModal
+          initial={apiSettings}
+          onClose={() => setShowApiModal(false)}
+          onSaved={(next, msg) => {
+            setApiSettings(next);
+            flash(msg);
+            void api
+              .genProviders()
+              .then((r) => {
+                setGenProviders(r.providers);
+                setCameraMoves(r.cameraMoves);
+              })
+              .catch(() => {});
+          }}
+        />
+      )}
+
+      {/* Export & Delivery Modal */}
+      {showExportModal && (
+        <ExportModal
+          project={project}
+          exportPresets={exportPresets}
+          exportPresetId={exportPresetId}
+          setExportPresetId={setExportPresetId}
+          hwAccel={hwAccel}
+          setHwAccel={setHwAccel}
+          loudnessLufs={loudnessLufs}
+          setLoudnessLufs={setLoudnessLufs}
+          busy={busy}
+          onExport={() =>
+            void act(async () => {
+              const lufs = loudnessLufs === "off" ? undefined : Number(loudnessLufs);
+              const res = await api.exportRender(exportPresetId, hwAccel, lufs);
+              flash(`Export started (${exportPresetId}, ${hwAccel}) — job ${res.jobId.slice(0, 8)}…`);
+            })
+          }
+          onBatchExport={() =>
+            void act(async () => {
+              const res = await api.batchExport(["youtube-1080p", "tiktok-reels", "webm-vp9"]);
+              flash(`Batch export queued (${res.jobIds.length} targets)`);
+            })
+          }
+          onThumbnail={() =>
+            void act(async () => {
+              const res = await api.exportThumbnail();
+              flash(`Thumbnail saved → ${res.outPath.split(/[\\/]/).pop()}`);
+              window.open(withToken(`/api/v1/projects/${project.id}/thumbnail/image`), "_blank");
+            })
+          }
+          onClose={() => setShowExportModal(false)}
+        />
+      )}
 
       {toast && <div className="toast">{toast}</div>}
     </div>
