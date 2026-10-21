@@ -721,6 +721,19 @@ mcamCmd.action(async (opts: { project: string; interval: string }) => {
   });
 });
 
+program
+  .command("update-check")
+  .description("Checks GitHub Releases for new Vedit updates")
+  .action(async () => {
+    const { checkForUpdates } = await import("../pro/updater.js");
+    const info = await checkForUpdates();
+    if (info.updateAvailable) {
+      console.log(`Update available: v${info.currentVersion} -> v${info.latestVersion} (${info.downloadUrl})`);
+    } else {
+      console.log(`Vedit v${info.currentVersion} is up to date (latest: v${info.latestVersion}).`);
+    }
+  });
+
 program.parseAsync(process.argv).catch((err) => {
   console.error(`Error: ${(err as Error).message}`);
   process.exit(1);

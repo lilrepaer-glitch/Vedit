@@ -57,6 +57,7 @@ import {
 import { exportEdl, exportFcpXml } from "../pro/interchange.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { analyzeFrameScopes } from "../pro/scopes.js";
+import { VEDIT_VERSION, checkForUpdates } from "../pro/updater.js";
 import { runStudioCopilot } from "../ai/orchestrator.js";
 import { resolve as resolvePath } from "node:path";
 
@@ -1450,6 +1451,12 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     "cinema.list_luts",
     { description: "F8: Lists built-in cinema 3D .cube film stock LUTs." },
     async () => ok({ luts: BUILTIN_LUTS }),
+  );
+
+  server.registerTool(
+    "system.check_update",
+    { description: "Checks GitHub Releases for a newer Vedit Windows installer update." },
+    async () => wrapTool(() => checkForUpdates(VEDIT_VERSION)),
   );
 
   server.registerTool(

@@ -343,6 +343,24 @@ export const api = {
     ),
   openProjectDisk: (filePath: string) =>
     req<{ project: Project }>("POST", "/projects/open", { filePath }),
+  checkUpdate: () =>
+    req<{
+      currentVersion: string;
+      latestVersion: string;
+      updateAvailable: boolean;
+      releaseName: string;
+      releaseUrl: string;
+      downloadUrl: string | null;
+      sizeBytes: number | null;
+      notes: string;
+    }>("GET", "/updater/check"),
+  installUpdate: (downloadUrl?: string) =>
+    req<{ installerPath: string; sizeBytes: number; launched: boolean; latestVersion: string }>(
+      "POST",
+      "/updater/install",
+      { ...(downloadUrl ? { downloadUrl } : {}) },
+      300000,
+    ),
   uploadAssetFile: async (
     file: File,
     at?: number,
