@@ -138,10 +138,23 @@ export interface CameraMoveInfo {
 const env = (import.meta as { env?: Record<string, string> }).env;
 
 /**
- * In desktop Tauri webview (http://tauri.localhost or tauri://localhost), sidecar runs at 127.0.0.1:47000;
- * in browser dev mode Vite proxies /api and /ws.
+ * Resolve API & WebSocket origin cleanly across all desktop and dev environments:
+ * - When navigated directly onto the local Vedit Engine (`http://127.0.0.1:<port>/`), use same-origin relative URLs (`""`)
+ *   so dynamic port fallback (when Windows WinNAT/Hyper-V excludes 47000) works automatically with zero CORS!
+ * - When still on initial Tauri custom scheme (`tauri://localhost` / `http(s)://tauri.localhost`), talk to `http://127.0.0.1:47000`.
+ * - In Vite dev mode (`localhost:5173`), use relative URLs proxied by Vite.
  */
-const isDesktop = location.protocol === "tauri:" || location.hostname === "tauri.localhost";
+const servedDirectlyByEngine =
+  typeof window !== "undefined" &&
+  (location.hostname === "127.0.0.1" || location.hostname === "localhost") &&
+  location.port !== "5173";
+
+const isDesktop =
+  typeof window !== "undefined" &&
+  !servedDirectlyByEngine &&
+  (location.protocol === "tauri:" ||
+    location.hostname === "tauri.localhost" ||
+    location.hostname.endsWith(".localhost"));
 const API_ORIGIN = env?.VITE_API_BASE ?? (isDesktop ? "http://127.0.0.1:47000" : "");
 
 const API_TOKEN = env?.VITE_API_TOKEN ?? "dev";
@@ -155,15 +168,23 @@ export function withToken(url: string): string {
   return `${abs}${abs.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
 }
 
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(apiUrl(path), {
-    method,
-    headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      Authorization: `Bearer ${API_TOKEN}`,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+async function req<T>(method: string, path: string, body?: unknown, timeoutMs = 60000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(apiUrl(path), {
+      method,
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        Authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     let message = res.statusText;
     try {
@@ -436,10 +457,13 @@ export function connectWs(onChange: () => void): () => void {
     if (closed) return;
     try {
       ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        onChange();
+      };
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(String(event.data));
-          if (msg.type === "change" || msg.type === "job") onChange();
+          if (msg.type === "hello" || msg.type === "change" || msg.type === "job") onChange();
         } catch {
           /* ignore malformed frame */
         }
