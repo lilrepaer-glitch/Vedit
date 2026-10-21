@@ -4,7 +4,7 @@
 
 📖 **[PLAN.md](./PLAN.md)** — project plan & spec (vision, features, architecture, roadmap).
 
-> **Status: F0 + F1 + F2 + F3 done** — core with undo/redo and full editing, REST/WS API, MCP server (68 tools), CLI, UI timeline, real FFmpeg render export, **AI captions (TTS voiceover + speech-to-text)** and **AI editing (remove silences, highlight, beat-sync, motion tracking / auto-reframe)**. Model-based video generation comes in F4.
+> **Status: F0 + F1 + F2 + F3 done, F4 in progress** — core with undo/redo and full editing, REST/WS API, MCP server (68 tools), CLI, UI timeline, real FFmpeg render export, **AI captions (TTS voiceover + speech-to-text)**, **AI editing (remove silences, highlight, beat-sync, motion tracking / auto-reframe)** and **Vedit Gen (F4: Veo 3.1 / Kling 3.0 / Seedance / Runway / Luma / MiniMax / Wan via fal.ai & Replicate + local Wan/Hunyuan)**.
 
 ## Repository Structure
 
@@ -94,6 +94,33 @@ WebSocket `ws://127.0.0.1:47000/ws` emits `change` and `job` events.
 - **Auto-reframe / motion tracking** — `POST .../clips/:clipId/auto-reframe` / `track-motion`, CLI `vedit track`, MCP `edit.auto_reframe` / `edit.track_motion` — motion centroid → pan keyframes (9:16 crop, graphics follow object)
 - **Analysis** — `POST .../analyze/{silences,scenes,beats,motion,energy}`, CLI `vedit analyze`, MCP `analysis.silences|scenes|beats|motion` — pure signal processing (FFmpeg decode + PCM/frame analysis), no ML models
 - All operations are transactional (one `undo` reverts the whole AI edit)
+
+## Vedit Gen — video generation (F4)
+
+**F4** brings unified generation behind one API. Every provider (cloud or local) is a Job (`queued → running → done`) and the result is auto-inserted as a `generated` asset.
+
+- **Cloud native**: Google **Veo 3.1**, **Kling 3.0**, **Seedance 2.x**, **Runway Gen-4.5**, **Luma Ray 3**, **MiniMax Hailuo/H3**, **Wan 2.1**
+- **Aggregators**: **fal.ai** (`FAL_KEY`) and **Replicate** (`REPLICATE_API_TOKEN`) — one key covers many models
+- **Local**: **Wan** (ComfyUI) and **Hunyuan Video** — set `VEDIT_WAN_URL` / `VEDIT_HUNYUAN_URL`
+
+```bash
+# list available providers (availability depends on env vars)
+curl http://127.0.0.1:47000/api/v1/gen/providers
+
+# generate 5s video (stub if no key → FFmpeg placeholder, real if key set)
+curl -X POST http://127.0.0.1:47000/api/v1/projects/<id>/gen/video \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"cyberpunk street at night, rain","duration":5,"provider":"fal","model":"fal/veo3.1"}'
+
+# image-to-video: pass imageAssetId / videoAssetId
+# set provider env and restart server:  FAL_KEY=... npm run dev:api
+```
+
+Without keys the engine uses **offline stub** → deterministic FFmpeg color/testsrc placeholder so the pipeline always works. With keys it calls the real API, polls and downloads the result to `.vedit/gen/<jobId>/`. TTS voiceover is separate (F2), but `gen/audio` (music/sfx/voice) also goes through Vedit Gen.
+
+MCP tools: `gen.video`, `gen.image`, `gen.music`, `gen.sfx`, `gen.voice`, `gen.job_status` (same job system).
+
+See `src/ai/gen.ts` for the provider registry — add your own provider by pushing to `GEN_PROVIDERS`.
 
 ## Desktop Build (Tauri)
 
