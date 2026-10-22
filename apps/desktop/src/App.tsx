@@ -96,8 +96,12 @@ export function App() {
     const saved = Number(localStorage.getItem("vedit.timelineHeight") || 255);
     return Number.isFinite(saved) && saved >= 130 && saved <= 620 ? saved : 255;
   });
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState<boolean>(
+    () => typeof window !== "undefined" && window.innerWidth < 680,
+  );
+  const [rightCollapsed, setRightCollapsed] = useState<boolean>(
+    () => typeof window !== "undefined" && window.innerWidth < 920,
+  );
   const [draggingSplitter, setDraggingSplitter] = useState<"left" | "right" | "bottom" | null>(null);
 
   const [updateInfo, setUpdateInfo] = useState<{
@@ -450,6 +454,7 @@ export function App() {
         flash("Add or select a clip on the timeline first");
         return;
       }
+      if (window.innerWidth < 900) setLeftCollapsed(true);
       void act(() => fn(cid), msg);
     };
 
@@ -660,8 +665,8 @@ export function App() {
     return [...effectCards, ...transitionCards];
   }, [presets, resolveTargetClipId, act, flash]);
 
-  // Smooth mouse drag handlers for Left Drawer, Right Inspector, and Bottom Timeline Splitters!
-  const startSplitterDrag = (which: "left" | "right" | "bottom", e: React.MouseEvent) => {
+  // Unified Mouse + Finger Touch Pointer drag handlers for all Workspace Splitters!
+  const startSplitterDrag = (which: "left" | "right" | "bottom", e: React.PointerEvent) => {
     e.preventDefault();
     setDraggingSplitter(which);
     const scaleFactor = uiScale / 100;
@@ -671,26 +676,28 @@ export function App() {
     const origRight = rightWidth;
     const origBottom = timelineHeight;
 
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const dx = (ev.clientX - startX) / scaleFactor;
       const dy = (ev.clientY - startY) / scaleFactor;
       if (which === "left") {
         setLeftCollapsed(false);
-        setLeftWidth(Math.max(190, Math.min(620, Math.round(origLeft + dx))));
+        setLeftWidth(Math.max(180, Math.min(620, Math.round(origLeft + dx))));
       } else if (which === "right") {
         setRightCollapsed(false);
-        setRightWidth(Math.max(200, Math.min(620, Math.round(origRight - dx))));
+        setRightWidth(Math.max(190, Math.min(620, Math.round(origRight - dx))));
       } else {
-        setTimelineHeight(Math.max(130, Math.min(620, Math.round(origBottom - dy))));
+        setTimelineHeight(Math.max(120, Math.min(620, Math.round(origBottom - dy))));
       }
     };
     const onUp = () => {
       setDraggingSplitter(null);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   if (!project || !seq) {
@@ -1016,8 +1023,9 @@ export function App() {
         {!leftCollapsed && (
           <>
             <aside className="left-drawer" style={{ width: leftWidth }}>
-              <div className="drawer-search-bar">
+              <div className="drawer-search-bar" style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input
+                  style={{ flex: 1 }}
                   value={sectionSearch}
                   onChange={(e) => setSectionSearch(e.target.value)}
                   placeholder={`🔍 Search ${RAIL_TABS.find((t) => t.id === activeTab)?.label ?? "studio"} or all presets…`}
@@ -1032,6 +1040,15 @@ export function App() {
                     ✕
                   </button>
                 )}
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setLeftCollapsed(true)}
+                  title="Collapse panel"
+                  style={{ flex: "none" }}
+                >
+                  ‹
+                </button>
               </div>
 
               <div className="drawer-scroll">
@@ -1443,7 +1460,7 @@ export function App() {
             <div
               className={`splitter-v ${draggingSplitter === "left" ? "dragging" : ""}`}
               title="Drag to resize left browser panel (double-click to reset)"
-              onMouseDown={(e) => startSplitterDrag("left", e)}
+              onPointerDown={(e) => startSplitterDrag("left", e)}
               onDoubleClick={() => setLeftWidth(320)}
             />
           </>
@@ -1475,10 +1492,32 @@ export function App() {
             <div
               className={`splitter-v ${draggingSplitter === "right" ? "dragging" : ""}`}
               title="Drag to resize right Inspector panel (double-click to reset)"
-              onMouseDown={(e) => startSplitterDrag("right", e)}
+              onPointerDown={(e) => startSplitterDrag("right", e)}
               onDoubleClick={() => setRightWidth(315)}
             />
             <aside className="right-drawer" style={{ width: rightWidth }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "6px 10px",
+                  borderBottom: "1px solid var(--border)",
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  color: "var(--muted)",
+                }}
+              >
+                <span>🎛 CLIP INSPECTOR</span>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setRightCollapsed(true)}
+                  title="Close Inspector"
+                >
+                  ✕
+                </button>
+              </div>
               <div className="drawer-scroll">
                 <MemoInspector
                   clip={selected?.clip ?? activeClip}
@@ -1576,7 +1615,7 @@ export function App() {
       <div
         className={`splitter-h ${draggingSplitter === "bottom" ? "dragging" : ""}`}
         title="Drag up/down to resize Timeline height (double-click to reset)"
-        onMouseDown={(e) => startSplitterDrag("bottom", e)}
+        onPointerDown={(e) => startSplitterDrag("bottom", e)}
         onDoubleClick={() => setTimelineHeight(255)}
       />
 

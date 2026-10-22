@@ -550,25 +550,28 @@ export function Preview({
 
         {splitCompare != null && clip && (
           <div
-            onMouseDown={(e) => {
+            onPointerDown={(e) => {
               const stage = stageRef.current;
               if (!stage) return;
-              const move = (ev: MouseEvent) => {
+              const move = (ev: PointerEvent) => {
                 const r = stage.getBoundingClientRect();
                 setSplitCompare(Math.max(5, Math.min(95, ((ev.clientX - r.left) / r.width) * 100)));
               };
               const up = () => {
-                window.removeEventListener("mousemove", move);
-                window.removeEventListener("mouseup", up);
+                window.removeEventListener("pointermove", move);
+                window.removeEventListener("pointerup", up);
+                window.removeEventListener("pointercancel", up);
               };
               move(e.nativeEvent);
-              window.addEventListener("mousemove", move);
-              window.addEventListener("mouseup", up);
+              window.addEventListener("pointermove", move);
+              window.addEventListener("pointerup", up);
+              window.addEventListener("pointercancel", up);
             }}
             style={{
               position: "absolute",
               inset: 0,
               cursor: "ew-resize",
+              touchAction: "none",
               zIndex: 4,
             }}
             title="Drag left/right to compare Original vs Color Graded After"
@@ -1369,7 +1372,7 @@ export function Timeline({
   };
 
   const beginClipDrag = (
-    e: React.MouseEvent,
+    e: React.PointerEvent,
     track: Track,
     clip: Clip,
     mode: "move" | "trim-left" | "trim-right",
@@ -1383,7 +1386,7 @@ export function Timeline({
     const origIn = clip.in;
     let latest = { start: origStart, duration: origDur, in: origIn };
 
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const dt = (ev.clientX - startX) / zoom;
       if (mode === "move") {
         const nextStart = applySnap(Math.max(0, origStart + dt), clip.id);
@@ -1408,8 +1411,9 @@ export function Timeline({
     };
 
     const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       setDragPreview(null);
       if (Math.abs(latest.start - origStart) > 0.005 || Math.abs(latest.duration - origDur) > 0.005) {
         onClipEdit(clip.id, {
@@ -1421,8 +1425,9 @@ export function Timeline({
       }
     };
 
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   return (
@@ -1530,20 +1535,23 @@ export function Timeline({
         <div className="timeline-inner" style={{ width, paddingTop: 0 }}>
           <div
             className="ruler"
-            onMouseDown={(e) => {
+            style={{ touchAction: "none" }}
+            onPointerDown={(e) => {
               const rulerEl = e.currentTarget;
               const seekFromClientX = (clientX: number) => {
                 const rect = rulerEl.getBoundingClientRect();
                 onSeek(Math.max(0, (clientX - rect.left) / zoom));
               };
               seekFromClientX(e.clientX);
-              const onMove = (ev: MouseEvent) => seekFromClientX(ev.clientX);
+              const onMove = (ev: PointerEvent) => seekFromClientX(ev.clientX);
               const onUp = () => {
-                window.removeEventListener("mousemove", onMove);
-                window.removeEventListener("mouseup", onUp);
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+                window.removeEventListener("pointercancel", onUp);
               };
-              window.addEventListener("mousemove", onMove);
-              window.addEventListener("mouseup", onUp);
+              window.addEventListener("pointermove", onMove);
+              window.addEventListener("pointerup", onUp);
+              window.addEventListener("pointercancel", onUp);
             }}
           >
             {ticks.map((s) => (
@@ -1678,7 +1686,7 @@ export function Timeline({
                         overflow: "hidden",
                       }}
                       title={`${clip.name} (${fmt(visStart)}–${fmt(visStart + visDur)}) — drag to move, drag edges to trim`}
-                      onMouseDown={(e) => beginClipDrag(e, track, clip, "move")}
+                      onPointerDown={(e) => beginClipDrag(e, track, clip, "move")}
                       onClick={() => onSelect(track.id, clip.id)}
                     >
                       {peaks && peaks.length > 0 && (
@@ -1711,13 +1719,14 @@ export function Timeline({
                       )}
                       <div
                         title="Trim In Point"
-                        onMouseDown={(e) => beginClipDrag(e, track, clip, "trim-left")}
+                        onPointerDown={(e) => beginClipDrag(e, track, clip, "trim-left")}
                         style={{
                           position: "absolute",
                           left: 0,
                           top: 0,
                           bottom: 0,
-                          width: 6,
+                          width: 9,
+                          touchAction: "none",
                           cursor: "ew-resize",
                           background: "rgba(255,255,255,0.28)",
                         }}
@@ -1728,13 +1737,14 @@ export function Timeline({
                       {clip.keyframes.length > 0 && <span className="clip-kf">◆{clip.keyframes.length}</span>}
                       <div
                         title="Trim Out Point"
-                        onMouseDown={(e) => beginClipDrag(e, track, clip, "trim-right")}
+                        onPointerDown={(e) => beginClipDrag(e, track, clip, "trim-right")}
                         style={{
                           position: "absolute",
                           right: 0,
                           top: 0,
                           bottom: 0,
-                          width: 6,
+                          width: 9,
+                          touchAction: "none",
                           cursor: "ew-resize",
                           background: "rgba(255,255,255,0.28)",
                         }}

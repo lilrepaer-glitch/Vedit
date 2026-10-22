@@ -2,16 +2,17 @@
 
 <img src="./docs/screenshots/hero-banner.jpg" alt="Vedit Studio Banner" width="100%" style="border-radius: 14px;" />
 
-# Vedit Studio (`v0.6.2`)
+# Vedit Studio (`v0.7.0`)
 
-**Clean Desktop NLE Video Editor for Windows PC • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU FFmpeg Render • Built-In MCP Server**
+**Native Multi-Track NLE Video Editor for Windows PC & Android • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU Render • Built-In MCP Server**
 
+[![Android APK](https://img.shields.io/badge/Android%208--15-Download%20Vedit.apk%20(v0.7.0)-22c55e?logo=android&logoColor=white)](https://github.com/lilrepaer-glitch/Vedit/raw/main/releases/Vedit.apk)
 [![Latest Release](https://img.shields.io/github/v/release/lilrepaer-glitch/Vedit?color=00c8d7&label=Download%20Windows%20Installer&logo=windows)](https://github.com/lilrepaer-glitch/Vedit/releases/latest)
-[![Tests](https://img.shields.io/badge/Vitest-91%2F91%20Passing-22c55e?logo=vitest)](./test)
-[![Codecs](https://img.shields.io/badge/FFmpeg-NVENC%20%7C%20AMF%20%7C%20QSV%20%7C%20ProRes-3b82f6)](#)
+[![Tests](https://img.shields.io/badge/Vitest-93%2F93%20Passing-22c55e?logo=vitest)](./test)
+[![Codecs](https://img.shields.io/badge/FFmpeg%20%2B%20MediaCodec-NVENC%20%7C%20AMF%20%7C%20QSV%20%7C%20ProRes%20%7C%20Android-3b82f6)](#)
 [![MCP Ready](https://img.shields.io/badge/MCP-Claude%20%7C%20Cursor%20%7C%20Agents-8b5cf6)](#mcp-server-claude-desktop--cursor--ai-agents)
 
-### [⬇ Download `Vedit_installer.exe` (Windows 10 / 11 — Self-Contained, Zero Dependencies)](https://github.com/lilrepaer-glitch/Vedit/releases/latest/download/Vedit_installer.exe)
+### [📱 Download `Vedit.apk` (Android 8.0 – 15 — 100% Standalone On-Device APK)](https://github.com/lilrepaer-glitch/Vedit/raw/main/releases/Vedit.apk) · [🪟 Download `Vedit_installer.exe` (Windows 10 / 11 — Self-Contained Installer)](https://github.com/lilrepaer-glitch/Vedit/releases/latest/download/Vedit_installer.exe)
 
 </div>
 
@@ -27,11 +28,11 @@
   <tr>
     <td width="50%">
       <img src="./docs/screenshots/shot-02-color-scopes.jpg" alt="Cinema 3D LUTs & Broadcast Scopes" width="100%" />
-      <p align="center"><strong>Cinema 3D <code>.cube</code> LUTs, Split-Wipe Compare &amp; Broadcast RGB Scopes</strong><br/><sub>Kodak 2383, Teal &amp; Orange, Fuji Eterna, Bleach Bypass, Cyberpunk Neon + live Before/After wipe</sub></p>
+      <p align="center"><strong>Cinema 3D <code>.cube</code> LUTs, Split-Wipe Compare &amp; Broadcast RGB Scopes</strong><br/><sub>Kodak 2383, Teal &amp; Orange, Fuji Eterna, Bleach Bypass, Cyberpunk Neon + live touch/pointer Split-Wipe</sub></p>
     </td>
     <td width="50%">
       <img src="./docs/screenshots/shot-03-ai-copilot.jpg" alt="Custom API, Model Picker & AI Copilot" width="100%" />
-      <p align="center"><strong>Custom API Key, Base URL &amp; Model Configurator</strong><br/><sub>OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama / LM Studio + live <code>/models</code> search</sub></p>
+      <p align="center"><strong>Custom API Key, Base URL &amp; Model Configurator</strong><br/><sub>OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama / LM Studio + live <code>/models</code> search on PC &amp; Android</sub></p>
     </td>
   </tr>
   <tr>
@@ -41,7 +42,7 @@
     </td>
     <td width="50%">
       <img src="./apps/desktop/public/showcase/motion-neon.jpg" alt="High-Speed VFX & Motion Presets" width="100%" />
-      <p align="center"><strong>60 FPS GPU Playhead, Speed Ramps, Keyframes &amp; PiP Layouts</strong><br/><sub>Smooth drag splitters, UI scaling (<code>70%–150%</code>), and native Win32 <code>F11</code> Fullscreen</sub></p>
+      <p align="center"><strong>Touch &amp; Mouse Multi-Track NLE Timeline, Speed Ramps &amp; PiP Layouts</strong><br/><sub>Smooth touch &amp; mouse splitters, UI scaling (<code>70%–150%</code>), and native Win32 / Android Immersive Fullscreen</sub></p>
     </td>
   </tr>
 </table>
@@ -56,16 +57,24 @@
 
 ---
 
-## Highlights in `v0.6.2`
+## Highlights in `v0.7.0`
 
-- **Clean 4-Zone Resizable Studio Workspace**: Dedicated section rail (*Media*, *Audio*, *Text*, *Effects*, *Motion*, *AI Edit*, *AI Gen*, *Studio*), photographic live-filtered LUT/VFX preview cards, universal `Ctrl+K` instant search, smooth drag resizers between all panels, global UI zoom (`70% – 150%`), and top-right native Win32 **Fullscreen (`⛶` / `F11`)**.
+- **Native Standalone Android App (`Vedit.apk` — `com.vedit.studio`)**: Signed with APK Signature Scheme `v2 + v3` (`minSdk 26`, `targetSdk 34`, 4-byte zipaligned uncompressed `resources.arsc`). Runs 100% locally on Android phones & tablets with zero external server required — native multi-file Gallery Video/Audio/Photo picker, touch timeline scrubbing & trim handles, 3D LUTs & Split-Wipe, Custom API Key / Base URL / Model Copilot, immersive edge-to-edge fullscreen, and direct video export straight into `Downloads/Vedit/` + Android Share Sheet.
+- **Native Windows Desktop App (`Vedit_installer.exe`)**: 4-Zone Resizable Studio Workspace, universal `Ctrl+K` instant search, hardware-accelerated FFmpeg (`NVENC` / `AMF` / `QSV` / `ProRes` / `HEVC`), in-place NSIS `Update` installer, and 1-click **`🔄 Update`** self-updater.
 - **Interactive Before / After Split-Wipe & Broadcast Scopes**: Compare raw vs. color-graded video directly inside the Player monitor (`⇆ Split Wipe`) alongside live RGB Histograms & IRE Waveforms (`📊 Scopes`).
-- **Bring Your Own API Key, Base URL & AI Model (`⚙ API & Model`)**: Connect OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama, LM Studio, or any custom OpenAI-compatible `/v1` endpoint with live `/models` discovery, connection testing, and natural-language AI Copilot execution.
-- **In-Place NSIS `Update` Installer + 1-Click App Self-Updater**: `Vedit_installer.exe` detects existing installations and updates cleanly in place while keeping all user projects & API settings intact — or update directly from the top bar via **`🔄 Update`**.
+- **Bring Your Own API Key, Base URL & AI Model (`⚙ API & Model`)**: Connect OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama, LM Studio, or any custom OpenAI-compatible `/v1` endpoint with live `/models` discovery, connection testing, and natural-language AI Copilot execution on both Windows and Android.
 
 ---
 
-## One-Line Windows PowerShell Install / Update
+## Install on Android (`Vedit.apk`)
+
+1. Tap **[Download `Vedit.apk`](https://github.com/lilrepaer-glitch/Vedit/raw/main/releases/Vedit.apk)** directly on your Android phone or tablet (Android 8.0 – Android 15).
+2. Open the downloaded **`Vedit.apk`** file and tap **Install** (allow installation from your browser if prompted the first time).
+3. Launch **Vedit Studio** — works 100% offline immediately, with optional **⚙ API & Model** configuration whenever you want cloud LLM AI editing.
+
+---
+
+## Install / Update on Windows 10 & 11 (`Vedit_installer.exe`)
 
 ```powershell
 irm https://raw.githubusercontent.com/lilrepaer-glitch/Vedit/main/vedit-install.ps1 | iex
@@ -75,12 +84,13 @@ Or download **`Vedit_installer.exe`** directly from **[GitHub Releases](https://
 
 ---
 
-## Quick Start (Development)
+## Quick Start (Development & Building From Source)
 
 ```bash
 npm ci
-npm test                        # Run all 91 end-to-end Vitest tests
+npm test                        # Run all 93 end-to-end Vitest tests (including Android APK binary checks)
 npm run build                   # Build TypeScript backend + CLI + MCP
+npm run dist:apk                # Compile & sign standalone Android releases/Vedit.apk
 npm run dev:api                 # Start local Vedit Engine on http://127.0.0.1:47000
 npm run dev:ui                  # Start React + Vite Studio UI on http://localhost:5173
 ```

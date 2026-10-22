@@ -178,6 +178,13 @@ const isDesktop =
     location.hostname.endsWith(".localhost"));
 const API_ORIGIN = env?.VITE_API_BASE ?? (isDesktop ? "http://127.0.0.1:47000" : "");
 
+import {
+  IS_ANDROID_APK,
+  mobileApi,
+  resolveMobileMediaUrl,
+  subscribeMobileChanges,
+} from "./mobileRuntime";
+
 const API_TOKEN = env?.VITE_API_TOKEN ?? "dev";
 
 export function apiUrl(path: string): string {
@@ -185,6 +192,7 @@ export function apiUrl(path: string): string {
 }
 
 export function withToken(url: string): string {
+  if (IS_ANDROID_APK) return resolveMobileMediaUrl(url);
   const abs = url.startsWith("/") ? `${API_ORIGIN}${url}` : url;
   return `${abs}${abs.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
 }
@@ -230,7 +238,7 @@ export interface GenerateMediaRequest {
   start?: number;
 }
 
-export const api = {
+const rawApi = {
   listProjects: () => req<{ projects: Array<{ id: string; name: string }> }>("GET", "/projects"),
   getProject: (id: string) => req<{ project: Project }>("GET", `/projects/${id}`),
   createProject: (name: string, sample = true) => req<{ project: Project }>("POST", "/projects", { name, sample }),
@@ -507,6 +515,8 @@ export const api = {
     req<{ supported: boolean; fullscreen: boolean }>("POST", "/window/fullscreen", { mode }),
 };
 
+export const api: typeof rawApi = IS_ANDROID_APK ? mobileApi : rawApi;
+
 export let currentId = "";
 
 export function setCurrentId(id: string): void {
@@ -514,6 +524,7 @@ export function setCurrentId(id: string): void {
 }
 
 export function connectWs(onChange: () => void): () => void {
+  if (IS_ANDROID_APK) return subscribeMobileChanges(onChange);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const wsUrl = isDesktop ? "ws://127.0.0.1:47000/ws" : `${proto}://${location.host}/ws`;
   let ws: WebSocket | null = null;
