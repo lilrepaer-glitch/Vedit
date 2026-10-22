@@ -307,11 +307,19 @@ const rawApi = {
     ),
   updateAsset: (assetId: string, patch: { name?: string; path?: string; tags?: string[] }) =>
     req<{ asset: Asset }>(`PATCH`, `/projects/${currentId}/assets/${assetId}`, patch),
-  runCopilot: (prompt: string) =>
+  runCopilot: (
+    prompt: string,
+    context?: {
+      playhead?: number;
+      selectedClipId?: string | null;
+      history?: Array<{ role: "user" | "assistant"; text: string }>;
+    },
+  ) =>
     req<{ summary: string; checkpointId: string; stepsExecuted: Array<{ step: string; detail: string }> }>(
       "POST",
       `/projects/${currentId}/copilot`,
-      { prompt },
+      { prompt, ...(context ?? {}) },
+      65000,
     ),
   applyLut: (clipId: string, lutId: string) =>
     req<{ cubePath: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/lut`, { lutId }),

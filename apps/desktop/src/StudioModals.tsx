@@ -26,6 +26,8 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
   const [preset, setPreset] = useState(initial?.providerPreset ?? "openai");
   const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? "https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
+  const [hasSavedKey, setHasSavedKey] = useState(Boolean(initial?.hasApiKey));
+  const [maskedSavedKey, setMaskedSavedKey] = useState(initial?.maskedApiKey ?? "");
   const [showKey, setShowKey] = useState(false);
   const [model, setModel] = useState(initial?.model ?? "gpt-4o-mini");
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
@@ -42,6 +44,8 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
         setPreset(cfg.providerPreset);
         setBaseUrl(cfg.baseUrl);
         setModel(cfg.model);
+        setHasSavedKey(cfg.hasApiKey);
+        setMaskedSavedKey(cfg.maskedApiKey);
       })
       .catch(() => undefined);
   }, []);
@@ -121,10 +125,12 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
       });
       setBaseUrl(saved.baseUrl);
       setModel(saved.model);
+      setHasSavedKey(saved.hasApiKey);
+      setMaskedSavedKey(saved.maskedApiKey);
+      if (apiKey.trim()) setApiKey("");
 
       const res = await api.testApiSettings({
         baseUrl: saved.baseUrl,
-        apiKey: apiKey.trim() || undefined,
         model: saved.model,
       });
       onSaved(saved, `Connected: ${res.model} (${res.latencyMs}ms)`);
@@ -180,8 +186,8 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-secondary)" }}>
               <span>API Key</span>
-              {initial?.hasApiKey && (
-                <span style={{ color: "var(--success)", fontWeight: 500 }}>Active: {initial.maskedApiKey}</span>
+              {hasSavedKey && (
+                <span style={{ color: "var(--success)", fontWeight: 500 }}>Active: {maskedSavedKey}</span>
               )}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -190,8 +196,8 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
                 value={apiKey}
                 onChange={(e) => handleKeyInput(e.target.value)}
                 placeholder={
-                  initial?.hasApiKey
-                    ? `Saved (${initial.maskedApiKey}) — paste new key to replace`
+                  hasSavedKey
+                    ? `Saved (${maskedSavedKey}) — paste new key to replace`
                     : "Paste sk-..., AIza..., sk-ant-..., sk-or-..., gsk_..."
                 }
                 autoComplete="off"
@@ -201,12 +207,15 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
               <button type="button" onClick={() => setShowKey((s) => !s)}>
                 {showKey ? "Hide" : "Show"}
               </button>
-              {initial?.hasApiKey && (
+              {hasSavedKey && (
                 <button
                   type="button"
                   className="btn-danger"
                   onClick={async () => {
                     const cleared = await api.saveApiSettings({ clearApiKey: true });
+                    setHasSavedKey(false);
+                    setMaskedSavedKey("");
+                    setApiKey("");
                     onSaved(cleared, "API key cleared");
                     setStatusMsg({ ok: true, text: "API key removed." });
                   }}

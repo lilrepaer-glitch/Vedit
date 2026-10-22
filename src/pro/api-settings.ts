@@ -1,8 +1,8 @@
-// Universal Multi-Provider API Settings & Protocol Engine for Vedit Studio (v0.8.0).
-// Supports OpenAI, Google Gemini, Anthropic Claude, OpenRouter, Groq, DeepSeek,
-// NVIDIA NIM, xAI Grok, Ollama, LM Studio, and any custom OpenAI-compatible proxy —
-// with automatic API key prefix detection, URL sanitization, native Anthropic `/v1/messages`
-// support, and reasoning-model (`o1`/`o3`/`o4`/`gpt-5`) parameter compatibility.
+// Universal Multi-Provider Resilient AI Protocol Engine for Vedit Studio (v0.9.1 / F12).
+// Supports OpenAI, Google Gemini, Anthropic Claude, OpenRouter (including `:free`), Groq,
+// DeepSeek, NVIDIA NIM, xAI Grok, Ollama, LM Studio, and any custom OpenAI-compatible proxy —
+// with strict saved-model priority, automatic cross-provider mismatch recovery, multi-attempt
+// backoff + model failover on 429/503, balanced JSON extraction, and message alternation guarantees.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -28,7 +28,7 @@ export const API_PROVIDER_PRESETS: ApiPresetInfo[] = [
     label: "Google Gemini (AI Studio)",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     requiresKey: true,
-    suggestedModels: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    suggestedModels: ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"],
   },
   {
     id: "anthropic",
@@ -44,10 +44,11 @@ export const API_PROVIDER_PRESETS: ApiPresetInfo[] = [
     requiresKey: true,
     suggestedModels: [
       "openai/gpt-4o-mini",
-      "anthropic/claude-sonnet-4",
+      "openrouter/free",
+      "meta-llama/llama-3.3-70b-instruct:free",
       "google/gemini-2.5-flash",
+      "anthropic/claude-sonnet-4",
       "deepseek/deepseek-chat",
-      "meta-llama/llama-3.3-70b-instruct",
     ],
   },
   {
@@ -186,7 +187,6 @@ export function normalizeBaseUrl(raw: string): string {
     return `${u}/v1`;
   }
   if (!u) return "https://api.openai.com/v1";
-  // Strip accidentally pasted terminal paths
   u = u.replace(/\/(chat\/completions|messages|completions|models)$/i, "");
   if (/^https?:\/\/generativelanguage\.googleapis\.com(\/v1beta)?$/i.test(u)) {
     return "https://generativelanguage.googleapis.com/v1beta/openai";
@@ -204,7 +204,276 @@ export function normalizeBaseUrl(raw: string): string {
 }
 
 function isAnthropicEndpoint(baseUrl: string, apiKey: string): boolean {
-  return /anthropic\.com/i.test(baseUrl) || sanitizeApiKey(apiKey).startsWith("sk-ant-");
+  return /anthropic\.com/i.test(baseUrl) || (sanitizeApiKey(apiKey).startsWith("sk-ant-") && !/openrouter\.ai/i.test(baseUrl));
+}
+
+/**
+ * Resolves the target Base URL and Model while strictly respecting user-configured values first,
+ * and automatically healing cross-provider model leftover mismatches (e.g., `gpt-4o-mini` sent to Gemini/Groq).
+ */
+export function resolveEndpointAndModel(
+  opts: { baseUrl?: string; apiKey?: string; model?: string } | undefined,
+  saved: { baseUrl: string; apiKey: string; model: string },
+): { apiKey: string; baseUrl: string; model: string; fallbacks: string[] } {
+  const apiKey =
+    opts?.apiKey && !opts.apiKey.includes("••••")
+      ? sanitizeApiKey(opts.apiKey)
+      : sanitizeApiKey(saved.apiKey);
+  const autoPreset = detectPresetFromKey(apiKey);
+
+  // If saved.baseUrl is still untouched OpenAI default while the key unmistakably belongs to Gemini/Groq/OpenRouter/Anthropic/NVIDIA/xAI, route to that provider
+  const savedBaseNorm = normalizeBaseUrl(saved.baseUrl);
+  const effectiveSavedBase =
+    autoPreset && savedBaseNorm === "https://api.openai.com/v1" && autoPreset.id !== "openai"
+      ? autoPreset.baseUrl
+      : savedBaseNorm;
+
+  const baseUrl = normalizeBaseUrl(opts?.baseUrl || effectiveSavedBase || autoPreset?.baseUrl || "https://api.openai.com/v1");
+  let model = (opts?.model || saved.model || autoPreset?.suggestedModels[0] || "gpt-4o-mini").trim();
+
+  // Heal cross-provider model leftovers without touching valid user models (e.g. OpenRouter `:free` models!)
+  if (/api\.openai\.com/i.test(baseUrl) && model.startsWith("openai/")) {
+    model = model.slice("openai/".length);
+  } else if (/generativelanguage\.googleapis\.com/i.test(baseUrl)) {
+    model = model.replace(/^models\//, "").replace(/^google\//, "");
+    if (!/^(gemini|gemma|learnlm)/i.test(model)) model = "gemini-2.5-flash";
+  } else if (/api\.anthropic\.com/i.test(baseUrl)) {
+    model = model.replace(/^anthropic\//, "");
+    if (!/^claude/i.test(model)) model = "claude-sonnet-4-20250514";
+  } else if (/api\.groq\.com/i.test(baseUrl)) {
+    if (/^(gpt-|claude-|gemini-)/i.test(model)) model = "llama-3.3-70b-versatile";
+  } else if (/api\.deepseek\.com/i.test(baseUrl)) {
+    model = model.replace(/^deepseek\//, "");
+    if (!/^deepseek/i.test(model)) model = "deepseek-chat";
+  } else if (/api\.x\.ai/i.test(baseUrl)) {
+    if (!/^grok/i.test(model)) model = "grok-2-latest";
+  }
+
+  // Build resilient same-provider fallback chain in case primary model is rate-limited (429) or overloaded (503)
+  const fallbacks: string[] = [model];
+  const pushUnique = (m: string) => {
+    if (m && !fallbacks.includes(m)) fallbacks.push(m);
+  };
+  if (/generativelanguage\.googleapis\.com/i.test(baseUrl)) {
+    pushUnique("gemini-2.5-flash");
+    pushUnique("gemini-2.0-flash");
+  } else if (/api\.groq\.com/i.test(baseUrl)) {
+    pushUnique("llama-3.3-70b-versatile");
+    pushUnique("llama-3.1-8b-instant");
+  } else if (/openrouter\.ai/i.test(baseUrl) && (model.endsWith(":free") || model === "openrouter/free")) {
+    pushUnique("openrouter/free");
+    pushUnique("meta-llama/llama-3.3-70b-instruct:free");
+    pushUnique("google/gemma-3-27b-it:free");
+  } else if (/api\.openai\.com/i.test(baseUrl)) {
+    pushUnique("gpt-4o-mini");
+  } else if (/api\.anthropic\.com/i.test(baseUrl)) {
+    pushUnique("claude-3-5-haiku-latest");
+  } else if (/api\.deepseek\.com/i.test(baseUrl)) {
+    pushUnique("deepseek-chat");
+  }
+
+  return { apiKey, baseUrl, model, fallbacks };
+}
+
+/**
+ * Ensures strictly valid chat message arrays across strict providers (Anthropic, Gemini, Mistral, OpenAI):
+ * merges consecutive same-role turns and strips empty messages so multi-turn chats NEVER fail with HTTP 400.
+ */
+export function sanitizeChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  const systems: string[] = [];
+  const convo: ChatMessage[] = [];
+  for (const m of messages) {
+    const text = typeof m?.content === "string" ? m.content.trim() : String(m?.content ?? "").trim();
+    if (!text) continue;
+    if (m.role === "system") {
+      systems.push(text);
+      continue;
+    }
+    const role: "user" | "assistant" = m.role === "assistant" ? "assistant" : "user";
+    const prev = convo[convo.length - 1];
+    if (prev && prev.role === role) {
+      prev.content = `${prev.content}\n\n${text}`;
+    } else {
+      convo.push({ role, content: text });
+    }
+  }
+  if (convo.length > 0 && convo[0]!.role === "assistant") {
+    convo.shift();
+  }
+  if (convo.length === 0) {
+    convo.push({ role: "user", content: "OK" });
+  }
+  return systems.length > 0 ? [{ role: "system", content: systems.join("\n\n") }, ...convo] : convo;
+}
+
+/** Extracts text safely whether `message.content` is a string, content-part array, or reasoning response. */
+export function extractAssistantContent(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const root = payload as {
+    content?: unknown;
+    choices?: Array<{
+      message?: { content?: unknown; reasoning_content?: string; reasoning?: string };
+      text?: string;
+    }>;
+  };
+  const msg = root.choices?.[0]?.message;
+  const rawContent = msg?.content ?? root.content;
+  if (typeof rawContent === "string" && rawContent.trim()) {
+    return rawContent.trim();
+  }
+  if (Array.isArray(rawContent)) {
+    const joined = rawContent
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object") {
+          const p = part as { type?: string; text?: string };
+          if (p.type === "thinking") return "";
+          return typeof p.text === "string" ? p.text : "";
+        }
+        return "";
+      })
+      .join("")
+      .trim();
+    if (joined) return joined;
+  }
+  if (typeof root.choices?.[0]?.text === "string" && root.choices[0].text.trim()) {
+    return root.choices[0].text.trim();
+  }
+  const reasoningFallback = msg?.reasoning_content || msg?.reasoning || "";
+  return typeof reasoningFallback === "string" ? reasoningFallback.trim() : "";
+}
+
+/** Repairs unescaped literal control characters inside JSON strings & trailing commas. */
+function normalizeLooseJsonCandidate(src: string): string {
+  let out = "";
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i]!;
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inStr) {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      out += ch;
+      continue;
+    }
+    if (inStr) {
+      if (ch === "\n") {
+        out += "\\n";
+        continue;
+      }
+      if (ch === "\r") continue;
+      if (ch === "\t") {
+        out += "\\t";
+        continue;
+      }
+    }
+    out += ch;
+  }
+  // Close dangling open string/brackets if truncated by token limit
+  if (inStr) out += '"';
+  return out.replace(/,\s*([}\]])/g, "$1");
+}
+
+/**
+ * Crash-proof balanced JSON extractor for LLM outputs:
+ * - Strips `<think>...</think>` reasoning blocks and markdown code fences first
+ * - Finds balanced `{ ... }` objects from the end so `{...}` inside explanations never corrupts parsing
+ * - Auto-repairs raw newlines inside JSON strings, trailing commas, and truncated closing brackets
+ * - Never throws under any input!
+ */
+export function parseAiJsonSafe<T = Record<string, unknown>>(raw: string): T | null {
+  if (!raw || typeof raw !== "string") return null;
+  const cleaned = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/```(?:json)?\s*([\s\S]*?)```/gi, "$1")
+    .trim();
+
+  if (!cleaned) return null;
+
+  // Collect all balanced `{ ... }` spans
+  const candidates: string[] = [];
+  const starts: number[] = [];
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inStr) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (inStr) continue;
+    if (ch === "{") {
+      starts.push(i);
+    } else if (ch === "}" && starts.length > 0) {
+      const openIdx = starts.pop()!;
+      if (starts.length === 0) {
+        candidates.push(cleaned.slice(openIdx, i + 1));
+      }
+    }
+  }
+
+  // If truncated mid-object (`starts.length > 0`), build a bracket-closed repair candidate too!
+  if (starts.length > 0) {
+    let tail = normalizeLooseJsonCandidate(cleaned.slice(starts[0]!));
+    // Re-count open `{` and `[` outside strings and close them cleanly
+    const stack: string[] = [];
+    let sIn = false;
+    let sEsc = false;
+    for (let i = 0; i < tail.length; i++) {
+      const c = tail[i]!;
+      if (sEsc) {
+        sEsc = false;
+        continue;
+      }
+      if (c === "\\" && sIn) {
+        sEsc = true;
+        continue;
+      }
+      if (c === '"') {
+        sIn = !sIn;
+        continue;
+      }
+      if (sIn) continue;
+      if (c === "{") stack.push("}");
+      else if (c === "[") stack.push("]");
+      else if ((c === "}" || c === "]") && stack.length > 0) stack.pop();
+    }
+    tail = tail.replace(/,\s*$/, "") + stack.reverse().join("");
+    candidates.push(tail);
+  }
+
+  // Try parsing from the last complete top-level `{...}` backwards
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const cand = candidates[i]!;
+    try {
+      return JSON.parse(cand) as T;
+    } catch {
+      try {
+        return JSON.parse(normalizeLooseJsonCandidate(cand)) as T;
+      } catch {
+        /* try next candidate */
+      }
+    }
+  }
+  return null;
 }
 
 function applyEnvKeys(cfg: StoredApiConfig): void {
@@ -344,12 +613,7 @@ export async function fetchRemoteModels(override?: {
   baseUrl?: string;
   apiKey?: string;
 }): Promise<{ models: string[]; source: "remote" | "preset"; baseUrl: string }> {
-  const rawKey =
-    override?.apiKey && !override.apiKey.includes("••••")
-      ? sanitizeApiKey(override.apiKey)
-      : sanitizeApiKey(runtimeConfig.apiKey);
-  const autoPreset = detectPresetFromKey(rawKey);
-  const baseUrl = normalizeBaseUrl(override?.baseUrl || autoPreset?.baseUrl || runtimeConfig.baseUrl);
+  const { apiKey: rawKey, baseUrl } = resolveEndpointAndModel(override, runtimeConfig);
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (isAnthropicEndpoint(baseUrl, rawKey)) {
@@ -360,7 +624,7 @@ export async function fetchRemoteModels(override?: {
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 14000);
+  const timer = setTimeout(() => controller.abort(), 16000);
   try {
     const res = await fetch(`${baseUrl}/models`, { headers, signal: controller.signal });
     if (!res.ok) {
@@ -400,8 +664,10 @@ export async function fetchRemoteModels(override?: {
   }
 }
 
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function callChatCompletion(
-  messages: ChatMessage[],
+  rawMessages: ChatMessage[],
   opts: {
     baseUrl?: string;
     apiKey?: string;
@@ -411,134 +677,161 @@ export async function callChatCompletion(
     timeoutMs?: number;
   } = {},
 ): Promise<{ content: string; model: string; latencyMs: number }> {
-  const rawKey =
-    opts.apiKey && !opts.apiKey.includes("••••")
-      ? sanitizeApiKey(opts.apiKey)
-      : sanitizeApiKey(runtimeConfig.apiKey);
-  const autoPreset = detectPresetFromKey(rawKey);
-  const baseUrl = normalizeBaseUrl(opts.baseUrl || autoPreset?.baseUrl || runtimeConfig.baseUrl);
-  let model = (opts.model || autoPreset?.suggestedModels[0] || runtimeConfig.model || "gpt-4o-mini").trim();
-
-  // Strip OpenRouter `openai/` prefix when talking directly to api.openai.com
-  if (/api\.openai\.com/i.test(baseUrl) && model.startsWith("openai/")) {
-    model = model.slice("openai/".length);
-  }
+  const { apiKey: rawKey, baseUrl, fallbacks } = resolveEndpointAndModel(opts, runtimeConfig);
+  const messages = sanitizeChatMessages(rawMessages);
+  const maxTokens = opts.maxTokens ?? 1800;
 
   const started = Date.now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 35000);
+  let lastError: Error | null = null;
 
-  try {
-    // Native Anthropic `/v1/messages` support
-    if (isAnthropicEndpoint(baseUrl, rawKey)) {
-      const systemText = messages
-        .filter((m) => m.role === "system")
-        .map((m) => m.content)
-        .join("\n\n");
-      const userTurns = messages
-        .filter((m) => m.role !== "system")
-        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-      const anthropicBase = baseUrl.replace(/\/openai$/i, "");
-      const res = await fetch(`${anthropicBase}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": rawKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: opts.maxTokens ?? 1024,
-          ...(systemText ? { system: systemText } : {}),
-          messages: userTurns.length ? userTurns : [{ role: "user", content: "Hello" }],
-        }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        let detail = `HTTP ${res.status}`;
-        try {
-          const j = (await res.json()) as { error?: { message?: string } };
-          detail = j?.error?.message || detail;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(`Anthropic API error: ${detail}`);
-      }
-      const data = (await res.json()) as { model?: string; content?: Array<{ text?: string }> };
-      return {
-        content: (data.content ?? []).map((c) => c.text ?? "").join("").trim(),
-        model: data.model || model,
-        latencyMs: Date.now() - started,
-      };
-    }
+  for (let modelIdx = 0; modelIdx < fallbacks.length; modelIdx++) {
+    const candidateModel = fallbacks[modelIdx]!;
+    const maxAttempts = modelIdx === 0 ? 2 : 1;
 
-    // Standard OpenAI-compatible `/chat/completions` with automatic reasoning-model retry
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://vedit.studio",
-      "X-Title": "Vedit Studio",
-    };
-    if (rawKey) headers.Authorization = `Bearer ${rawKey}`;
-
-    const isReasoningModel = /^(o1|o3|o4|gpt-5)/i.test(model);
-    const buildPayload = (compatMode: boolean) =>
-      compatMode || isReasoningModel
-        ? {
-            model,
-            messages,
-            max_completion_tokens: opts.maxTokens ?? 1024,
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 45000);
+      try {
+        if (isAnthropicEndpoint(baseUrl, rawKey)) {
+          const systemText = messages
+            .filter((m) => m.role === "system")
+            .map((m) => m.content)
+            .join("\n\n");
+          const userTurns = messages
+            .filter((m) => m.role !== "system")
+            .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+          const anthropicBase = baseUrl.replace(/\/openai$/i, "");
+          const res = await fetch(`${anthropicBase}/messages`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": rawKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify({
+              model: candidateModel,
+              max_tokens: maxTokens,
+              ...(systemText ? { system: systemText } : {}),
+              messages: userTurns.length ? userTurns : [{ role: "user", content: "OK" }],
+            }),
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            const rawErr = await res.text().catch(() => "");
+            if ((res.status === 429 || res.status >= 500 || res.status === 404) && (attempt + 1 < maxAttempts || modelIdx + 1 < fallbacks.length)) {
+              lastError = new Error(`Anthropic HTTP ${res.status}: ${rawErr.slice(0, 160)}`);
+              if (attempt + 1 < maxAttempts) await sleepMs(750 * (attempt + 1));
+              continue;
+            }
+            let detail = `HTTP ${res.status}`;
+            try {
+              const j = JSON.parse(rawErr) as { error?: { message?: string } };
+              detail = j?.error?.message || detail;
+            } catch {
+              if (rawErr.trim()) detail = rawErr.slice(0, 180);
+            }
+            throw new Error(`Anthropic API error: ${detail}`);
           }
-        : {
-            model,
-            messages,
-            temperature: opts.temperature ?? runtimeConfig.temperature ?? 0.2,
-            max_tokens: opts.maxTokens ?? 1024,
+          const data = (await res.json()) as { model?: string; content?: Array<{ text?: string }> };
+          return {
+            content: extractAssistantContent(data),
+            model: data.model || candidateModel,
+            latencyMs: Date.now() - started,
           };
+        }
 
-    let res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(buildPayload(false)),
-      signal: controller.signal,
-    });
+        // OpenAI-compatible `/chat/completions` — ONLY attach OpenRouter headers for openrouter.ai!
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (/openrouter\.ai/i.test(baseUrl)) {
+          headers["HTTP-Referer"] = "https://vedit.studio";
+          headers["X-Title"] = "Vedit Studio";
+        }
+        if (rawKey) headers.Authorization = `Bearer ${rawKey}`;
 
-    if (res.status === 400 && !isReasoningModel) {
-      const errPreview = await res.clone().text().catch(() => "");
-      if (/max_tokens|max_completion_tokens|temperature/i.test(errPreview)) {
-        res = await fetch(`${baseUrl}/chat/completions`, {
+        const isReasoningModel = /^(o1|o3|o4|gpt-5|deepseek-reasoner|qwq)/i.test(candidateModel);
+        const buildPayload = (compatMode: boolean) =>
+          compatMode || isReasoningModel
+            ? {
+                model: candidateModel,
+                messages,
+                max_completion_tokens: maxTokens,
+              }
+            : {
+                model: candidateModel,
+                messages,
+                temperature: opts.temperature ?? runtimeConfig.temperature ?? 0.2,
+                max_tokens: maxTokens,
+              };
+
+        let res = await fetch(`${baseUrl}/chat/completions`, {
           method: "POST",
           headers,
-          body: JSON.stringify(buildPayload(true)),
+          body: JSON.stringify(buildPayload(false)),
           signal: controller.signal,
         });
+
+        if (res.status === 400 && !isReasoningModel) {
+          const errPreview = await res.clone().text().catch(() => "");
+          if (/max_tokens|max_completion_tokens|temperature|unsupported_parameter/i.test(errPreview)) {
+            res = await fetch(`${baseUrl}/chat/completions`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(buildPayload(true)),
+              signal: controller.signal,
+            });
+          }
+        }
+
+        if (!res.ok) {
+          const rawErr = await res.text().catch(() => "");
+          const retryable =
+            res.status === 429 ||
+            res.status === 408 ||
+            res.status === 404 ||
+            res.status === 402 ||
+            res.status >= 500;
+          let detail = `HTTP ${res.status} ${res.statusText}`;
+          try {
+            const errBody = JSON.parse(rawErr) as { error?: { message?: string } | string; message?: string };
+            if (typeof errBody?.error === "string") detail = errBody.error;
+            else if (errBody?.error?.message) detail = errBody.error.message;
+            else if (errBody?.message) detail = errBody.message;
+          } catch {
+            if (rawErr.trim()) detail = rawErr.slice(0, 180);
+          }
+          lastError = new Error(`${detail} (${candidateModel})`);
+          if (retryable && (attempt + 1 < maxAttempts || modelIdx + 1 < fallbacks.length)) {
+            if (attempt + 1 < maxAttempts) await sleepMs(750 * (attempt + 1));
+            continue;
+          }
+          throw lastError;
+        }
+
+        const data = (await res.json()) as { model?: string };
+        return {
+          content: extractAssistantContent(data),
+          model: data.model || candidateModel,
+          latencyMs: Date.now() - started,
+        };
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const isNetErr = /fetch|network|socket|econnreset|etimedout|abort/i.test(lastError.message);
+        if (isNetErr && attempt + 1 < maxAttempts) {
+          await sleepMs(600 * (attempt + 1));
+          continue;
+        }
+        if (!isNetErr && modelIdx + 1 >= fallbacks.length) {
+          throw lastError;
+        }
+      } finally {
+        clearTimeout(timer);
       }
     }
-
-    if (!res.ok) {
-      let detail = `HTTP ${res.status} ${res.statusText}`;
-      try {
-        const errBody = (await res.json()) as { error?: { message?: string } | string };
-        if (typeof errBody?.error === "string") detail = errBody.error;
-        else if (errBody?.error?.message) detail = errBody.error.message;
-      } catch {
-        /* ignore */
-      }
-      throw new Error(`${detail} (${baseUrl})`);
-    }
-
-    const data = (await res.json()) as {
-      model?: string;
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content?.trim() ?? "";
-    return {
-      content,
-      model: data.model || model,
-      latencyMs: Date.now() - started,
-    };
-  } finally {
-    clearTimeout(timer);
   }
+
+  throw lastError ?? new Error("AI request failed");
 }
 
 export async function testApiConnection(override?: {
@@ -546,27 +839,19 @@ export async function testApiConnection(override?: {
   apiKey?: string;
   model?: string;
 }): Promise<{ ok: boolean; model: string; baseUrl: string; latencyMs: number; reply: string }> {
-  const rawKey =
-    override?.apiKey && !override.apiKey.includes("••••")
-      ? sanitizeApiKey(override.apiKey)
-      : sanitizeApiKey(runtimeConfig.apiKey);
-  const autoPreset = detectPresetFromKey(rawKey);
-  const baseUrl = normalizeBaseUrl(override?.baseUrl || autoPreset?.baseUrl || runtimeConfig.baseUrl);
-  const result = await callChatCompletion(
-    [{ role: "user", content: "Reply with: OK" }],
-    {
-      baseUrl,
-      apiKey: rawKey,
-      model: override?.model,
-      maxTokens: 32,
-      timeoutMs: 20000,
-    },
-  );
+  const { apiKey: rawKey, baseUrl, model } = resolveEndpointAndModel(override, runtimeConfig);
+  const result = await callChatCompletion([{ role: "user", content: "Reply with the single word: OK" }], {
+    baseUrl,
+    apiKey: rawKey,
+    model,
+    maxTokens: 256,
+    timeoutMs: 25000,
+  });
   return {
     ok: true,
     model: result.model,
     baseUrl,
     latencyMs: result.latencyMs,
-    reply: result.content || "Connected",
+    reply: result.content || "OK",
   };
 }

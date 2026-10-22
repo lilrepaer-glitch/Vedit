@@ -693,15 +693,20 @@ export function App() {
     }
   };
 
-  // AI Assistant execution
+  // AI Assistant execution (multi-turn context + selected clip + playhead aware)
   const sendAiPrompt = async (customText?: string) => {
     const prompt = (customText ?? aiInput).trim();
     if (!prompt || aiBusy || !project) return;
     if (!customText) setAiInput("");
+    const priorHistory = aiMessages.slice(-6);
     setAiMessages((prev) => [...prev, { role: "user", text: prompt }]);
     setAiBusy(true);
     try {
-      const res = await api.runCopilot(prompt);
+      const res = await api.runCopilot(prompt, {
+        playhead,
+        selectedClipId,
+        history: priorHistory,
+      });
       const detail = res.stepsExecuted?.length
         ? `${res.summary}\n(${res.stepsExecuted.map((s) => `${s.step}: ${s.detail}`).join(" · ")})`
         : res.summary;
@@ -1913,28 +1918,43 @@ export function App() {
             >
               <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12 }}>
                 <span className={`status-dot ${apiSettings?.hasApiKey ? "online" : ""}`} />
-                <span>{apiSettings?.hasApiKey ? apiSettings.model : "Offline Studio Mode"}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 }}>
+                  {apiSettings?.hasApiKey ? apiSettings.model : "Offline Studio Mode"}
+                </span>
               </div>
-              <button type="button" onClick={() => setShowApiModal(true)} style={{ padding: "4px 9px", fontSize: 11.5 }}>
-                <IconKey size={13} /> {apiSettings?.hasApiKey ? "Change API" : "Connect API"}
-              </button>
+              <div style={{ display: "flex", gap: 4 }}>
+                {aiMessages.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setAiMessages([])}
+                    style={{ padding: "4px 7px", fontSize: 11 }}
+                    title="Clear AI conversation"
+                  >
+                    Clear
+                  </button>
+                )}
+                <button type="button" onClick={() => setShowApiModal(true)} style={{ padding: "4px 9px", fontSize: 11.5 }}>
+                  <IconKey size={13} /> {apiSettings?.hasApiKey ? "API" : "Connect API"}
+                </button>
+              </div>
             </div>
 
             <div className="pill-strip">
               {[
                 { label: "9:16 Reels", prompt: "Convert project to 9:16 vertical aspect ratio" },
                 { label: "Cinema Grade", prompt: "Apply Kodak film LUT look" },
-                { label: "Silver Mono", prompt: "Apply black and white mono film look" },
+                { label: "S-Curve", prompt: "Apply cinema S-curve contrast look" },
+                { label: "Voice EQ", prompt: "Apply clean voice podcast EQ clarity" },
                 { label: "Add Title", prompt: "Title: NEW EDIT" },
               ].map((q) => (
-                <button key={q.label} type="button" className="chip-btn" onClick={() => void sendAiPrompt(q.prompt)}>
+                <button key={q.label} type="button" className="chip-btn" disabled={aiBusy} onClick={() => void sendAiPrompt(q.prompt)}>
                   {q.label}
                 </button>
               ))}
             </div>
 
             {aiMessages.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 160, overflowY: "auto" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 190, overflowY: "auto" }}>
                 {aiMessages.map((m, idx) => (
                   <div
                     key={idx}
@@ -1944,8 +1964,8 @@ export function App() {
                       fontSize: 12,
                       lineHeight: 1.4,
                       whiteSpace: "pre-wrap",
-                      background: m.role === "user" ? "var(--accent-soft)" : "var(--panel-2)",
-                      border: "1px solid var(--border)",
+                      background: m.role === "user" ? "var(--accent-soft)" : m.text.startsWith("Error:") ? "rgba(239,68,68,0.12)" : "var(--panel-2)",
+                      border: `1px solid ${m.text.startsWith("Error:") ? "rgba(239,68,68,0.35)" : "var(--border)"}`,
                     }}
                   >
                     {m.text}
@@ -1961,7 +1981,8 @@ export function App() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void sendAiPrompt();
                 }}
-                placeholder="Ask AI to edit clips, grade colors, add titles…"
+                placeholder={aiBusy ? "AI is working…" : "Ask AI to edit clips, grade colors, EQ audio, add titles…"}
+                disabled={aiBusy}
                 style={{ flex: 1 }}
               />
               <button type="button" className="btn-primary" onClick={() => void sendAiPrompt()} disabled={aiBusy}>

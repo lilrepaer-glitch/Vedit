@@ -48,16 +48,18 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
- * Native Android shell for Vedit Studio (v0.8.0).
+ * Native Android shell for Vedit Studio (v0.9.1).
  *
  * Provides:
  *  - Local zero-latency HTTPS asset serving (`https://appassets.vedit.studio/*`)
- *  - CORS-free native HTTP/HTTPS API bridge (`VeditAndroid.httpRequest`) so every AI API
- *    provider (OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Groq, NVIDIA, local LAN)
- *    works reliably on real phones with zero WebView CORS preflight errors
- *  - Multi-file native Android Gallery / Document picker (Videos, Audio, Photos)
+ *  - Non-blocking background thread-pool HTTP/HTTPS API bridge (`httpRequestAsync` + `httpRequest`)
+ *    with automatic stale-keepalive socket recovery & transient error retries so repeated AI calls
+ *    never freeze the UI or fail on pooled TLS socket resets
+ *  - Multi-file native Android Gallery / Document picker (Videos, Audio, Photos, Subtitles)
  *  - Microphone & Camera WebRTC permission bridge for in-app Voiceover recording
  *  - Direct MediaStore export into Android Gallery (`Movies/Vedit/`) + native Share Sheet
  */
@@ -66,6 +68,7 @@ public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQ = 4101;
     private static final int RUNTIME_PERM_REQ = 4102;
 
+    private final ExecutorService networkPool = Executors.newCachedThreadPool();
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
     private PermissionRequest pendingWebPermission;
@@ -100,7 +103,7 @@ public class MainActivity extends Activity {
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        settings.setUserAgentString(settings.getUserAgentString() + " VedStudioAPK/0.8.0");
+        settings.setUserAgentString(settings.getUserAgentString() + " VedStudioAPK/0.9.1");
 
         webView.addJavascriptInterface(new AndroidBridge(), "VeditAndroid");
 
@@ -194,7 +197,10 @@ public class MainActivity extends Activity {
                     intent.setType(acceptTypes[0]);
                 } else {
                     intent.setType("*/*");
-                    intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"video/*", "audio/*", "image/*"});
+                    intent.putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        new String[]{"video/*", "audio/*", "image/*", "text/plain", "text/vtt", "application/x-subrip"}
+                    );
                 }
 
                 try {
@@ -209,6 +215,12 @@ public class MainActivity extends Activity {
 
         setContentView(webView);
         webView.loadUrl("https://" + VIRTUAL_HOST + "/index.html");
+    }
+
+    @Override
+    protected void onDestroy() {
+        networkPool.shutdownNow();
+        super.onDestroy();
     }
 
     @Override
@@ -337,35 +349,31 @@ public class MainActivity extends Activity {
         return buffer.toByteArray();
     }
 
-    public class AndroidBridge {
-        @JavascriptInterface
-        public boolean isAndroid() {
-            return true;
-        }
-
-        @JavascriptInterface
-        public String getVersion() {
-            return "0.8.0";
-        }
-
-        /**
-         * Native HTTP/HTTPS request executed directly by Android's network stack.
-         * Completely bypasses WebView browser CORS / OPTIONS preflight blocks so any
-         * OpenAI, Anthropic, Google Gemini, OpenRouter, DeepSeek, Groq, NVIDIA, or custom
-         * API endpoint works natively on mobile devices.
-         */
-        @JavascriptInterface
-        public String httpRequest(String method, String urlString, String headersJson, String body) {
+    /**
+     * Executes a native HTTP/HTTPS call with automatic stale pooled-socket retry.
+     * Note: Avoids `setFixedLengthStreamingMode` so OkHttp's internal connection pool
+     * cleanly buffers small API JSON bodies and retries transparent idle TLS closes.
+     */
+    private static String performNativeHttp(String method, String urlString, String headersJson, String body) {
+        Exception lastError = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
             HttpURLConnection conn = null;
             try {
                 URL url = new URL(urlString);
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setInstanceFollowRedirects(true);
+                conn.setUseCaches(false);
                 conn.setConnectTimeout(15000);
-                conn.setReadTimeout(45000);
-                conn.setRequestMethod(method != null && !method.isEmpty() ? method.toUpperCase(Locale.US) : "GET");
+                conn.setReadTimeout(75000);
+                String safeMethod = (method != null && !method.isEmpty()) ? method.toUpperCase(Locale.US) : "GET";
+                conn.setRequestMethod(safeMethod);
                 conn.setRequestProperty("Accept", "application/json");
-                conn.setRequestProperty("User-Agent", "VeditStudio/0.8.0 (Android)");
+                conn.setRequestProperty("Accept-Encoding", "identity");
+                conn.setRequestProperty("User-Agent", "VeditStudio/0.9.1 (Android)");
+                if (attempt > 0) {
+                    // Force a brand-new TCP/TLS connection if a previous pooled keep-alive socket reset
+                    conn.setRequestProperty("Connection", "close");
+                }
 
                 if (headersJson != null && !headersJson.isEmpty()) {
                     JSONObject headersObj = new JSONObject(headersJson);
@@ -380,11 +388,11 @@ public class MainActivity extends Activity {
                 }
 
                 if (body != null && !body.isEmpty()
-                    && !"GET".equalsIgnoreCase(conn.getRequestMethod())
-                    && !"HEAD".equalsIgnoreCase(conn.getRequestMethod())) {
+                    && !"GET".equalsIgnoreCase(safeMethod)
+                    && !"HEAD".equalsIgnoreCase(safeMethod)) {
                     conn.setDoOutput(true);
                     byte[] payload = body.getBytes(StandardCharsets.UTF_8);
-                    conn.setFixedLengthStreamingMode(payload.length);
+                    conn.setRequestProperty("Content-Length", Integer.toString(payload.length));
                     OutputStream os = conn.getOutputStream();
                     os.write(payload);
                     os.flush();
@@ -398,29 +406,103 @@ public class MainActivity extends Activity {
                 byte[] respBytes = readAllBytes(respStream);
                 if (respStream != null) respStream.close();
 
+                if ((status == 502 || status == 503 || status == 504 || status == 520 || status == 522 || status == 524)
+                    && attempt < 2) {
+                    try {
+                        Thread.sleep(600L * (attempt + 1));
+                    } catch (InterruptedException ignored) {
+                    }
+                    continue;
+                }
+
                 JSONObject result = new JSONObject();
                 result.put("ok", status >= 200 && status < 300);
                 result.put("status", status);
                 result.put("statusText", conn.getResponseMessage() != null ? conn.getResponseMessage() : "");
                 result.put("body", new String(respBytes, StandardCharsets.UTF_8));
                 return result.toString();
-            } catch (Exception e) {
-                try {
-                    JSONObject err = new JSONObject();
-                    err.put("ok", false);
-                    err.put("status", 0);
-                    err.put("statusText", e.getClass().getSimpleName());
-                    err.put("body", "");
-                    err.put("error", e.getMessage() != null ? e.getMessage() : e.toString());
-                    return err.toString();
-                } catch (Exception ignored) {
-                    return "{\"ok\":false,\"status\":0,\"error\":\"Network error\"}";
+            } catch (IOException ioEx) {
+                lastError = ioEx;
+                if (attempt < 2) {
+                    try {
+                        Thread.sleep(350L * (attempt + 1));
+                    } catch (InterruptedException ignored) {
+                    }
+                    continue;
                 }
+            } catch (Exception e) {
+                lastError = e;
+                break;
             } finally {
                 if (conn != null) {
-                    conn.disconnect();
+                    try {
+                        conn.disconnect();
+                    } catch (Exception ignored) {
+                    }
                 }
             }
+        }
+
+        try {
+            JSONObject err = new JSONObject();
+            err.put("ok", false);
+            err.put("status", 0);
+            err.put("statusText", lastError != null ? lastError.getClass().getSimpleName() : "IOException");
+            err.put("body", "");
+            err.put("error", lastError != null && lastError.getMessage() != null
+                ? lastError.getMessage()
+                : (lastError != null ? lastError.toString() : "Network request failed"));
+            return err.toString();
+        } catch (Exception ignored) {
+            return "{\"ok\":false,\"status\":0,\"error\":\"Network error\"}";
+        }
+    }
+
+    public class AndroidBridge {
+        @JavascriptInterface
+        public boolean isAndroid() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public String getVersion() {
+            return "0.9.1";
+        }
+
+        @JavascriptInterface
+        public String httpRequest(String method, String urlString, String headersJson, String body) {
+            return performNativeHttp(method, urlString, headersJson, body);
+        }
+
+        @JavascriptInterface
+        public void httpRequestAsync(
+            final String requestId,
+            final String method,
+            final String urlString,
+            final String headersJson,
+            final String body
+        ) {
+            networkPool.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final String responseJson = performNativeHttp(method, urlString, headersJson, body);
+                    final String b64 = Base64.encodeToString(
+                        responseJson.getBytes(StandardCharsets.UTF_8),
+                        Base64.NO_WRAP
+                    );
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (webView != null) {
+                                String js = "window.__veditResolveHttp && window.__veditResolveHttp("
+                                    + JSONObject.quote(requestId) + ","
+                                    + JSONObject.quote(b64) + ");";
+                                webView.evaluateJavascript(js, null);
+                            }
+                        }
+                    });
+                }
+            });
         }
 
         @JavascriptInterface
