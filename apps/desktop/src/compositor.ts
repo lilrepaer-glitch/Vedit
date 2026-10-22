@@ -1,9 +1,6 @@
-// Real-Time Multi-Track HTML5/WebGL-2D Compositor, Filmstrip Extractor, Live Scopes Analyzer,
-// Offline Multi-Track Audio Mixer, and Hardware H.264 + AAC `.mp4` Exporter for Vedit Studio (v0.8.0).
-//
-// Shared between live 60 FPS interactive playback and frame-accurate `.mp4` export so what the user
-// sees on screen (cuts, trims, speed, reverse, freeze frames, color grading, LUTs, transitions,
-// blurred 9:16 backgrounds, PiP layers, and draggable styled titles) matches exported output 1:1.
+// Real-Time Multi-Track HTML5/WebGL-2D Compositor, Per-Pixel Chroma Keyer + Monotone Tone Curve LUT,
+// Filmstrip & Real Audio Waveform Extractor, Live RGB/Luma Scopes Analyzer, 3-Band Parametric WebAudio EQ,
+// and Hardware WebCodecs H.264 + AAC `.mp4` Exporter for Vedit Studio (v0.9.0 — Milestone F11).
 
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
 import type { Asset, Caption, Clip, Project, Sequence, Track } from "./api";
@@ -31,6 +28,93 @@ export const DEFAULT_ADJUSTMENTS: ColorAdjustments = {
   vignette: 0,
   blur: 0,
 };
+
+export interface ToneCurvePoint {
+  x: number;
+  y: number;
+}
+
+export interface ToneCurvePresetUi {
+  id: "linear" | "cinema-s-curve" | "matte-fade" | "high-contrast" | "soft-rolloff";
+  label: string;
+  points: ToneCurvePoint[];
+}
+
+export const TONE_CURVE_PRESETS_UI: ToneCurvePresetUi[] = [
+  {
+    id: "linear",
+    label: "Linear",
+    points: [
+      { x: 0, y: 0 },
+      { x: 0.25, y: 0.25 },
+      { x: 0.5, y: 0.5 },
+      { x: 0.75, y: 0.75 },
+      { x: 1, y: 1 },
+    ],
+  },
+  {
+    id: "cinema-s-curve",
+    label: "S-Curve",
+    points: [
+      { x: 0, y: 0.02 },
+      { x: 0.25, y: 0.19 },
+      { x: 0.5, y: 0.5 },
+      { x: 0.75, y: 0.82 },
+      { x: 1, y: 0.98 },
+    ],
+  },
+  {
+    id: "matte-fade",
+    label: "Matte",
+    points: [
+      { x: 0, y: 0.08 },
+      { x: 0.25, y: 0.27 },
+      { x: 0.5, y: 0.51 },
+      { x: 0.75, y: 0.77 },
+      { x: 1, y: 0.95 },
+    ],
+  },
+  {
+    id: "high-contrast",
+    label: "Punchy",
+    points: [
+      { x: 0, y: 0 },
+      { x: 0.25, y: 0.14 },
+      { x: 0.5, y: 0.5 },
+      { x: 0.75, y: 0.86 },
+      { x: 1, y: 1 },
+    ],
+  },
+  {
+    id: "soft-rolloff",
+    label: "Roll-Off",
+    points: [
+      { x: 0, y: 0 },
+      { x: 0.25, y: 0.26 },
+      { x: 0.5, y: 0.52 },
+      { x: 0.75, y: 0.76 },
+      { x: 1, y: 0.91 },
+    ],
+  },
+];
+
+export interface AudioEqPresetUi {
+  id: "flat" | "voice-podcast" | "bass-boost" | "crisp-vocal" | "warm-cinema" | "lo-fi-radio";
+  label: string;
+  lowDb: number;
+  midDb: number;
+  highDb: number;
+  voiceClarity: boolean;
+}
+
+export const AUDIO_EQ_PRESETS_UI: AudioEqPresetUi[] = [
+  { id: "flat", label: "Flat", lowDb: 0, midDb: 0, highDb: 0, voiceClarity: false },
+  { id: "voice-podcast", label: "Podcast Voice", lowDb: -4, midDb: 3, highDb: 4, voiceClarity: true },
+  { id: "bass-boost", label: "Bass Boost", lowDb: 7, midDb: 0, highDb: 1, voiceClarity: false },
+  { id: "crisp-vocal", label: "Crisp Vocal", lowDb: -2, midDb: 2, highDb: 6, voiceClarity: true },
+  { id: "warm-cinema", label: "Warm Cinema", lowDb: 4, midDb: 1, highDb: -2, voiceClarity: false },
+  { id: "lo-fi-radio", label: "Lo-Fi Radio", lowDb: -12, midDb: 6, highDb: -10, voiceClarity: false },
+];
 
 export interface LookPresetDef {
   id: string;
@@ -133,6 +217,17 @@ export interface ExtendedCaption extends Caption {
   style?: CaptionStyle;
 }
 
+export interface RenderedClipBox {
+  clipId: string;
+  trackId: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  cx: number;
+  cy: number;
+}
+
 export function getSequenceDuration(seq: Sequence | undefined | null): number {
   if (!seq) return 5;
   let max = 0.5;
@@ -183,7 +278,7 @@ export function getClipTransition(clip: Clip): { kind: string; duration: number 
   const tx = clip.effects.find((e) => e.type === "transition");
   if (!tx) return null;
   const kind = String(tx.params?.kind || "dissolve");
-  const duration = Math.max(0.15, Math.min(clip.duration * 0.8, Number(tx.params?.duration ?? 0.5)));
+  const duration = Math.max(0.15, Math.min(clip.duration * 0.85, Number(tx.params?.duration ?? 0.5)));
   return kind === "none" ? null : { kind, duration };
 }
 
@@ -201,6 +296,160 @@ export function readClipAdjustments(clip: Clip): ColorAdjustments {
     vignette: Number(adjFx.params?.vignette ?? 0),
     blur: Number(adjFx.params?.blur ?? 0),
   };
+}
+
+export function readClipChromaKey(clip: Clip): {
+  enabled: boolean;
+  color: string;
+  similarity: number;
+  blend: number;
+  despill: boolean;
+} {
+  const fx = clip.effects.find((e) => e.type === "chroma-key" || e.type === "chromakey");
+  if (!fx || fx.enabled === false) {
+    return { enabled: false, color: "#00ff00", similarity: 0.3, blend: 0.1, despill: true };
+  }
+  return {
+    enabled: true,
+    color: String(fx.params?.color || "#00ff00"),
+    similarity: Math.max(0.02, Math.min(1, Number(fx.params?.similarity ?? 0.3))),
+    blend: Math.max(0, Math.min(1, Number(fx.params?.blend ?? 0.1))),
+    despill: fx.params?.despill !== false,
+  };
+}
+
+export function readClipCurves(clip: Clip): {
+  active: boolean;
+  preset: ToneCurvePresetUi["id"] | "custom";
+  shadows: number;
+  midtones: number;
+  highlights: number;
+  clarity: number;
+  points: ToneCurvePoint[];
+} {
+  const fx = clip.effects.find((e) => e.type === "curves");
+  if (!fx || fx.enabled === false) {
+    return {
+      active: false,
+      preset: "linear",
+      shadows: 0,
+      midtones: 0,
+      highlights: 0,
+      clarity: 0,
+      points: TONE_CURVE_PRESETS_UI[0]!.points,
+    };
+  }
+  const shadows = Number(fx.params?.shadows ?? 0);
+  const midtones = Number(fx.params?.midtones ?? 0);
+  const highlights = Number(fx.params?.highlights ?? 0);
+  const clarity = Number(fx.params?.clarity ?? 0);
+  const preset = (fx.params?.preset as ToneCurvePresetUi["id"] | "custom") || "custom";
+  const pts = Array.isArray(fx.params?.points)
+    ? (fx.params.points as ToneCurvePoint[])
+    : computeCurvePoints(shadows, midtones, highlights, preset === "custom" ? "linear" : preset);
+  const isIdentity =
+    preset === "linear" && Math.abs(shadows) < 0.5 && Math.abs(midtones) < 0.5 && Math.abs(highlights) < 0.5;
+  return {
+    active: !isIdentity || Math.abs(clarity) >= 1,
+    preset,
+    shadows,
+    midtones,
+    highlights,
+    clarity,
+    points: pts,
+  };
+}
+
+export function readClipAudioEq(clip: Clip): {
+  preset: string;
+  lowDb: number;
+  midDb: number;
+  highDb: number;
+  voiceClarity: boolean;
+} {
+  const fx = clip.effects.find((e) => e.type === "eq");
+  if (!fx || fx.enabled === false) {
+    return { preset: "flat", lowDb: 0, midDb: 0, highDb: 0, voiceClarity: false };
+  }
+  return {
+    preset: String(fx.params?.preset || "custom"),
+    lowDb: Number(fx.params?.lowDb ?? 0),
+    midDb: Number(fx.params?.midDb ?? 0),
+    highDb: Number(fx.params?.highDb ?? 0),
+    voiceClarity: Boolean(fx.params?.voiceClarity),
+  };
+}
+
+export function computeCurvePoints(
+  shadows = 0,
+  midtones = 0,
+  highlights = 0,
+  presetId: ToneCurvePresetUi["id"] = "linear",
+): ToneCurvePoint[] {
+  const base = TONE_CURVE_PRESETS_UI.find((p) => p.id === presetId)?.points ?? TONE_CURVE_PRESETS_UI[0]!.points;
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, Number(v.toFixed(4))));
+  return [
+    { x: 0, y: clamp01(base[0]!.y + Math.max(-0.15, shadows * 0.0012)) },
+    { x: 0.25, y: clamp01(base[1]!.y + shadows * 0.0022) },
+    { x: 0.5, y: clamp01(base[2]!.y + midtones * 0.0022) },
+    { x: 0.75, y: clamp01(base[3]!.y + highlights * 0.0022) },
+    { x: 1, y: clamp01(base[4]!.y + Math.min(0.15, highlights * 0.0012)) },
+  ];
+}
+
+const lutCache = new Map<string, Uint8Array>();
+
+export function getCachedCurveLut(points: ToneCurvePoint[]): Uint8Array {
+  const key = points.map((p) => `${p.x.toFixed(3)}:${p.y.toFixed(3)}`).join("|");
+  const hit = lutCache.get(key);
+  if (hit) return hit;
+
+  const sorted = points
+    .map((p) => ({ x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }))
+    .sort((a, b) => a.x - b.x);
+  const pts: ToneCurvePoint[] = [];
+  for (const p of sorted) {
+    if (pts.length > 0 && Math.abs(pts[pts.length - 1]!.x - p.x) < 1e-4) pts[pts.length - 1] = p;
+    else pts.push(p);
+  }
+  if (pts.length === 0) return Uint8Array.from({ length: 256 }, (_, i) => i);
+  if (pts[0]!.x > 0) pts.unshift({ x: 0, y: pts[0]!.y });
+  if (pts[pts.length - 1]!.x < 1) pts.push({ x: 1, y: pts[pts.length - 1]!.y });
+
+  const n = pts.length;
+  const d = new Array<number>(n - 1).fill(0);
+  const m = new Array<number>(n).fill(0);
+  for (let i = 0; i < n - 1; i++) {
+    const h = Math.max(1e-5, pts[i + 1]!.x - pts[i]!.x);
+    d[i] = (pts[i + 1]!.y - pts[i]!.y) / h;
+  }
+  m[0] = d[0] ?? 0;
+  m[n - 1] = d[n - 2] ?? 0;
+  for (let i = 1; i < n - 1; i++) {
+    m[i] = d[i - 1]! * d[i]! <= 0 ? 0 : (d[i - 1]! + d[i]!) * 0.5;
+  }
+
+  const lut = new Uint8Array(256);
+  for (let idx = 0; idx < 256; idx++) {
+    const x = idx / 255;
+    let seg = 0;
+    while (seg < n - 2 && x > pts[seg + 1]!.x) seg++;
+    const p0 = pts[seg]!;
+    const p1 = pts[seg + 1]!;
+    const h = Math.max(1e-5, p1.x - p0.x);
+    const t = Math.max(0, Math.min(1, (x - p0.x) / h));
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const y =
+      (2 * t3 - 3 * t2 + 1) * p0.y +
+      (t3 - 2 * t2 + t) * h * m[seg]! +
+      (-2 * t3 + 3 * t2) * p1.y +
+      (t3 - t2) * h * m[seg + 1]!;
+    lut[idx] = Math.max(0, Math.min(255, Math.round(y * 255)));
+  }
+  if (lutCache.size > 64) lutCache.clear();
+  lutCache.set(key, lut);
+  return lut;
 }
 
 export function readClipLook(clip: Clip): { id: string; intensity: number } {
@@ -223,13 +472,15 @@ export function readClipLook(clip: Clip): { id: string; intensity: number } {
 
 export function buildClipCssFilter(clip: Clip): string {
   const adj = readClipAdjustments(clip);
+  const curves = readClipCurves(clip);
   const look = readClipLook(clip);
   const preset = LOOK_PRESETS.find((p) => p.id === look.id);
 
   const parts: string[] = [];
   const expMul = Math.pow(2, adj.exposure / 100);
   const brightMul = Math.max(0.1, expMul * (1 + adj.brightness / 120));
-  const contrastMul = Math.max(0.2, 1 + adj.contrast / 100);
+  const clarityMul = 1 + curves.clarity / 260;
+  const contrastMul = Math.max(0.2, (1 + adj.contrast / 100) * clarityMul);
   const satMul = Math.max(0, 1 + adj.saturation / 100);
 
   if (Math.abs(brightMul - 1) > 0.005) parts.push(`brightness(${brightMul.toFixed(3)})`);
@@ -261,10 +512,15 @@ export function interpolateKeyframes(clip: Clip, prop: string, localTime: number
     if (localTime >= a.time && localTime <= b.time) {
       const span = Math.max(0.0001, b.time - a.time);
       const rawT = (localTime - a.time) / span;
-      const eased = rawT * rawT * (3 - 2 * rawT); // smoothstep ease-in-out
+      const easing = a.easing || "ease-in-out";
+      let t = rawT;
+      if (easing === "hold") t = 0;
+      else if (easing === "ease-in") t = rawT * rawT;
+      else if (easing === "ease-out") t = 1 - (1 - rawT) * (1 - rawT);
+      else if (easing === "ease-in-out") t = rawT * rawT * (3 - 2 * rawT);
       const av = Number(a.value) || 0;
       const bv = Number(b.value) || 0;
-      return av + (bv - av) * eased;
+      return av + (bv - av) * t;
     }
   }
   return fallback;
@@ -279,13 +535,73 @@ export function computeClipMediaTime(clip: Clip, timelineTime: number): number {
   return Math.max(0, clip.in + local * speed);
 }
 
-// ---------- Filmstrip Thumbnail Cache ----------
+// ---------- Filmstrip & Real Audio Waveform Caches ----------
 
 const filmstripCache = new Map<string, string[]>();
 const filmstripPending = new Map<string, Promise<string[]>>();
+const waveformCache = new Map<string, number[]>();
+const waveformPending = new Map<string, Promise<number[]>>();
 
 export function getCachedFilmstrip(assetId: string): string[] | undefined {
   return filmstripCache.get(assetId);
+}
+
+export function getCachedWaveform(assetId: string): number[] | undefined {
+  return waveformCache.get(assetId);
+}
+
+export function setCachedWaveform(assetId: string, peaks: number[]): void {
+  if (peaks.length > 0) waveformCache.set(assetId, peaks);
+}
+
+export async function extractBrowserWaveformPeaks(
+  assetId: string,
+  mediaUrl: string,
+  buckets = 72,
+): Promise<number[]> {
+  const key = `${assetId}:${buckets}`;
+  if (waveformCache.has(assetId)) return waveformCache.get(assetId)!;
+  if (waveformPending.has(key)) return waveformPending.get(key)!;
+
+  const task = (async (): Promise<number[]> => {
+    try {
+      if (typeof AudioContext === "undefined") return [];
+      const resp = await fetch(mediaUrl);
+      const arr = await resp.arrayBuffer();
+      const actx = new AudioContext();
+      try {
+        const decoded = await actx.decodeAudioData(arr.slice(0));
+        const ch0 = decoded.getChannelData(0);
+        const ch1 = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : ch0;
+        const step = Math.max(1, Math.floor(ch0.length / buckets));
+        const stride = Math.max(1, Math.floor(step / 48));
+        const raw: number[] = [];
+        let globalPeak = 0.01;
+        for (let i = 0; i < buckets; i++) {
+          let max = 0;
+          const end = Math.min(ch0.length, (i + 1) * step);
+          for (let j = i * step; j < end; j += stride) {
+            const amp = (Math.abs(ch0[j] || 0) + Math.abs(ch1[j] || 0)) * 0.5;
+            if (amp > max) max = amp;
+          }
+          if (max > globalPeak) globalPeak = max;
+          raw.push(max);
+        }
+        const normalized = raw.map((v) => Number(Math.max(0.06, Math.min(1, v / globalPeak)).toFixed(3)));
+        waveformCache.set(assetId, normalized);
+        return normalized;
+      } finally {
+        void actx.close().catch(() => undefined);
+      }
+    } catch {
+      return [];
+    } finally {
+      waveformPending.delete(key);
+    }
+  })();
+
+  waveformPending.set(key, task);
+  return task;
 }
 
 export async function extractMediaFilmstrip(
@@ -390,6 +706,115 @@ export function seekVideoElement(video: HTMLVideoElement, timeSec: number, timeo
   });
 }
 
+// ---------- Reusable 60 FPS Offscreen Pixel Shader Buffer (Chroma Key + Tone Curve LUT) ----------
+
+let fxCanvas: HTMLCanvasElement | null = null;
+let fxCtx: CanvasRenderingContext2D | null = null;
+
+function parseHexRgb(hex: string): [number, number, number] {
+  const c = hex.replace(/^#|^0x/i, "").trim();
+  if (c.toLowerCase() === "blue") return [0, 85, 255];
+  if (c.length === 6) {
+    return [
+      parseInt(c.slice(0, 2), 16) || 0,
+      parseInt(c.slice(2, 4), 16) || 0,
+      parseInt(c.slice(4, 6), 16) || 0,
+    ];
+  }
+  return [0, 255, 0];
+}
+
+function renderProcessedClipSource(
+  source: HTMLVideoElement | HTMLImageElement,
+  sxPx: number,
+  syPx: number,
+  swPx: number,
+  shPx: number,
+  targetW: number,
+  targetH: number,
+  chroma: ReturnType<typeof readClipChromaKey>,
+  curves: ReturnType<typeof readClipCurves>,
+): HTMLCanvasElement | null {
+  if (typeof document === "undefined") return null;
+  // Cap pixel buffer resolution to keep 60 FPS effortless on mobile GPUs/CPUs while staying razor sharp
+  const maxDim = 960;
+  const scale = Math.min(1, maxDim / Math.max(targetW, targetH, 1));
+  const bw = Math.max(2, Math.round(targetW * scale));
+  const bh = Math.max(2, Math.round(targetH * scale));
+
+  if (!fxCanvas) {
+    fxCanvas = document.createElement("canvas");
+    fxCtx = fxCanvas.getContext("2d", { willReadFrequently: true });
+  }
+  if (!fxCtx) return null;
+  if (fxCanvas.width !== bw || fxCanvas.height !== bh) {
+    fxCanvas.width = bw;
+    fxCanvas.height = bh;
+  }
+
+  fxCtx.clearRect(0, 0, bw, bh);
+  fxCtx.drawImage(source, sxPx, syPx, swPx, shPx, 0, 0, bw, bh);
+
+  let imgData: ImageData;
+  try {
+    imgData = fxCtx.getImageData(0, 0, bw, bh);
+  } catch {
+    return null;
+  }
+  const data = imgData.data;
+  const lut = curves.active ? getCachedCurveLut(curves.points) : null;
+
+  const [kr, kg, kb] = parseHexRgb(chroma.color);
+  const keyCb = -0.168736 * kr - 0.331264 * kg + 0.5 * kb;
+  const keyCr = 0.5 * kr - 0.418688 * kg - 0.081312 * kb;
+  const innerTol = chroma.similarity * 145;
+  const outerTol = innerTol + Math.max(4, chroma.blend * 110);
+  const invSpan = 1 / Math.max(1, outerTol - innerTol);
+  const greenDominant = kg >= kb;
+
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i]!;
+    let g = data[i + 1]!;
+    let b = data[i + 2]!;
+
+    if (chroma.enabled) {
+      const cb = -0.168736 * r - 0.331264 * g + 0.5 * b;
+      const cr = 0.5 * r - 0.418688 * g - 0.081312 * b;
+      const dCb = cb - keyCb;
+      const dCr = cr - keyCr;
+      const dist = Math.sqrt(dCb * dCb + dCr * dCr);
+      if (dist <= innerTol) {
+        data[i + 3] = 0;
+        continue;
+      } else if (dist < outerTol) {
+        data[i + 3] = Math.round(data[i + 3]! * ((dist - innerTol) * invSpan));
+      }
+      if (chroma.despill) {
+        if (greenDominant) {
+          const ceiling = (r + b) * 0.52;
+          if (g > ceiling) g = Math.round(ceiling);
+        } else {
+          const ceiling = (r + g) * 0.52;
+          if (b > ceiling) b = Math.round(ceiling);
+        }
+      }
+    }
+
+    if (lut) {
+      r = lut[r]!;
+      g = lut[g]!;
+      b = lut[b]!;
+    }
+
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+  }
+
+  fxCtx.putImageData(imgData, 0, 0);
+  return fxCanvas;
+}
+
 // ---------- Core Composite Frame Renderer ----------
 
 export interface RenderFrameOptions {
@@ -401,18 +826,27 @@ export interface RenderFrameOptions {
   backdropMode?: "blur" | "black" | "dark" | "white";
 }
 
+let lastRenderedClipBoxes: RenderedClipBox[] = [];
+
+export function getLastRenderedClipBoxes(): RenderedClipBox[] {
+  return lastRenderedClipBoxes;
+}
+
 function drawSingleClipLayer(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
+  trackId: string,
   clip: Clip,
   source: HTMLVideoElement | HTMLImageElement,
   localTime: number,
   extraAlpha = 1,
   offsetXRatio = 0,
+  offsetYRatio = 0,
   extraScale = 1,
   backdropBlurFill = false,
   disableGrading = false,
+  recordBounds = false,
 ): void {
   const srcW =
     source instanceof HTMLVideoElement ? source.videoWidth || width : source.naturalWidth || width;
@@ -425,10 +859,17 @@ function drawSingleClipLayer(
   const alpha = Math.max(0, Math.min(1, baseOpacity * fadeEnv * extraAlpha));
   if (alpha <= 0.002) return;
 
-  // Optional blurred full-canvas background fill when aspect ratios differ (e.g. 16:9 inside 9:16)
+  const chroma = disableGrading
+    ? { enabled: false, color: "#00ff00", similarity: 0.3, blend: 0.1, despill: true }
+    : readClipChromaKey(clip);
+  const curves = disableGrading
+    ? { active: false, preset: "linear" as const, shadows: 0, midtones: 0, highlights: 0, clarity: 0, points: [] }
+    : readClipCurves(clip);
+
+  // Optional blurred full-canvas background fill when aspect ratios differ (suppress if chroma-keyed overlay!)
   const canvasAspect = width / height;
   const srcAspect = srcW / srcH;
-  if (backdropBlurFill && Math.abs(canvasAspect - srcAspect) > 0.08) {
+  if (backdropBlurFill && !chroma.enabled && Math.abs(canvasAspect - srcAspect) > 0.08) {
     ctx.save();
     ctx.globalAlpha = alpha * 0.85;
     ctx.filter = "blur(26px) brightness(0.62) saturate(1.2)";
@@ -446,10 +887,14 @@ function drawSingleClipLayer(
   const rot = interpolateKeyframes(clip, "rotation", localTime, clip.transform.rotation ?? 0);
 
   const cropFx = clip.effects.find((e) => e.type === "crop");
-  const cLeft = Math.max(0, Math.min(0.45, Number(cropFx?.params?.left ?? 0) / 100));
-  const cRight = Math.max(0, Math.min(0.45, Number(cropFx?.params?.right ?? 0) / 100));
-  const cTop = Math.max(0, Math.min(0.45, Number(cropFx?.params?.top ?? 0) / 100));
-  const cBottom = Math.max(0, Math.min(0.45, Number(cropFx?.params?.bottom ?? 0) / 100));
+  const normCrop = (v: unknown) => {
+    const n = Number(v ?? 0);
+    return Math.max(0, Math.min(0.45, Math.abs(n) > 0.5 ? n / 100 : n));
+  };
+  const cLeft = normCrop(cropFx?.params?.left);
+  const cRight = normCrop(cropFx?.params?.right);
+  const cTop = normCrop(cropFx?.params?.top);
+  const cBottom = normCrop(cropFx?.params?.bottom);
 
   const sxPx = srcW * cLeft;
   const syPx = srcH * cTop;
@@ -462,9 +907,29 @@ function drawSingleClipLayer(
   const drawW = swPx * baseScale * Math.abs(sx);
   const drawH = shPx * baseScale * Math.abs(sy);
 
+  const centerX = width / 2 + tx + offsetXRatio * width;
+  const centerY = height / 2 + ty + offsetYRatio * height;
+  if (recordBounds) {
+    lastRenderedClipBoxes.push({
+      clipId: clip.id,
+      trackId,
+      x: centerX - drawW / 2,
+      y: centerY - drawH / 2,
+      w: drawW,
+      h: drawH,
+      cx: centerX,
+      cy: centerY,
+    });
+  }
+
   const adj = readClipAdjustments(clip);
   const look = readClipLook(clip);
   const lookPreset = LOOK_PRESETS.find((p) => p.id === look.id);
+
+  const processed =
+    chroma.enabled || curves.active
+      ? renderProcessedClipSource(source, sxPx, syPx, swPx, shPx, drawW, drawH, chroma, curves)
+      : null;
 
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -473,13 +938,17 @@ function drawSingleClipLayer(
     if (cssFilter !== "none") ctx.filter = cssFilter;
   }
 
-  ctx.translate(width / 2 + tx + offsetXRatio * width, height / 2 + ty);
+  ctx.translate(centerX, centerY);
   if (rot) ctx.rotate((rot * Math.PI) / 180);
   ctx.scale(sx < 0 ? -1 : 1, sy < 0 ? -1 : 1);
-  ctx.drawImage(source, sxPx, syPx, swPx, shPx, -drawW / 2, -drawH / 2, drawW, drawH);
+  if (processed) {
+    ctx.drawImage(processed, 0, 0, processed.width, processed.height, -drawW / 2, -drawH / 2, drawW, drawH);
+  } else {
+    ctx.drawImage(source, sxPx, syPx, swPx, shPx, -drawW / 2, -drawH / 2, drawW, drawH);
+  }
 
   // Subtle color temperature / LUT tint wash
-  if (!disableGrading && lookPreset?.warmOverlay && look.intensity > 0) {
+  if (!disableGrading && !chroma.enabled && lookPreset?.warmOverlay && look.intensity > 0) {
     ctx.filter = "none";
     ctx.globalAlpha = alpha * (look.intensity / 100);
     ctx.fillStyle = lookPreset.warmOverlay;
@@ -488,7 +957,7 @@ function drawSingleClipLayer(
 
   // Matte film fade lift
   const fadeLift = disableGrading ? 0 : Math.max(adj.fade, lookPreset?.fadeLift ?? 0);
-  if (fadeLift > 0) {
+  if (fadeLift > 0 && !chroma.enabled) {
     ctx.filter = "none";
     ctx.globalAlpha = alpha * (fadeLift / 260);
     ctx.fillStyle = "#232329";
@@ -498,7 +967,7 @@ function drawSingleClipLayer(
 
   // Optical vignette
   const vig = disableGrading ? 0 : Math.max(adj.vignette, lookPreset?.vignette ?? 0);
-  if (vig > 1) {
+  if (vig > 1 && !chroma.enabled) {
     ctx.save();
     const grad = ctx.createRadialGradient(
       width / 2,
@@ -649,18 +1118,22 @@ export function renderSequenceFrame(
   const { sequence, time, mediaElements, splitComparePct, backdropMode = "blur" } = opts;
   const width = ctx.canvas.width;
   const height = ctx.canvas.height;
+  lastRenderedClipBoxes = [];
 
   // Base canvas fill
   ctx.save();
   ctx.filter = "none";
   ctx.globalAlpha = 1;
   ctx.fillStyle =
-    backdropMode === "white" ? "#ffffff" : backdropMode === "dark" ? "#141418" : "#000000";
+    backdropMode === "white" ? "#ffffff" : backdropMode === "dark" ? "#111114" : "#000000";
   ctx.fillRect(0, 0, width, height);
   ctx.restore();
 
-  const renderPass = (disableGrading: boolean) => {
-    const visualTracks = sequence.tracks.filter((t) => t.kind !== "audio" && !t.muted);
+  const renderPass = (disableGrading: boolean, recordBounds: boolean) => {
+    const soloVisual = sequence.tracks.some((t) => t.kind !== "audio" && t.solo);
+    const visualTracks = sequence.tracks.filter(
+      (t) => t.kind !== "audio" && !t.muted && (!soloVisual || t.solo),
+    );
     // Track index 0 is bottom/primary video track; subsequent video/graphics tracks overlay on top
     visualTracks.forEach((track, trackIdx) => {
       const sorted = track.clips.slice().sort((a, b) => a.start - b.start);
@@ -674,7 +1147,9 @@ export function renderSequenceFrame(
         const tx = getClipTransition(clip);
         let alpha = 1;
         let offsetX = 0;
+        let offsetY = 0;
         let extraScale = 1;
+        let wipeRect: { x: number; y: number; w: number; h: number } | null = null;
 
         if (tx && localTime < tx.duration) {
           const p = Math.max(0, Math.min(1, localTime / tx.duration));
@@ -688,21 +1163,31 @@ export function renderSequenceFrame(
                 ctx,
                 width,
                 height,
+                track.id,
                 prev,
                 prevSrc,
                 Math.max(0, prev.duration - 0.02),
                 1,
                 0,
+                0,
                 1,
                 trackIdx === 0 && backdropMode === "blur",
                 disableGrading,
+                false,
               );
             }
           }
           if (tx.kind === "dissolve") alpha = ease;
           else if (tx.kind === "slide-left") offsetX = 1 - ease;
           else if (tx.kind === "slide-right") offsetX = -(1 - ease);
-          else if (tx.kind === "zoom-in") {
+          else if (tx.kind === "slide-up") offsetY = 1 - ease;
+          else if (tx.kind === "wipe-left") {
+            const revealW = Math.round(width * ease);
+            wipeRect = { x: width - revealW, y: 0, w: revealW, h: height };
+          } else if (tx.kind === "wipe-right") {
+            const revealW = Math.round(width * ease);
+            wipeRect = { x: 0, y: 0, w: revealW, h: height };
+          } else if (tx.kind === "zoom-in") {
             extraScale = 0.78 + 0.22 * ease;
             alpha = ease;
           } else if (tx.kind === "fade-black" || tx.kind === "fade-white") {
@@ -710,19 +1195,33 @@ export function renderSequenceFrame(
           }
         }
 
+        if (wipeRect) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(wipeRect.x, wipeRect.y, wipeRect.w, wipeRect.h);
+          ctx.clip();
+        }
+
         drawSingleClipLayer(
           ctx,
           width,
           height,
+          track.id,
           clip,
           source,
           localTime,
           alpha,
           offsetX,
+          offsetY,
           extraScale,
           trackIdx === 0 && backdropMode === "blur",
           disableGrading,
+          recordBounds,
         );
+
+        if (wipeRect) {
+          ctx.restore();
+        }
 
         if (tx && localTime < tx.duration && (tx.kind === "fade-black" || tx.kind === "fade-white")) {
           const p = localTime / tx.duration;
@@ -742,17 +1241,16 @@ export function renderSequenceFrame(
     ctx.beginPath();
     ctx.rect(0, 0, splitX, height);
     ctx.clip();
-    renderPass(true); // Before (Original) on left
+    renderPass(true, false);
     ctx.restore();
 
     ctx.save();
     ctx.beginPath();
     ctx.rect(splitX, 0, width - splitX, height);
     ctx.clip();
-    renderPass(false); // After (Graded) on right
+    renderPass(false, true);
     ctx.restore();
 
-    // Crisp divider handle
     ctx.save();
     ctx.strokeStyle = "rgba(255,255,255,0.9)";
     ctx.lineWidth = 2;
@@ -762,7 +1260,7 @@ export function renderSequenceFrame(
     ctx.stroke();
     ctx.restore();
   } else {
-    renderPass(false);
+    renderPass(false, true);
   }
 
   // Draw active captions / titles
@@ -776,20 +1274,25 @@ export function renderSequenceFrame(
 
 // ---------- Real Live RGB + Luma Scope Analyzer ----------
 
+let scopeCanvas: HTMLCanvasElement | null = null;
+let scopeCtx: CanvasRenderingContext2D | null = null;
+
 export function analyzeCanvasScopes(canvas: HTMLCanvasElement, time: number) {
   const sampleW = 128;
   const sampleH = 72;
-  const off = document.createElement("canvas");
-  off.width = sampleW;
-  off.height = sampleH;
-  const octx = off.getContext("2d", { willReadFrequently: true });
+  if (!scopeCanvas) {
+    scopeCanvas = document.createElement("canvas");
+    scopeCanvas.width = sampleW;
+    scopeCanvas.height = sampleH;
+    scopeCtx = scopeCanvas.getContext("2d", { willReadFrequently: true });
+  }
   const bins = 32;
   const rHist = new Array<number>(bins).fill(0);
   const gHist = new Array<number>(bins).fill(0);
   const bHist = new Array<number>(bins).fill(0);
   const lumaHist = new Array<number>(bins).fill(0);
 
-  if (!octx) {
+  if (!scopeCtx) {
     return {
       time,
       status: "ok",
@@ -813,8 +1316,8 @@ export function analyzeCanvasScopes(canvas: HTMLCanvasElement, time: number) {
     };
   }
 
-  octx.drawImage(canvas, 0, 0, sampleW, sampleH);
-  const img = octx.getImageData(0, 0, sampleW, sampleH).data;
+  scopeCtx.drawImage(canvas, 0, 0, sampleW, sampleH);
+  const img = scopeCtx.getImageData(0, 0, sampleW, sampleH).data;
   const totalPx = sampleW * sampleH;
   let rSum = 0;
   let gSum = 0;
@@ -899,6 +1402,65 @@ export function analyzeCanvasScopes(canvas: HTMLCanvasElement, time: number) {
   };
 }
 
+// ---------- Real 3-Band Parametric WebAudio EQ + Voice Clarity Chain ----------
+
+export function buildClipAudioChain(
+  ctx: BaseAudioContext,
+  input: AudioNode,
+  clip: Clip,
+): AudioNode {
+  const eq = readClipAudioEq(clip);
+  let tail: AudioNode = input;
+
+  if (eq.voiceClarity) {
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 85;
+    tail.connect(hp);
+    tail = hp;
+  }
+
+  if (Math.abs(eq.lowDb) > 0.05) {
+    const low = ctx.createBiquadFilter();
+    low.type = "lowshelf";
+    low.frequency.value = 120;
+    low.gain.value = eq.lowDb;
+    tail.connect(low);
+    tail = low;
+  }
+
+  if (Math.abs(eq.midDb) > 0.05) {
+    const mid = ctx.createBiquadFilter();
+    mid.type = "peaking";
+    mid.frequency.value = 1200;
+    mid.Q.value = 1.1;
+    mid.gain.value = eq.midDb;
+    tail.connect(mid);
+    tail = mid;
+  }
+
+  if (Math.abs(eq.highDb) > 0.05) {
+    const high = ctx.createBiquadFilter();
+    high.type = "highshelf";
+    high.frequency.value = 4800;
+    high.gain.value = eq.highDb;
+    tail.connect(high);
+    tail = high;
+  }
+
+  if (eq.voiceClarity) {
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18;
+    comp.ratio.value = 3.2;
+    comp.attack.value = 0.008;
+    comp.release.value = 0.14;
+    tail.connect(comp);
+    tail = comp;
+  }
+
+  return tail;
+}
+
 // ---------- Offline Multi-Track Audio Mixdown + Hardware `.mp4` Exporter ----------
 
 async function mixSequenceAudio(
@@ -946,6 +1508,8 @@ async function mixSequenceAudio(
         const speed = getClipSpeed(clip);
         src.playbackRate.value = speed;
 
+        const eqTail = buildClipAudioChain(offline, src, clip);
+
         const gainNode = offline.createGain();
         const fadeFx = clip.effects.find((e) => e.type === "fade");
         const fi = Math.max(0, Number(fadeFx?.params?.fadeIn ?? 0));
@@ -962,7 +1526,7 @@ async function mixSequenceAudio(
           gainNode.gain.linearRampToValueAtTime(0.0001, clip.start + clip.duration);
         }
 
-        src.connect(gainNode);
+        eqTail.connect(gainNode);
         gainNode.connect(offline.destination);
         const maxAvail = Math.max(0.05, (audioBuf.duration - clip.in) / speed);
         src.start(clip.start, Math.min(clip.in, Math.max(0, audioBuf.duration - 0.05)), Math.min(clip.duration, maxAvail));
@@ -989,16 +1553,15 @@ export async function exportSequenceToMp4Blob(opts: {
   onProgress?: (pct: number) => void;
 }): Promise<{ blob: Blob; mimeType: string; ext: "mp4" | "webm" }> {
   const { project, sequence, resolveUrl, fps, onProgress } = opts;
-  // H.264 requires even dimensions
   const width = Math.max(16, Math.round(opts.width / 2) * 2);
   const height = Math.max(16, Math.round(opts.height / 2) * 2);
   const totalDuration = Math.max(0.5, getSequenceDuration(sequence));
   const totalFrames = Math.max(1, Math.round(totalDuration * fps));
 
-  // Prepare offscreen media elements per clip so two clips referencing the same asset seek independently
   const mediaElements = new Map<string, HTMLVideoElement | HTMLImageElement>();
+  const soloVisual = sequence.tracks.some((t) => t.kind !== "audio" && t.solo);
   const visualClips = sequence.tracks
-    .filter((t) => t.kind !== "audio" && !t.muted)
+    .filter((t) => t.kind !== "audio" && !t.muted && (!soloVisual || t.solo))
     .flatMap((t) => t.clips);
 
   await Promise.all(
@@ -1118,7 +1681,6 @@ export async function exportSequenceToMp4Blob(opts: {
         framerate: fps,
       });
 
-      // Encode mixed stereo audio into AAC first if available
       if (includeAac && mixedAudio && WinAny.AudioEncoder && WinAny.AudioData) {
         const audioEncoder = new WinAny.AudioEncoder({
           output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
@@ -1153,10 +1715,8 @@ export async function exportSequenceToMp4Blob(opts: {
         audioEncoder.close();
       }
 
-      // Seek & encode every composite video frame cleanly
       for (let i = 0; i < totalFrames; i++) {
         const t = i / fps;
-        // Seek only clips active at timestamp t
         const seekTasks: Promise<void>[] = [];
         for (const clip of visualClips) {
           if (t >= clip.start - 0.5 && t <= clip.start + clip.duration + 0.1) {
@@ -1176,7 +1736,6 @@ export async function exportSequenceToMp4Blob(opts: {
         videoEncoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
         frame.close();
 
-        // Backpressure guard so phone RAM stays tiny even on long 1080p videos
         if (videoEncoder.encodeQueueSize > 8) {
           await videoEncoder.flush();
         }

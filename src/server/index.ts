@@ -2,12 +2,12 @@
 
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { mkdir, access } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import { createApp, ProjectRegistry } from "./app.js";
 import { attachWs } from "./ws.js";
 import { VeditEngine } from "../core/engine.js";
-import { generateTestClip, probeMedia, run, ffmpegPath } from "../core/media.js";
+import { listSavedProjects, loadProjectFromDisk } from "../pro/persistence.js";
 
 export interface StartOptions {
   port?: number;
@@ -18,91 +18,37 @@ export interface StartOptions {
   quiet?: boolean;
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Seeds a real playable starter project with FFmpeg lavfi sample media
- * so the desktop editor opens with an interactive timeline immediately on first launch.
+ * Seeds a clean, silent, ready-to-edit studio sequence (`Untitled Edit`)
+ * with empty `V1`, `V2 Overlay`, and `A1 Audio` tracks — zero synthetic test bars or sine beeps.
  */
-export async function seedDemoProject(registry: ProjectRegistry, dataDir: string): Promise<void> {
-  const mediaDir = resolvePath(dataDir, "media");
-  await mkdir(mediaDir, { recursive: true });
-  const clipA = resolvePath(mediaDir, "demo_shot_01.mp4");
-  const clipB = resolvePath(mediaDir, "demo_shot_02.mp4");
-  const music = resolvePath(mediaDir, "demo_music.wav");
-  if (!(await exists(clipA))) await generateTestClip(clipA, { seconds: 5, kind: "testsrc", freq: 440 });
-  if (!(await exists(clipB))) await generateTestClip(clipB, { seconds: 4, kind: "smptebars", freq: 660 });
-  if (!(await exists(music))) {
-    await run(ffmpegPath(), [
-      "-hide_banner", "-loglevel", "error",
-      "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000",
-      "-t", "9", music, "-y",
-    ]);
+export async function seedCleanStarterProject(registry: ProjectRegistry, dataDir: string): Promise<void> {
+  await mkdir(dataDir, { recursive: true });
+  try {
+    const saved = await listSavedProjects(dataDir);
+    if (saved.length > 0) {
+      for (const item of saved.slice(0, 10)) {
+        try {
+          const loaded = await loadProjectFromDisk(item.filePath);
+          registry.add(loaded);
+        } catch {
+          /* skip unreadable project file */
+        }
+      }
+      if (registry.list().length > 0) return;
+    }
+  } catch {
+    /* ignore empty save dir */
   }
 
-  const engine = new VeditEngine(VeditEngine.createProject("Vedit Studio Starter"));
-  const v1 = engine.addTrack("video", "V1");
-  const a1 = engine.addTrack("audio", "A1");
-
-  const probeA = await probeMedia(clipA);
-  const probeB = await probeMedia(clipB);
-  const probeM = await probeMedia(music);
-
-  const assetA = engine.addAsset({
-    name: "demo_shot_01.mp4",
-    kind: "video",
-    path: clipA,
-    duration: probeA.duration,
-    width: probeA.width,
-    height: probeA.height,
-    fps: probeA.fps,
-    sizeBytes: probeA.sizeBytes,
-    videoCodec: probeA.videoCodec,
-    audioCodec: probeA.audioCodec,
-    hasAudio: probeA.hasAudio,
-    source: { provider: "vedit-demo", model: "lavfi-testsrc2", prompt: "studio test pattern shot", simulated: true },
-  });
-  const assetB = engine.addAsset({
-    name: "demo_shot_02.mp4",
-    kind: "video",
-    path: clipB,
-    duration: probeB.duration,
-    width: probeB.width,
-    height: probeB.height,
-    fps: probeB.fps,
-    sizeBytes: probeB.sizeBytes,
-    videoCodec: probeB.videoCodec,
-    audioCodec: probeB.audioCodec,
-    hasAudio: probeB.hasAudio,
-    source: { provider: "vedit-demo", model: "lavfi-smptebars", prompt: "broadcast color bars", simulated: true },
-  });
-  const assetM = engine.addAsset({
-    name: "demo_music.wav",
-    kind: "audio",
-    path: music,
-    duration: probeM.duration,
-    sizeBytes: probeM.sizeBytes,
-    audioCodec: probeM.audioCodec,
-    hasAudio: true,
-    source: { provider: "vedit-demo", model: "lavfi-sine", prompt: "ambient backing audio", simulated: true },
-  });
-
-  const c1 = engine.addClip({ trackId: v1.id, assetId: assetA.id, start: 0, duration: 3, in: 0.5, out: 3.5 });
-  const c2 = engine.addClip({ trackId: v1.id, assetId: assetB.id, start: 3, duration: 2.5, in: 0.5, out: 3 });
-  engine.addClip({ trackId: a1.id, assetId: assetM.id, start: 0, duration: 5.5, in: 1, out: 6.5 });
-  engine.applyAnimationPreset(c1.id, "fade-in");
-  engine.applyAnimationPreset(c2.id, "slide-in-left");
-  engine.addCaption({ text: "Welcome to Vedit Studio", start: 0.3, end: 2.2 });
-  engine.addCaption({ text: "AI Video Editor • Real FFmpeg Engine", start: 3.1, end: 5.2 });
-  registry.add(engine);
+  const engine = new VeditEngine(VeditEngine.createProject("Untitled Edit"));
+  engine.addTrack("video", "V1");
+  engine.addTrack("graphics", "V2 Overlay");
+  engine.addTrack("audio", "A1 Audio");
+  registry.add(new VeditEngine(engine.project));
 }
+
+export const seedDemoProject = seedCleanStarterProject;
 
 export function startServer(opts: StartOptions = {}) {
   const port = opts.port ?? Number(process.env.VEDIT_PORT ?? 47000);
@@ -133,15 +79,25 @@ export function startServer(opts: StartOptions = {}) {
     }
   });
 
-  // Start listening IMMEDIATELY (<50ms) so Windows Desktop WebView2 never waits on first-launch FFmpeg/Defender scans!
-  let placeholderId: string | null = null;
+  // Start listening immediately (<25ms) with a clean empty studio project, and restore saved disk projects if present
   if (opts.sample !== false && registry.list().length === 0) {
-    const quick = new VeditEngine(VeditEngine.createProject("Vedit Studio Starter"));
-    quick.addTrack("video", "V1");
-    quick.addTrack("audio", "A1");
-    quick.addCaption({ text: "Welcome to Vedit Studio", start: 0.3, end: 3.0 });
-    registry.add(quick);
-    placeholderId = quick.project.id;
+    const clean = new VeditEngine(VeditEngine.createProject("Untitled Edit"));
+    clean.addTrack("video", "V1");
+    clean.addTrack("graphics", "V2 Overlay");
+    clean.addTrack("audio", "A1 Audio");
+    registry.add(new VeditEngine(clean.project));
+    void listSavedProjects(dataDir)
+      .then(async (saved) => {
+        for (const item of saved.slice(0, 10)) {
+          try {
+            const loaded = await loadProjectFromDisk(item.filePath);
+            if (!registry.has(loaded.project.id)) registry.add(loaded);
+          } catch {
+            /* ignore unreadable file */
+          }
+        }
+      })
+      .catch(() => undefined);
   }
 
   server.listen(port, host, () => {
@@ -150,106 +106,12 @@ export function startServer(opts: StartOptions = {}) {
       console.log(`WebSocket  ws://${host}:${port}/ws`);
       console.log(`Data dir   ${dataDir}`);
       if (token) console.log(`API token  ${token}`);
-      const first = registry.list()[0];
-      if (first) console.log(`Starter project  ${first.id} (${first.name})`);
-    }
-
-    // Hydrate real playable sample clips in background without blocking HTTP readiness
-    if (placeholderId) {
-      void (async () => {
-        try {
-          const mediaDir = resolvePath(dataDir, "media");
-          await mkdir(mediaDir, { recursive: true });
-          const clipA = resolvePath(mediaDir, "demo_shot_01.mp4");
-          const clipB = resolvePath(mediaDir, "demo_shot_02.mp4");
-          const music = resolvePath(mediaDir, "demo_music.wav");
-          if (!(await exists(clipA))) await generateTestClip(clipA, { seconds: 5, kind: "testsrc", freq: 440 });
-          if (!(await exists(clipB))) await generateTestClip(clipB, { seconds: 4, kind: "smptebars", freq: 660 });
-          if (!(await exists(music))) {
-            await run(ffmpegPath(), [
-              "-hide_banner",
-              "-loglevel",
-              "error",
-              "-f",
-              "lavfi",
-              "-i",
-              "sine=frequency=220:sample_rate=48000",
-              "-t",
-              "9",
-              music,
-              "-y",
-            ]);
-          }
-          if (!registry.has(placeholderId!)) return;
-          const engine = registry.get(placeholderId!);
-          // Only populate sample clips if user hasn't already added their own clips
-          const existingClips = engine
-            .activeSequence()
-            .tracks.reduce((sum, t) => sum + t.clips.length, 0);
-          if (existingClips > 0) return;
-
-          const probeA = await probeMedia(clipA);
-          const probeB = await probeMedia(clipB);
-          const probeM = await probeMedia(music);
-          const seq = engine.activeSequence();
-          const v1 = seq.tracks.find((t) => t.kind === "video") ?? engine.addTrack("video", "V1");
-          const a1 = seq.tracks.find((t) => t.kind === "audio") ?? engine.addTrack("audio", "A1");
-
-          const assetA = engine.addAsset({
-            name: "demo_shot_01.mp4",
-            kind: "video",
-            path: clipA,
-            duration: probeA.duration,
-            width: probeA.width,
-            height: probeA.height,
-            fps: probeA.fps,
-            sizeBytes: probeA.sizeBytes,
-            videoCodec: probeA.videoCodec,
-            audioCodec: probeA.audioCodec,
-            hasAudio: probeA.hasAudio,
-            source: { provider: "vedit-demo", model: "lavfi-testsrc2", prompt: "studio test pattern shot", simulated: true },
-          });
-          const assetB = engine.addAsset({
-            name: "demo_shot_02.mp4",
-            kind: "video",
-            path: clipB,
-            duration: probeB.duration,
-            width: probeB.width,
-            height: probeB.height,
-            fps: probeB.fps,
-            sizeBytes: probeB.sizeBytes,
-            videoCodec: probeB.videoCodec,
-            audioCodec: probeB.videoCodec,
-            hasAudio: probeB.hasAudio,
-            source: { provider: "vedit-demo", model: "lavfi-smptebars", prompt: "broadcast color bars", simulated: true },
-          });
-          const assetM = engine.addAsset({
-            name: "demo_music.wav",
-            kind: "audio",
-            path: music,
-            duration: probeM.duration,
-            sizeBytes: probeM.sizeBytes,
-            audioCodec: probeM.audioCodec,
-            hasAudio: true,
-            source: { provider: "vedit-demo", model: "lavfi-sine", prompt: "ambient backing audio", simulated: true },
-          });
-          const c1 = engine.addClip({ trackId: v1.id, assetId: assetA.id, start: 0, duration: 3, in: 0.5, out: 3.5 });
-          const c2 = engine.addClip({ trackId: v1.id, assetId: assetB.id, start: 3, duration: 2.5, in: 0.5, out: 3 });
-          engine.addClip({ trackId: a1.id, assetId: assetM.id, start: 0, duration: 5.5, in: 1, out: 6.5 });
-          engine.applyAnimationPreset(c1.id, "fade-in");
-          engine.applyAnimationPreset(c2.id, "slide-in-left");
-          engine.addCaption({ text: "AI Video Editor • Real FFmpeg Engine", start: 3.1, end: 5.2 });
-        } catch (err) {
-          if (!opts.quiet) console.warn(`Background demo media hydration skipped: ${(err as Error).message}`);
-        }
-      })();
     }
   });
 
   return { server, app, registry, port, host, token };
 }
 
-// Direct launch: node dist/server/index.js
 if (process.argv[1] && process.argv[1].endsWith("server/index.js")) {
   startServer();
 }

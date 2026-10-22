@@ -429,3 +429,42 @@ export const IconImport = IconPlus;
 export const IconMute = IconVolumeOff;
 export const IconStepFwd = IconStepForward;
 
+export const IconCurves = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 3v18h18" />
+    <path d="M4 19C9 19 10 5 20 5" />
+    <circle cx="12" cy="12" r="2" />
+  </Svg>
+);
+
+export const IconPipette = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m2 22 1-1h3l9-9" />
+    <path d="M3 21v-3l9-9" />
+    <path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z" />
+  </Svg>
+);
+
+export const IconSubtitles = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="18" height="14" x="3" y="5" rx="2" />
+    <path d="M7 15h4M15 15h2M7 11h2M13 11h4" />
+  </Svg>
+);
+
+export const IconDownload = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" x2="12" y1="15" y2="3" />
+  </Svg>
+);
+
+export const IconKeyboard = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="20" height="16" x="2" y="4" rx="2" />
+    <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10" />
+  </Svg>
+);
+
+

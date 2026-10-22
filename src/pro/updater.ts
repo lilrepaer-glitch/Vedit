@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-export const VEDIT_VERSION = "0.8.0";
+export const VEDIT_VERSION = "0.9.0";
 export const GITHUB_RELEASES_API = "https://api.github.com/repos/lilrepaer-glitch/Vedit/releases/latest";
 
 export interface UpdateCheckResult {

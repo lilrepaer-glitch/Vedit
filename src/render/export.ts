@@ -327,10 +327,14 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
   const f: string[] = [
     Math.abs(speed - 1) > 1e-3 ? `setpts=(PTS-STARTPTS)/${speed.toFixed(4)}` : "setpts=PTS-STARTPTS",
   ];
-  const sx = clip.transform.scaleX;
-  const sy = clip.transform.scaleY;
-  if (sx !== 1 || sy !== 1) {
-    f.push(`scale=iw*${sx.toFixed(4)}:ih*${sy.toFixed(4)}`);
+  const rawSx = clip.transform.scaleX;
+  const rawSy = clip.transform.scaleY;
+  if (rawSx < 0) f.push("hflip");
+  if (rawSy < 0) f.push("vflip");
+  const sx = Math.max(0.02, Math.abs(rawSx || 1));
+  const sy = Math.max(0.02, Math.abs(rawSy || 1));
+  if (Math.abs(sx - 1) > 1e-4 || Math.abs(sy - 1) > 1e-4) {
+    f.push(`scale=trunc(iw*${sx.toFixed(4)}/2)*2:trunc(ih*${sy.toFixed(4)}/2)*2`);
   }
   if (clip.transform.rotation !== 0) {
     const rad = (clip.transform.rotation * Math.PI) / 180;
@@ -341,10 +345,50 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
     const p = effect.params as Record<string, number | boolean | string>;
     switch (effect.type) {
       case "speed":
+      case "volume":
+      case "eq":
+      case "transition":
       case "audio-volume":
       case "audio-denoise":
       case "audio-eq":
         break;
+      case "reverse":
+        if (p.reversed !== false) f.push("reverse");
+        break;
+      case "adjust": {
+        const exp = Number(p.exposure ?? 0) / 100;
+        const bri = Number(p.brightness ?? 0) / 120 + exp * 0.45;
+        const con = Math.max(0.2, 1 + Number(p.contrast ?? 0) / 100);
+        const sat = Math.max(0, 1 + Number(p.saturation ?? 0) / 100);
+        if (Math.abs(bri) > 0.005 || Math.abs(con - 1) > 0.005 || Math.abs(sat - 1) > 0.005) {
+          f.push(`eq=brightness=${Math.max(-1, Math.min(1, bri)).toFixed(3)}:contrast=${con.toFixed(3)}:saturation=${sat.toFixed(3)}`);
+        }
+        const temp = Number(p.temperature ?? 0) / 200;
+        const tintVal = Number(p.tint ?? 0) / 200;
+        if (Math.abs(temp) > 0.01 || Math.abs(tintVal) > 0.01) {
+          f.push(`colorbalance=rm=${temp.toFixed(3)}:bm=${(-temp).toFixed(3)}:gm=${(-tintVal).toFixed(3)}`);
+        }
+        const vig = Number(p.vignette ?? 0);
+        if (vig > 1) {
+          f.push(`vignette=angle=${Math.min(1.4, (vig / 100) * 0.9).toFixed(3)}`);
+        }
+        const blr = Number(p.blur ?? 0);
+        if (blr > 0.2) {
+          f.push(`gblur=sigma=${blr.toFixed(2)}`);
+        }
+        break;
+      }
+      case "curves": {
+        if (typeof p.ffmpegFilter === "string" && p.ffmpegFilter.startsWith("curves=")) {
+          f.push(p.ffmpegFilter);
+        } else if (Array.isArray((effect.params as Record<string, unknown>).points)) {
+          const pts = (effect.params as { points: Array<{ x: number; y: number }> }).points
+            .map((pt) => `${Math.max(0, Math.min(1, Number(pt.x))).toFixed(3)}/${Math.max(0, Math.min(1, Number(pt.y))).toFixed(3)}`)
+            .join(" ");
+          if (pts) f.push(`curves=master='${pts}'`);
+        }
+        break;
+      }
       case "blur":
         f.push(`gblur=sigma=${Number(p.sigma ?? p.radius ?? 5)}`);
         break;
@@ -386,11 +430,26 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
         break;
       }
       case "crop": {
-        const cw = p.w ?? "iw";
-        const ch = p.h ?? "ih";
-        const cx = p.x ?? 0;
-        const cy = p.y ?? 0;
-        f.push(`crop=${cw}:${ch}:${cx}:${cy}`);
+        if (p.left != null || p.right != null || p.top != null || p.bottom != null) {
+          const norm = (v: unknown) => {
+            const n = Number(v ?? 0);
+            const r = Math.abs(n) > 0.5 ? n / 100 : n;
+            return Math.max(0, Math.min(0.45, r));
+          };
+          const l = norm(p.left);
+          const r = norm(p.right);
+          const t = norm(p.top);
+          const b = norm(p.bottom);
+          const wf = Math.max(0.1, 1 - l - r);
+          const hf = Math.max(0.1, 1 - t - b);
+          f.push(`crop=trunc(iw*${wf.toFixed(4)}/2)*2:trunc(ih*${hf.toFixed(4)}/2)*2:iw*${l.toFixed(4)}:ih*${t.toFixed(4)}`);
+        } else {
+          const cw = p.w ?? "iw";
+          const ch = p.h ?? "ih";
+          const cx = p.x ?? 0;
+          const cy = p.y ?? 0;
+          f.push(`crop=${cw}:${ch}:${cx}:${cy}`);
+        }
         break;
       }
       case "fade": {
@@ -437,6 +496,28 @@ function clipAudioFilters(clip: Clip, speed: number, trackVolumeDb = 0, trackPan
     const p = effect.params as Record<string, number | boolean | string>;
     if (effect.type === "audio-volume" && p.gainDb != null) {
       af.push(`volume=${Number(p.gainDb).toFixed(2)}dB`);
+    } else if (effect.type === "volume" && p.gain != null) {
+      af.push(`volume=${Math.max(0, Math.min(4, Number(p.gain))).toFixed(3)}`);
+    } else if (effect.type === "fade") {
+      const fi = Number(p.inDuration ?? p.fadeIn ?? 0);
+      const fo = Number(p.outDuration ?? p.fadeOut ?? 0);
+      if (fi > 0) af.push(`afade=t=in:st=0:d=${fi.toFixed(3)}`);
+      if (fo > 0 && clip.duration > fo) {
+        af.push(`afade=t=out:st=${Math.max(0, clip.duration - fo).toFixed(3)}:d=${fo.toFixed(3)}`);
+      }
+    } else if (effect.type === "eq") {
+      if (p.voiceClarity) {
+        af.push("highpass=f=85", "lowpass=f=13500");
+      }
+      const low = Number(p.lowDb ?? 0);
+      const mid = Number(p.midDb ?? 0);
+      const high = Number(p.highDb ?? 0);
+      if (Math.abs(low) > 0.05) af.push(`equalizer=f=120:t=o:w=1.2:g=${low.toFixed(1)}`);
+      if (Math.abs(mid) > 0.05) af.push(`equalizer=f=1200:t=o:w=1.4:g=${mid.toFixed(1)}`);
+      if (Math.abs(high) > 0.05) af.push(`equalizer=f=4800:t=o:w=1.5:g=${high.toFixed(1)}`);
+      if (p.voiceClarity) {
+        af.push("acompressor=threshold=-18dB:ratio=3:attack=8:release=120:makeup=2");
+      }
     } else if (effect.type === "audio-denoise") {
       const nf = Math.max(-80, Math.min(-20, Number(p.noiseFloor ?? -25)));
       af.push("highpass=f=80", `afftdn=nf=${nf}`);
