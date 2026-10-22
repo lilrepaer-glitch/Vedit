@@ -1881,7 +1881,12 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   app.post("/api/v1/projects/:id/copilot", wrap(async (req, res, engine) => {
     try {
       const prompt = String(req.body?.prompt ?? "");
-      const result = await runStudioCopilot(engine, prompt, { dataDir });
+      const result = await runStudioCopilot(engine, prompt, {
+        dataDir,
+        playhead: req.body?.playhead != null ? Number(req.body.playhead) : undefined,
+        selectedClipId: typeof req.body?.selectedClipId === "string" ? req.body.selectedClipId : null,
+        history: Array.isArray(req.body?.history) ? req.body.history : undefined,
+      });
       res.json(result);
     } catch (err) {
       badRequest(res, (err as Error).message);

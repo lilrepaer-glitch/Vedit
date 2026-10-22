@@ -37,10 +37,18 @@ import {
 
 declare global {
   interface Window {
+    __veditResolveHttp?: (requestId: string, base64Response: string) => void;
     VeditAndroid?: {
       isAndroid?: () => boolean;
       getVersion?: () => string;
       httpRequest?: (method: string, url: string, headersJson: string, body: string) => string;
+      httpRequestAsync?: (
+        requestId: string,
+        method: string,
+        url: string,
+        headersJson: string,
+        body: string,
+      ) => void;
       toggleFullscreen?: (mode: string) => boolean;
       saveExportBase64?: (fileName: string, mimeType: string, base64Data: string) => string;
       shareLastExport?: () => boolean;
@@ -55,7 +63,7 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "0.9.0";
+const APK_VERSION = "0.9.1";
 const STORAGE_KEY_PROJECT = "vedit.apk.project.v3";
 const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
 const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
@@ -280,10 +288,36 @@ export function normalizeMobileBaseUrl(raw?: string): string {
   return u;
 }
 
+const pendingNativeHttp = new Map<
+  string,
+  { resolve: (rawJson: string) => void; timer: ReturnType<typeof setTimeout> }
+>();
+
+function installNativeHttpBridgeHook(): void {
+  if (typeof window === "undefined") return;
+  window.__veditResolveHttp = (requestId: string, base64Response: string) => {
+    const entry = pendingNativeHttp.get(requestId);
+    if (!entry) return;
+    pendingNativeHttp.delete(requestId);
+    clearTimeout(entry.timer);
+    try {
+      const bin = atob(base64Response);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      entry.resolve(new TextDecoder("utf-8").decode(bytes));
+    } catch {
+      entry.resolve('{"ok":false,"status":0,"error":"Bridge decode failed"}');
+    }
+  };
+}
+installNativeHttpBridgeHook();
+
 /**
- * CORS-free universal HTTP client:
- * On Android APK, delegates directly to `window.VeditAndroid.httpRequest(...)` (native Java
- * `HttpsURLConnection` with zero browser CORS restrictions). Falls back to `fetch` in browsers/tests.
+ * CORS-free universal non-blocking HTTP client:
+ * - Prefers `window.VeditAndroid.httpRequestAsync` on Android thread pool so long reasoning calls
+ *   never block the UI thread or collide across rapid consecutive prompts.
+ * - Supports synchronous `window.VeditAndroid.httpRequest` seamlessly for backwards compatibility.
+ * - Falls back to browser `fetch` outside Android APK.
  */
 async function nativeHttp(
   method: string,
@@ -292,6 +326,42 @@ async function nativeHttp(
   body?: unknown,
 ): Promise<{ ok: boolean; status: number; statusText: string; text: string }> {
   const serializedBody = body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : "";
+  if (typeof window !== "undefined" && window.VeditAndroid?.httpRequestAsync) {
+    installNativeHttpBridgeHook();
+    const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const rawResp = await new Promise<string>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingNativeHttp.delete(reqId);
+        resolve('{"ok":false,"status":0,"error":"Request timed out after 80s"}');
+      }, 80000);
+      pendingNativeHttp.set(reqId, { resolve, timer });
+      try {
+        window.VeditAndroid!.httpRequestAsync!(reqId, method, url, JSON.stringify(headers), serializedBody);
+      } catch (e) {
+        clearTimeout(timer);
+        pendingNativeHttp.delete(reqId);
+        resolve(JSON.stringify({ ok: false, status: 0, error: (e as Error).message }));
+      }
+    });
+    const parsed = JSON.parse(rawResp) as {
+      ok?: boolean;
+      status: number;
+      statusText?: string;
+      body?: string;
+      error?: string;
+    };
+    if (parsed.status === 0 && parsed.error) {
+      throw new Error(parsed.error);
+    }
+    const status = Number(parsed.status || 0);
+    return {
+      ok: parsed.ok !== undefined ? Boolean(parsed.ok) : status >= 200 && status < 300,
+      status,
+      statusText: parsed.statusText || "",
+      text: parsed.body ?? "",
+    };
+  }
+
   if (typeof window !== "undefined" && window.VeditAndroid?.httpRequest) {
     const rawResp = window.VeditAndroid.httpRequest(method, url, JSON.stringify(headers), serializedBody);
     const parsed = JSON.parse(rawResp) as {
@@ -334,22 +404,251 @@ function parseErrorMessage(rawText: string, status: number, statusText: string):
   return rawText.slice(0, 180).trim() || `HTTP ${status} ${statusText}`.trim();
 }
 
-async function runMobileLlmChat(
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-  opts: { baseUrl?: string; apiKey?: string; model?: string; maxTokens?: number } = {},
-): Promise<{ content: string; model: string; baseUrl: string; latencyMs: number }> {
-  const cur = readLocalApi();
+function resolveMobileEndpointAndModel(
+  opts: { baseUrl?: string; apiKey?: string; model?: string } | undefined,
+  cur: { baseUrl: string; apiKey: string; model: string },
+): { key: string; baseUrl: string; model: string; fallbacks: string[] } {
   const key =
-    opts.apiKey && !opts.apiKey.includes("••••")
+    opts?.apiKey && !opts.apiKey.includes("••••")
       ? sanitizeMobileApiKey(opts.apiKey)
       : sanitizeMobileApiKey(cur.apiKey);
   const autoPreset = detectPresetByKey(key);
-  const baseUrl = normalizeMobileBaseUrl(opts.baseUrl || autoPreset?.baseUrl || cur.baseUrl);
-  let model = (opts.model || autoPreset?.suggestedModels[0] || cur.model || "gpt-4o-mini").trim();
+  const savedBaseNorm = normalizeMobileBaseUrl(cur.baseUrl);
+  const effectiveSavedBase =
+    autoPreset && savedBaseNorm === "https://api.openai.com/v1" && autoPreset.id !== "openai"
+      ? autoPreset.baseUrl
+      : savedBaseNorm;
+
+  const baseUrl = normalizeMobileBaseUrl(opts?.baseUrl || effectiveSavedBase || autoPreset?.baseUrl || "https://api.openai.com/v1");
+  let model = (opts?.model || cur.model || autoPreset?.suggestedModels[0] || "gpt-4o-mini").trim();
 
   if (/api\.openai\.com/i.test(baseUrl) && model.startsWith("openai/")) {
     model = model.slice("openai/".length);
+  } else if (/generativelanguage\.googleapis\.com/i.test(baseUrl)) {
+    model = model.replace(/^models\//, "").replace(/^google\//, "");
+    if (!/^(gemini|gemma|learnlm)/i.test(model)) model = "gemini-2.5-flash";
+  } else if (/api\.anthropic\.com/i.test(baseUrl)) {
+    model = model.replace(/^anthropic\//, "");
+    if (!/^claude/i.test(model)) model = "claude-sonnet-4-20250514";
+  } else if (/api\.groq\.com/i.test(baseUrl)) {
+    if (/^(gpt-|claude-|gemini-)/i.test(model)) model = "llama-3.3-70b-versatile";
+  } else if (/api\.deepseek\.com/i.test(baseUrl)) {
+    model = model.replace(/^deepseek\//, "");
+    if (!/^deepseek/i.test(model)) model = "deepseek-chat";
+  } else if (/api\.x\.ai/i.test(baseUrl)) {
+    if (!/^grok/i.test(model)) model = "grok-2-latest";
   }
+
+  const fallbacks: string[] = [model];
+  const pushUnique = (m: string) => {
+    if (m && !fallbacks.includes(m)) fallbacks.push(m);
+  };
+  if (/generativelanguage\.googleapis\.com/i.test(baseUrl)) {
+    pushUnique("gemini-2.5-flash");
+    pushUnique("gemini-2.0-flash");
+  } else if (/api\.groq\.com/i.test(baseUrl)) {
+    pushUnique("llama-3.3-70b-versatile");
+    pushUnique("llama-3.1-8b-instant");
+  } else if (/openrouter\.ai/i.test(baseUrl) && (model.endsWith(":free") || model === "openrouter/free")) {
+    pushUnique("openrouter/free");
+    pushUnique("meta-llama/llama-3.3-70b-instruct:free");
+    pushUnique("google/gemma-3-27b-it:free");
+  } else if (/api\.openai\.com/i.test(baseUrl)) {
+    pushUnique("gpt-4o-mini");
+  } else if (/api\.anthropic\.com/i.test(baseUrl)) {
+    pushUnique("claude-3-5-haiku-latest");
+  } else if (/api\.deepseek\.com/i.test(baseUrl)) {
+    pushUnique("deepseek-chat");
+  }
+  return { key, baseUrl, model, fallbacks };
+}
+
+function sanitizeMobileMessages(
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+): Array<{ role: "system" | "user" | "assistant"; content: string }> {
+  const systems: string[] = [];
+  const convo: Array<{ role: "user" | "assistant"; content: string }> = [];
+  for (const m of messages) {
+    const text = String(m?.content ?? "").trim();
+    if (!text) continue;
+    if (m.role === "system") {
+      systems.push(text);
+      continue;
+    }
+    const role: "user" | "assistant" = m.role === "assistant" ? "assistant" : "user";
+    const prev = convo[convo.length - 1];
+    if (prev && prev.role === role) {
+      prev.content = `${prev.content}\n\n${text}`;
+    } else {
+      convo.push({ role, content: text });
+    }
+  }
+  if (convo.length > 0 && convo[0]!.role === "assistant") convo.shift();
+  if (convo.length === 0) convo.push({ role: "user", content: "OK" });
+  return systems.length > 0 ? [{ role: "system", content: systems.join("\n\n") }, ...convo] : convo;
+}
+
+function extractMobileAssistantText(rawJsonText: string): { text: string; model?: string } {
+  const data = JSON.parse(rawJsonText) as {
+    model?: string;
+    content?: unknown;
+    choices?: Array<{
+      message?: { content?: unknown; reasoning_content?: string; reasoning?: string };
+      text?: string;
+    }>;
+  };
+  const msg = data.choices?.[0]?.message;
+  const raw = msg?.content ?? data.content;
+  if (typeof raw === "string" && raw.trim()) {
+    return { text: raw.trim(), model: data.model };
+  }
+  if (Array.isArray(raw)) {
+    const joined = raw
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object") {
+          const p = part as { type?: string; text?: string };
+          if (p.type === "thinking") return "";
+          return typeof p.text === "string" ? p.text : "";
+        }
+        return "";
+      })
+      .join("")
+      .trim();
+    if (joined) return { text: joined, model: data.model };
+  }
+  if (typeof data.choices?.[0]?.text === "string" && data.choices[0].text.trim()) {
+    return { text: data.choices[0].text.trim(), model: data.model };
+  }
+  const reasoning = msg?.reasoning_content || msg?.reasoning || "";
+  return { text: typeof reasoning === "string" ? reasoning.trim() : "", model: data.model };
+}
+
+export function parseMobileAiJsonSafe<T = Record<string, unknown>>(raw: string): T | null {
+  if (!raw || typeof raw !== "string") return null;
+  const cleaned = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/```(?:json)?\s*([\s\S]*?)```/gi, "$1")
+    .trim();
+  if (!cleaned) return null;
+
+  const normalize = (src: string) => {
+    let out = "";
+    let inStr = false;
+    let esc = false;
+    for (let i = 0; i < src.length; i++) {
+      const ch = src[i]!;
+      if (esc) {
+        out += ch;
+        esc = false;
+        continue;
+      }
+      if (ch === "\\" && inStr) {
+        out += ch;
+        esc = true;
+        continue;
+      }
+      if (ch === '"') {
+        inStr = !inStr;
+        out += ch;
+        continue;
+      }
+      if (inStr) {
+        if (ch === "\n") {
+          out += "\\n";
+          continue;
+        }
+        if (ch === "\r") continue;
+        if (ch === "\t") {
+          out += "\\t";
+          continue;
+        }
+      }
+      out += ch;
+    }
+    if (inStr) out += '"';
+    return out.replace(/,\s*([}\]])/g, "$1");
+  };
+
+  const candidates: string[] = [];
+  const starts: number[] = [];
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]!;
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === "\\" && inStr) {
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (inStr) continue;
+    if (ch === "{") starts.push(i);
+    else if (ch === "}" && starts.length > 0) {
+      const openIdx = starts.pop()!;
+      if (starts.length === 0) candidates.push(cleaned.slice(openIdx, i + 1));
+    }
+  }
+
+  if (starts.length > 0) {
+    let tail = normalize(cleaned.slice(starts[0]!));
+    const stack: string[] = [];
+    let sIn = false;
+    let sEsc = false;
+    for (let i = 0; i < tail.length; i++) {
+      const c = tail[i]!;
+      if (sEsc) {
+        sEsc = false;
+        continue;
+      }
+      if (c === "\\" && sIn) {
+        sEsc = true;
+        continue;
+      }
+      if (c === '"') {
+        sIn = !sIn;
+        continue;
+      }
+      if (sIn) continue;
+      if (c === "{") stack.push("}");
+      else if (c === "[") stack.push("]");
+      else if ((c === "}" || c === "]") && stack.length > 0) stack.pop();
+    }
+    tail = tail.replace(/,\s*$/, "") + stack.reverse().join("");
+    candidates.push(tail);
+  }
+
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    try {
+      return JSON.parse(candidates[i]!) as T;
+    } catch {
+      try {
+        return JSON.parse(normalize(candidates[i]!)) as T;
+      } catch {
+        /* continue */
+      }
+    }
+  }
+  return null;
+}
+
+const waitMobileMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function runMobileLlmChat(
+  rawMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  opts: { baseUrl?: string; apiKey?: string; model?: string; maxTokens?: number } = {},
+): Promise<{ content: string; model: string; baseUrl: string; latencyMs: number }> {
+  const cur = readLocalApi();
+  const { key, baseUrl, fallbacks } = resolveMobileEndpointAndModel(opts, cur);
+  const messages = sanitizeMobileMessages(rawMessages);
+  const maxTokens = opts.maxTokens ?? 1800;
 
   const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|192\.168\.|10\.|172\.)/i.test(baseUrl);
   if (!key && !isLocal) {
@@ -357,82 +656,122 @@ async function runMobileLlmChat(
   }
 
   const started = Date.now();
-  const isAnthropic = /anthropic\.com/i.test(baseUrl) || key.startsWith("sk-ant-");
+  const isAnthropic = /anthropic\.com/i.test(baseUrl) || (key.startsWith("sk-ant-") && !/openrouter\.ai/i.test(baseUrl));
+  let lastErr: Error | null = null;
 
-  if (isAnthropic) {
-    const sys = messages
-      .filter((m) => m.role === "system")
-      .map((m) => m.content)
-      .join("\n\n");
-    const turns = messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-    const resp = await nativeHttp(
-      "POST",
-      `${baseUrl.replace(/\/openai$/i, "")}/messages`,
-      {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-      },
-      {
-        model,
-        max_tokens: opts.maxTokens ?? 900,
-        ...(sys ? { system: sys } : {}),
-        messages: turns.length ? turns : [{ role: "user", content: "OK" }],
-      },
-    );
-    if (!resp.ok) {
-      throw new Error(parseErrorMessage(resp.text, resp.status, resp.statusText));
+  for (let mIdx = 0; mIdx < fallbacks.length; mIdx++) {
+    const candidateModel = fallbacks[mIdx]!;
+    const attempts = mIdx === 0 ? 2 : 1;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        if (isAnthropic) {
+          const sys = messages
+            .filter((m) => m.role === "system")
+            .map((m) => m.content)
+            .join("\n\n");
+          const turns = messages
+            .filter((m) => m.role !== "system")
+            .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+          const resp = await nativeHttp(
+            "POST",
+            `${baseUrl.replace(/\/openai$/i, "")}/messages`,
+            {
+              "Content-Type": "application/json",
+              "x-api-key": key,
+              "anthropic-version": "2023-06-01",
+            },
+            {
+              model: candidateModel,
+              max_tokens: maxTokens,
+              ...(sys ? { system: sys } : {}),
+              messages: turns.length ? turns : [{ role: "user", content: "OK" }],
+            },
+          );
+          if (!resp.ok) {
+            const msg = parseErrorMessage(resp.text, resp.status, resp.statusText);
+            lastErr = new Error(msg);
+            if ((resp.status === 429 || resp.status >= 500 || resp.status === 404) && (attempt + 1 < attempts || mIdx + 1 < fallbacks.length)) {
+              if (attempt + 1 < attempts) await waitMobileMs(700 * (attempt + 1));
+              continue;
+            }
+            throw lastErr;
+          }
+          const extracted = extractMobileAssistantText(resp.text);
+          return {
+            content: extracted.text,
+            model: extracted.model || candidateModel,
+            baseUrl,
+            latencyMs: Date.now() - started,
+          };
+        }
+
+        // Only attach OpenRouter headers on OpenRouter to prevent browser CORS rejections on other APIs!
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (/openrouter\.ai/i.test(baseUrl)) {
+          headers["HTTP-Referer"] = "https://vedit.studio";
+          headers["X-Title"] = "Vedit Studio";
+        }
+        if (key) headers.Authorization = `Bearer ${key}`;
+
+        const reasoning = /^(o1|o3|o4|gpt-5|deepseek-reasoner|qwq)/i.test(candidateModel);
+        let resp = await nativeHttp(
+          "POST",
+          `${baseUrl}/chat/completions`,
+          headers,
+          reasoning
+            ? { model: candidateModel, messages, max_completion_tokens: maxTokens }
+            : { model: candidateModel, messages, temperature: cur.temperature ?? 0.2, max_tokens: maxTokens },
+        );
+
+        if (resp.status === 400 && !reasoning && /max_tokens|max_completion_tokens|temperature|unsupported/i.test(resp.text)) {
+          resp = await nativeHttp("POST", `${baseUrl}/chat/completions`, headers, {
+            model: candidateModel,
+            messages,
+            max_completion_tokens: maxTokens,
+          });
+        }
+
+        if (!resp.ok) {
+          const msg = parseErrorMessage(resp.text, resp.status, resp.statusText);
+          lastErr = new Error(`${msg} (${candidateModel})`);
+          const retryable =
+            resp.status === 429 ||
+            resp.status === 408 ||
+            resp.status === 404 ||
+            resp.status === 402 ||
+            resp.status >= 500;
+          if (retryable && (attempt + 1 < attempts || mIdx + 1 < fallbacks.length)) {
+            if (attempt + 1 < attempts) await waitMobileMs(700 * (attempt + 1));
+            continue;
+          }
+          throw lastErr;
+        }
+
+        const extracted = extractMobileAssistantText(resp.text);
+        return {
+          content: extracted.text,
+          model: extracted.model || candidateModel,
+          baseUrl,
+          latencyMs: Date.now() - started,
+        };
+      } catch (err) {
+        lastErr = err instanceof Error ? err : new Error(String(err));
+        const netErr = /network|socket|eof|reset|timeout|fetch/i.test(lastErr.message);
+        if (netErr && attempt + 1 < attempts) {
+          await waitMobileMs(500 * (attempt + 1));
+          continue;
+        }
+        if (!netErr && mIdx + 1 >= fallbacks.length) {
+          throw lastErr;
+        }
+      }
     }
-    const data = JSON.parse(resp.text) as { model?: string; content?: Array<{ text?: string }> };
-    return {
-      content: (data.content ?? []).map((c) => c.text ?? "").join("").trim(),
-      model: data.model || model,
-      baseUrl,
-      latencyMs: Date.now() - started,
-    };
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "HTTP-Referer": "https://vedit.studio",
-    "X-Title": "Vedit Studio",
-  };
-  if (key) headers.Authorization = `Bearer ${key}`;
-
-  const reasoning = /^(o1|o3|o4|gpt-5)/i.test(model);
-  let resp = await nativeHttp(
-    "POST",
-    `${baseUrl}/chat/completions`,
-    headers,
-    reasoning
-      ? { model, messages, max_completion_tokens: opts.maxTokens ?? 900 }
-      : { model, messages, temperature: cur.temperature ?? 0.2, max_tokens: opts.maxTokens ?? 900 },
-  );
-
-  // Automatic retry for models that reject `max_tokens` or `temperature`
-  if (resp.status === 400 && !reasoning && /max_tokens|max_completion_tokens|temperature/i.test(resp.text)) {
-    resp = await nativeHttp("POST", `${baseUrl}/chat/completions`, headers, {
-      model,
-      messages,
-      max_completion_tokens: opts.maxTokens ?? 900,
-    });
-  }
-
-  if (!resp.ok) {
-    throw new Error(parseErrorMessage(resp.text, resp.status, resp.statusText));
-  }
-  const parsed = JSON.parse(resp.text) as {
-    model?: string;
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  return {
-    content: parsed.choices?.[0]?.message?.content?.trim() || "",
-    model: parsed.model || model,
-    baseUrl,
-    latencyMs: Date.now() - started,
-  };
+  throw lastErr ?? new Error("AI request failed");
 }
 
 // ---------- Studio Presets & Project State ----------
@@ -1549,120 +1888,301 @@ export const mobileApi = {
     persist();
     return { ok: true };
   },
-  runCopilot: async (prompt: string) => {
+  runCopilot: async (
+    prompt: string,
+    context?: {
+      playhead?: number;
+      selectedClipId?: string | null;
+      history?: Array<{ role: "user" | "assistant"; text: string }>;
+    },
+  ) => {
     recordUndo();
     const cfg = readLocalApi();
     const seq = activeSeq();
     const allClips = seq.tracks.flatMap((t) => t.clips);
-    const lead = allClips[0];
+    const resolveTarget = (explicitId?: unknown) => {
+      if (typeof explicitId === "string" && explicitId) {
+        const exact = allClips.find((c) => c.id === explicitId);
+        if (exact) return exact;
+      }
+      if (context?.selectedClipId) {
+        const sel = allClips.find((c) => c.id === context.selectedClipId);
+        if (sel) return sel;
+      }
+      return allClips[0];
+    };
+    const lead = resolveTarget();
     const steps: Array<{ step: string; detail: string }> = [];
 
     if (sanitizeMobileApiKey(cfg.apiKey) || /^https?:\/\/(127\.0\.0\.1|localhost|192\.168\.|10\.)/i.test(cfg.baseUrl)) {
       const timelineContext = JSON.stringify({
         resolution: `${seq.width}x${seq.height}`,
         fps: seq.fps,
-        clips: allClips.map((c) => ({ id: c.id, name: c.name, start: c.start, duration: c.duration })),
-        captions: seq.captions,
+        playhead: Number((context?.playhead ?? 0).toFixed(2)),
+        selectedClipId: context?.selectedClipId ?? null,
+        clips: allClips.slice(0, 24).map((c) => ({
+          id: c.id,
+          name: c.name.slice(0, 48),
+          start: Number(c.start.toFixed(2)),
+          duration: Number(c.duration.toFixed(2)),
+        })),
+        captionCount: seq.captions.length,
+        recentCaptions: seq.captions.slice(0, 12).map((c) => ({
+          id: c.id,
+          text: c.text.slice(0, 60),
+          start: c.start,
+          end: c.end,
+        })),
       });
+
+      const historyMsgs = (context?.history ?? [])
+        .slice(-6)
+        .filter((h) => h && typeof h.text === "string" && h.text.trim() && !h.text.startsWith("Error:"))
+        .map((h) => ({
+          role: (h.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+          content: h.text.slice(0, 320),
+        }));
 
       const llmRes = await runMobileLlmChat(
         [
           {
             role: "system",
             content:
-              `You are the Vedit Video Editor AI Engine. Inspect the user's timeline: ${timelineContext}. ` +
-              `Respond ONLY with valid JSON matching: ` +
-              `{"reply":"concise human summary in the user's language","actions":[` +
-              `{"op":"lut","lutId":"kodak-2383|teal-orange-blockbuster|fuji-eterna|warm-golden|cool-noir|bleach-bypass|silver-mono|cyberpunk-neon"},` +
-              `{"op":"adjust","exposure":0,"contrast":15,"saturation":12,"temperature":8,"vignette":15},` +
-              `{"op":"speed","rate":1.25},` +
-              `{"op":"transition","kind":"dissolve|fade-black|slide-left|zoom-in","duration":0.5},` +
-              `{"op":"fade","fadeIn":0.5,"fadeOut":0.5},` +
-              `{"op":"aspect","ratio":"9:16|16:9|1:1|4:5"},` +
-              `{"op":"caption","text":"Subtitle text","start":0.2,"end":3.5},` +
-              `{"op":"split","at":2.0}` +
-              `]}. Include only actions requested by the user.`,
+              `You are Vedit Studio AI Video Editor Agent. Inspect timeline state: ${timelineContext}. ` +
+              `Return ONLY a single valid JSON object (no markdown fences): ` +
+              `{"reply":"concise helpful response in the user's language","actions":[]}. ` +
+              `Supported action ops in \`actions\` (include ONLY requested operations; \`[]\` for questions): ` +
+              `{"op":"aspect","ratio":"9:16|16:9|1:1|4:5|21:9"}, ` +
+              `{"op":"background","value":"blur|#000000"}, ` +
+              `{"op":"lut","lutId":"kodak-2383|teal-orange-blockbuster|fuji-eterna|warm-golden|cool-noir|bleach-bypass|silver-mono|cyberpunk-neon"}, ` +
+              `{"op":"adjust","exposure":0,"brightness":0,"contrast":15,"saturation":12,"temperature":8,"tint":0,"fade":0,"vignette":15,"blur":0}, ` +
+              `{"op":"curves","preset":"linear|cinema-s-curve|matte-fade|high-contrast|soft-rolloff","clarity":12}, ` +
+              `{"op":"chroma_key","color":"#00ff00","similarity":0.32,"blend":0.1,"despill":true}, ` +
+              `{"op":"eq","preset":"flat|voice-podcast|bass-boost|de-mud|crisp-vocal|warm-cinema"}, ` +
+              `{"op":"volume","gain":1.0}, ` +
+              `{"op":"speed","rate":1.25}, ` +
+              `{"op":"transition","kind":"dissolve|fade-black|fade-white|wipe-left|wipe-right|slide-left|slide-up|zoom-in","duration":0.5}, ` +
+              `{"op":"fade","fadeIn":0.5,"fadeOut":0.5}, ` +
+              `{"op":"layout","value":"pip-bottom-right|pip-top-right|split-left|split-right|full-reset"}, ` +
+              `{"op":"crop","left":0,"right":0,"top":0,"bottom":0}, ` +
+              `{"op":"caption","text":"Subtitle text","start":0.2,"end":3.5}, ` +
+              `{"op":"clear_captions"}, ` +
+              `{"op":"reset_effects"}, ` +
+              `{"op":"split","at":2.0}, ` +
+              `{"op":"trim","start":0,"end":4}.`,
           },
+          ...historyMsgs,
           { role: "user", content: prompt },
         ],
-        { maxTokens: 700 },
+        { maxTokens: 1800 },
       );
 
-      const jsonMatch = /\{[\s\S]*\}/.exec(llmRes.content);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]) as {
-          reply?: string;
-          actions?: Array<Record<string, unknown>>;
-        };
-        for (const act of parsed.actions ?? []) {
-          const op = String(act.op || "");
-          if (op === "lut" && lead) {
-            const lutId = String(act.lutId || "kodak-2383");
-            lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId, intensity: 100 } }];
-            steps.push({ step: "LUT", detail: lutId });
-          } else if (op === "adjust" && lead) {
-            const params: Record<string, number> = {};
-            for (const k of ["exposure", "brightness", "contrast", "saturation", "temperature", "tint", "fade", "vignette", "blur"]) {
-              if (act[k] != null) params[k] = Number(act[k]);
+      const parsed = parseMobileAiJsonSafe<{
+        reply?: string;
+        actions?: Array<Record<string, unknown>>;
+      }>(llmRes.content);
+
+      if (parsed) {
+        for (const act of Array.isArray(parsed.actions) ? parsed.actions : []) {
+          if (!act || typeof act !== "object") continue;
+          const op = String(act.op || "").toLowerCase().trim();
+          const target = resolveTarget(act.clipId);
+          try {
+            if ((op === "lut" || op === "lut3d") && target) {
+              const lutId = String(act.lutId || act.value || "kodak-2383");
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "lut3d"),
+                { id: uid("fx"), type: "lut3d", params: { lutId, intensity: 100 } },
+              ];
+              steps.push({ step: "LUT", detail: lutId });
+            } else if (op === "adjust" && target) {
+              const params: Record<string, number> = {};
+              for (const k of [
+                "exposure",
+                "brightness",
+                "contrast",
+                "saturation",
+                "temperature",
+                "tint",
+                "fade",
+                "vignette",
+                "blur",
+              ]) {
+                if (act[k] != null && Number.isFinite(Number(act[k]))) params[k] = Number(act[k]);
+              }
+              target.effects = [...target.effects.filter((e) => e.type !== "adjust"), { id: uid("fx"), type: "adjust", params }];
+              steps.push({ step: "Color", detail: "Updated color & light adjustments" });
+            } else if (op === "curves" && target) {
+              const preset = (act.preset || act.value || "cinema-s-curve") as ToneCurvePresetUi["id"];
+              const clarity = Number(act.clarity ?? 10);
+              const pts = computeCurvePoints(0, 0, 0, preset);
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "curves"),
+                { id: uid("fx"), type: "curves", params: { preset, shadows: 0, midtones: 0, highlights: 0, clarity, points: pts } },
+              ];
+              steps.push({ step: "Curves", detail: preset });
+            } else if (op === "chroma_key" && target) {
+              const color = String(act.color || act.value || "#00ff00");
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "chroma-key" && e.type !== "chromakey"),
+                {
+                  id: uid("fx"),
+                  type: "chroma-key",
+                  params: {
+                    color,
+                    similarity: Number(act.similarity ?? 0.32),
+                    blend: Number(act.blend ?? 0.1),
+                    despill: act.despill !== false,
+                  },
+                },
+              ];
+              steps.push({ step: "Chroma Key", detail: color });
+            } else if (op === "eq" && target) {
+              const preset = String(act.preset || act.value || "voice-podcast");
+              const presetObj = AUDIO_EQ_PRESETS_UI.find((p) => p.id === preset);
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "eq"),
+                {
+                  id: uid("fx"),
+                  type: "eq",
+                  params: {
+                    preset,
+                    lowDb: presetObj?.lowDb ?? 0,
+                    midDb: presetObj?.midDb ?? 0,
+                    highDb: presetObj?.highDb ?? 0,
+                    voiceClarity: presetObj?.voiceClarity ?? true,
+                  },
+                },
+              ];
+              steps.push({ step: "EQ", detail: preset });
+            } else if (op === "volume" && target) {
+              const gain = Math.max(0, Math.min(2, Number(act.gain ?? act.value ?? 1)));
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "volume"),
+                { id: uid("fx"), type: "volume", params: { gain } },
+              ];
+              steps.push({ step: "Volume", detail: `${Math.round(gain * 100)}%` });
+            } else if (op === "speed" && target) {
+              const rate = Math.max(0.25, Math.min(4, Number(act.rate ?? act.value ?? 1.25)));
+              const prevRate = Number(target.effects.find((e) => e.type === "speed")?.params?.rate ?? 1) || 1;
+              const span = target.duration * prevRate;
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "speed"),
+                { id: uid("fx"), type: "speed", params: { rate } },
+              ];
+              target.duration = Math.max(0.2, Number((span / rate).toFixed(3)));
+              steps.push({ step: "Speed", detail: `${rate}×` });
+            } else if (op === "transition") {
+              const kind = String(act.kind || act.value || "dissolve");
+              const duration = Math.max(0.1, Math.min(3, Number(act.duration ?? 0.5)));
+              for (const c of allClips) {
+                c.effects = [
+                  ...c.effects.filter((e) => e.type !== "transition"),
+                  { id: uid("fx"), type: "transition", params: { kind, duration } },
+                ];
+              }
+              steps.push({ step: "Transition", detail: `${kind} (${duration}s)` });
+            } else if (op === "fade" && target) {
+              const fadeIn = Number(act.fadeIn ?? act.value ?? 0.5);
+              const fadeOut = Number(act.fadeOut ?? act.value ?? 0.5);
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "fade"),
+                { id: uid("fx"), type: "fade", params: { fadeIn, fadeOut } },
+              ];
+              steps.push({ step: "Fade", detail: `${fadeIn}s / ${fadeOut}s` });
+            } else if (op === "layout" && target) {
+              const layout = String(act.value || act.layout || "pip-bottom-right");
+              const ox = Math.round(seq.width * 0.25);
+              const oy = Math.round(seq.height * 0.25);
+              if (layout === "pip-bottom-right") target.transform = { ...target.transform, x: ox, y: oy, scaleX: 0.36, scaleY: 0.36 };
+              else if (layout === "pip-top-right") target.transform = { ...target.transform, x: ox, y: -oy, scaleX: 0.36, scaleY: 0.36 };
+              else if (layout === "split-left") target.transform = { ...target.transform, x: -ox, y: 0, scaleX: 0.5, scaleY: 1 };
+              else if (layout === "split-right") target.transform = { ...target.transform, x: ox, y: 0, scaleX: 0.5, scaleY: 1 };
+              else target.transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
+              steps.push({ step: "Layout", detail: layout });
+            } else if (op === "crop" && target) {
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "crop"),
+                {
+                  id: uid("fx"),
+                  type: "crop",
+                  params: {
+                    left: Number(act.left ?? 0),
+                    right: Number(act.right ?? 0),
+                    top: Number(act.top ?? 0),
+                    bottom: Number(act.bottom ?? 0),
+                  },
+                },
+              ];
+              steps.push({ step: "Crop", detail: "Updated crop" });
+            } else if (op === "aspect") {
+              const ratio = String(act.ratio || act.value || "9:16");
+              if (ratio === "9:16") { seq.width = 1080; seq.height = 1920; }
+              else if (ratio === "1:1") { seq.width = 1080; seq.height = 1080; }
+              else if (ratio === "4:5") { seq.width = 1080; seq.height = 1350; }
+              else if (ratio === "21:9") { seq.width = 2560; seq.height = 1080; }
+              else { seq.width = 1920; seq.height = 1080; }
+              steps.push({ step: "Canvas", detail: `${seq.width}×${seq.height}` });
+            } else if (op === "background") {
+              seq.background = String(act.value || "blur");
+              steps.push({ step: "Canvas", detail: `Background: ${seq.background}` });
+            } else if ((op === "caption" || op === "add_caption") && (act.text || act.value)) {
+              const text = String(act.text || act.value);
+              const start = Number(act.start ?? context?.playhead ?? 0.2);
+              const end = act.end != null ? Number(act.end) : start + Number(act.duration ?? 3.2);
+              seq.captions.push({ id: uid("cap"), text, start, end });
+              steps.push({ step: "Caption", detail: text });
+            } else if (op === "clear_captions") {
+              seq.captions = [];
+              steps.push({ step: "Captions", detail: "Cleared all captions" });
+            } else if (op === "reset_effects" && target) {
+              target.effects = [];
+              target.transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
+              steps.push({ step: "Reset", detail: target.name });
+            } else if (op === "split" && target) {
+              const rawAt = Number(act.at ?? context?.playhead ?? target.start + target.duration / 2);
+              const at =
+                rawAt > target.start + 0.1 && rawAt < target.start + target.duration - 0.1
+                  ? rawAt
+                  : target.start + target.duration / 2;
+              if (target.duration > 0.25) {
+                const leftDur = Number((at - target.start).toFixed(3));
+                const right: Clip = {
+                  ...clone(target),
+                  id: uid("clip"),
+                  start: at,
+                  duration: Number((target.duration - leftDur).toFixed(3)),
+                  in: target.in + leftDur,
+                };
+                target.duration = leftDur;
+                target.out = target.in + leftDur;
+                seq.tracks[0]!.clips.push(right);
+                steps.push({ step: "Split", detail: `Split at ${at.toFixed(2)}s` });
+              }
+            } else if (op === "trim" && target) {
+              const s = act.start != null ? Math.max(0, Number(act.start)) : target.start;
+              const e = act.end != null ? Math.max(s + 0.2, Number(act.end)) : target.start + target.duration;
+              target.start = s;
+              target.duration = Number((e - s).toFixed(3));
+              target.out = Number((target.in + target.duration).toFixed(3));
+              steps.push({ step: "Trim", detail: `${s.toFixed(2)}s–${e.toFixed(2)}s` });
             }
-            lead.effects = [...lead.effects.filter((e) => e.type !== "adjust"), { id: uid("fx"), type: "adjust", params }];
-            steps.push({ step: "Color", detail: "Updated color adjustments" });
-          } else if (op === "speed" && lead) {
-            const rate = Math.max(0.25, Math.min(4, Number(act.rate ?? 1.25)));
-            lead.effects = [...lead.effects.filter((e) => e.type !== "speed"), { id: uid("fx"), type: "speed", params: { rate } }];
-            lead.duration = Math.max(0.2, Number((lead.duration / rate).toFixed(3)));
-            steps.push({ step: "Speed", detail: `${rate}×` });
-          } else if (op === "transition") {
-            const kind = String(act.kind || "dissolve");
-            const duration = Number(act.duration ?? 0.5);
-            for (const c of allClips) {
-              c.effects = [...c.effects.filter((e) => e.type !== "transition"), { id: uid("fx"), type: "transition", params: { kind, duration } }];
-            }
-            steps.push({ step: "Transition", detail: `${kind} (${duration}s)` });
-          } else if (op === "fade" && lead) {
-            const fadeIn = Number(act.fadeIn ?? 0.5);
-            const fadeOut = Number(act.fadeOut ?? 0.5);
-            lead.effects = [...lead.effects.filter((e) => e.type !== "fade"), { id: uid("fx"), type: "fade", params: { fadeIn, fadeOut } }];
-            steps.push({ step: "Fade", detail: `${fadeIn}s / ${fadeOut}s` });
-          } else if (op === "aspect") {
-            const ratio = String(act.ratio || "9:16");
-            if (ratio === "9:16") { seq.width = 1080; seq.height = 1920; }
-            else if (ratio === "1:1") { seq.width = 1080; seq.height = 1080; }
-            else if (ratio === "4:5") { seq.width = 1080; seq.height = 1350; }
-            else { seq.width = 1920; seq.height = 1080; }
-            steps.push({ step: "Canvas", detail: `${seq.width}×${seq.height}` });
-          } else if (op === "caption" && act.text) {
-            seq.captions.push({
-              id: uid("cap"),
-              text: String(act.text),
-              start: Number(act.start ?? 0.2),
-              end: Number(act.end ?? 3.5),
-            });
-            steps.push({ step: "Caption", detail: String(act.text) });
-          } else if (op === "split" && lead) {
-            const at = Number(act.at ?? lead.start + lead.duration / 2);
-            if (at > lead.start + 0.1 && at < lead.start + lead.duration - 0.1) {
-              const leftDur = Number((at - lead.start).toFixed(3));
-              const right: Clip = { ...clone(lead), id: uid("clip"), start: at, duration: Number((lead.duration - leftDur).toFixed(3)), in: lead.in + leftDur };
-              lead.duration = leftDur;
-              lead.out = lead.in + leftDur;
-              seq.tracks[0]!.clips.push(right);
-              steps.push({ step: "Split", detail: `Split at ${at.toFixed(2)}s` });
-            }
+          } catch {
+            /* isolate individual step */
           }
         }
         persist();
         return {
           checkpointId: uid("snap"),
           stepsExecuted: steps,
-          summary: parsed.reply || llmRes.content.slice(0, 240),
+          summary: parsed.reply || llmRes.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim().slice(0, 320),
         };
       }
       persist();
       return {
         checkpointId: uid("snap"),
         stepsExecuted: steps,
-        summary: llmRes.content,
+        summary: llmRes.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim(),
       };
     }
 
@@ -1975,24 +2495,25 @@ export const mobileApi = {
               role: "system",
               content:
                 `Generate concise timed video captions in language "${language}" for clip "${asset?.name ?? "Video"}" (${dur.toFixed(1)}s). ` +
-                `Return ONLY JSON array: [{"text":"...","start":0.2,"end":2.4}]`,
+                `Return ONLY valid JSON: {"segments":[{"text":"...","start":0.2,"end":2.4}]}`,
             },
             { role: "user", content: "Create natural timed subtitles across the clip duration." },
           ],
-          { maxTokens: 450 },
+          { maxTokens: 1200 },
         );
-        const arrMatch = /\[[\s\S]*\]/.exec(ai.content);
-        if (arrMatch) {
-          const segs = JSON.parse(arrMatch[0]) as Array<{ text: string; start: number; end: number }>;
-          for (const seg of segs) {
-            if (seg.text) {
-              activeSeq().captions.push({
-                id: uid("cap"),
-                text: String(seg.text),
-                start: Number(seg.start ?? 0),
-                end: Number(seg.end ?? 2),
-              });
-            }
+        const parsedObj = parseMobileAiJsonSafe<{ segments?: Array<{ text: string; start: number; end: number }> }>(ai.content);
+        const arrMatch = !parsedObj?.segments ? /\[[\s\S]*\]/.exec(ai.content.replace(/<think>[\s\S]*?<\/think>/gi, "")) : null;
+        const segs =
+          parsedObj?.segments ??
+          (arrMatch ? (JSON.parse(arrMatch[0]) as Array<{ text: string; start: number; end: number }>) : []);
+        for (const seg of segs) {
+          if (seg?.text) {
+            activeSeq().captions.push({
+              id: uid("cap"),
+              text: String(seg.text),
+              start: Number(seg.start ?? 0),
+              end: Number(seg.end ?? 2),
+            });
           }
         }
       } catch {
@@ -2104,12 +2625,7 @@ export const mobileApi = {
   },
   fetchApiModels: async (body: { baseUrl?: string; apiKey?: string }) => {
     const cur = readLocalApi();
-    const key =
-      body.apiKey && !body.apiKey.includes("••••")
-        ? sanitizeMobileApiKey(body.apiKey)
-        : sanitizeMobileApiKey(cur.apiKey);
-    const autoPreset = detectPresetByKey(key);
-    const baseUrl = normalizeMobileBaseUrl(body.baseUrl || autoPreset?.baseUrl || cur.baseUrl);
+    const { key, baseUrl } = resolveMobileEndpointAndModel(body, cur);
 
     const headers: Record<string, string> = { Accept: "application/json" };
     if (/anthropic\.com/i.test(baseUrl) || key.startsWith("sk-ant-")) {
@@ -2138,11 +2654,11 @@ export const mobileApi = {
     return { models, source: "remote", baseUrl };
   },
   testApiSettings: async (body: { baseUrl?: string; apiKey?: string; model?: string }) => {
-    const res = await runMobileLlmChat([{ role: "user", content: "Reply with: OK" }], {
+    const res = await runMobileLlmChat([{ role: "user", content: "Reply with the single word: OK" }], {
       baseUrl: body.baseUrl,
       apiKey: body.apiKey,
       model: body.model,
-      maxTokens: 32,
+      maxTokens: 256,
     });
     return {
       ok: true,
