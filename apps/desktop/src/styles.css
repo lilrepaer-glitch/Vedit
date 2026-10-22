@@ -320,9 +320,10 @@ textarea:focus {
 
 /* ---- Drag Resizer Splitters (Horizontal & Vertical) ---- */
 .splitter-v {
-  width: 8px;
+  width: 10px;
   flex: none;
   cursor: col-resize;
+  touch-action: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -345,9 +346,10 @@ textarea:focus {
 }
 
 .splitter-h {
-  height: 8px;
+  height: 10px;
   flex: none;
   cursor: row-resize;
+  touch-action: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -838,6 +840,7 @@ textarea:focus {
   align-items: center;
   gap: 6px;
   cursor: pointer;
+  touch-action: none;
   color: #fff;
   font-size: 11px;
   font-weight: 500;
@@ -969,6 +972,45 @@ textarea:focus {
   background: rgba(0, 200, 215, 0.2);
   border-color: var(--accent);
   color: #67e8f9;
+}
+
+/* ---- Mobile Phone & Tablet Responsive Touch Polish (Android APK Portrait & Landscape) ---- */
+@media (max-width: 900px) {
+  .toolbar {
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 0 8px;
+    gap: 6px;
+  }
+  .toolbar::-webkit-scrollbar {
+    display: none;
+  }
+  .topbar-center {
+    min-width: 175px;
+  }
+  .studio-rail {
+    width: 54px;
+    margin-right: 4px;
+    padding: 4px 2px;
+  }
+  .left-drawer,
+  .right-drawer {
+    position: fixed;
+    top: 46px;
+    bottom: 8px;
+    z-index: 50;
+    max-width: calc(100vw - 68px);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.72);
+  }
+  .left-drawer {
+    left: 60px;
+  }
+  .right-drawer {
+    right: 6px;
+  }
+  .form-grid-2 {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ---- Toast ---- */

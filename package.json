@@ -1,8 +1,8 @@
 {
   "name": "vedit",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "private": true,
-  "description": "Vedit — desktop video editor with MCP server and direct API for AI-driven editing (F0 skeleton)",
+  "description": "Vedit Studio — native Windows & Android NLE video editor",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -19,7 +19,8 @@
     "dev:api": "tsx src/cli/index.ts serve",
     "dev:mcp": "tsx src/cli/index.ts mcp",
     "dev:ui": "npm run dev -w @vedit/desktop",
-    "dist:desktop": "node scripts/build-desktop.mjs"
+    "dist:desktop": "node scripts/build-desktop.mjs",
+    "dist:apk": "node scripts/build-apk.mjs"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",

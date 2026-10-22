@@ -3,6 +3,9 @@ dist/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/resources/
+apps/android/build/
+apps/android/*.p12
+apps/android/*.jks
 *.log
 .DS_Store
 .vedit/
