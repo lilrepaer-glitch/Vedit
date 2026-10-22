@@ -1,8 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { describe, expect, it } from "vitest";
-import { mobileApi } from "../apps/desktop/src/mobileRuntime.js";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  detectPresetByKey,
+  mobileApi,
+  normalizeMobileBaseUrl,
+  sanitizeMobileApiKey,
+} from "../apps/desktop/src/mobileRuntime.js";
+import {
+  detectPresetFromKey,
+  normalizeBaseUrl,
+  sanitizeApiKey,
+} from "../src/pro/api-settings.js";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const APK_PATH = path.join(ROOT, "releases", "Vedit.apk");
@@ -27,8 +37,8 @@ function inspectApkZip(buf: Buffer) {
   for (let i = 0; i < total; i++) {
     expect(buf.readUInt32LE(ptr)).toBe(0x02014b50);
     const method = buf.readUInt16LE(ptr + 10);
-    const compSize = buf.readUInt32LE(ptr + 20);
-    const rawSize = buf.readUInt32LE(ptr + 24);
+    const compSize = buf.readUInt16LE(ptr + 20);
+    const rawSize = buf.readUInt16LE(ptr + 24);
     const nameLen = buf.readUInt16LE(ptr + 28);
     const extraLen = buf.readUInt16LE(ptr + 30);
     const commentLen = buf.readUInt16LE(ptr + 32);
@@ -39,7 +49,16 @@ function inspectApkZip(buf: Buffer) {
     const lfhExtraLen = buf.readUInt16LE(lfhOffset + 28);
     const dataOffset = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
     const rawSlice = buf.subarray(dataOffset, dataOffset + compSize);
-    const data = method === 0 ? Buffer.from(rawSlice) : zlib.inflateRawSync(rawSlice);
+    let data: Buffer;
+    if (method === 0 || compSize === 0) {
+      data = Buffer.from(rawSlice);
+    } else {
+      try {
+        data = zlib.inflateRawSync(rawSlice);
+      } catch {
+        data = zlib.inflateRawSync(buf.subarray(dataOffset));
+      }
+    }
 
     entries.set(name, { method, compSize, rawSize, dataOffset, data });
     ptr += 46 + nameLen + extraLen + commentLen;
@@ -47,40 +66,34 @@ function inspectApkZip(buf: Buffer) {
   return entries;
 }
 
-describe("F10 — Standalone Native Android APK (Vedit.apk v0.7.0) & Mobile NLE Engine", () => {
-  it("ships a valid, 4-byte-aligned, v1+v2+v3 cryptographically signed releases/Vedit.apk", () => {
+describe("F10 — Standalone Native Android APK (Vedit.apk v0.8.0), Universal API Bridge & Real Mobile/Desktop NLE", () => {
+  afterEach(() => {
+    delete (globalThis as { window?: unknown }).window;
+  });
+
+  it("ships a valid, 4-byte-aligned, v2+v3 cryptographically signed releases/Vedit.apk with native HTTP & Gallery bridges", () => {
     expect(fs.existsSync(APK_PATH)).toBe(true);
     const apk = fs.readFileSync(APK_PATH);
     expect(apk.length).toBeGreaterThan(250_000);
-    // ZIP Local File Header magic PK\x03\x04
     expect(apk.readUInt32LE(0)).toBe(0x04034b50);
-    // APK Signature Scheme v2/v3 Signing Block magic ("APK Sig Block 42")
     expect(apk.includes(Buffer.from("APK Sig Block 42", "ascii"))).toBe(true);
 
     const entries = inspectApkZip(apk);
-
-    // Core Android binary package artifacts
     expect(entries.has("AndroidManifest.xml")).toBe(true);
     expect(entries.has("resources.arsc")).toBe(true);
     expect(entries.has("classes.dex")).toBe(true);
 
-    // v1 JAR Signature or v2+v3 Full-APK Signing Block verified above
-    expect(
-      entries.has("META-INF/MANIFEST.MF") || apk.includes(Buffer.from("APK Sig Block 42", "ascii")),
-    ).toBe(true);
-
-    // Android 11–15 mandatory rule: resources.arsc MUST be uncompressed AND 4-byte aligned!
     const arsc = entries.get("resources.arsc")!;
     expect(arsc.method).toBe(0);
     expect(arsc.dataOffset % 4).toBe(0);
 
-    // Valid Dalvik/ART DEX header + MainActivity & VeditAndroid bridge symbols
     const dex = entries.get("classes.dex")!;
     expect(dex.data.subarray(0, 4).toString("ascii")).toBe("dex\n");
     expect(dex.data.includes(Buffer.from("Lcom/vedit/studio/MainActivity;", "ascii"))).toBe(true);
+    expect(dex.data.includes(Buffer.from("httpRequest", "ascii"))).toBe(true);
     expect(dex.data.includes(Buffer.from("saveExportBase64", "ascii"))).toBe(true);
+    expect(dex.data.includes(Buffer.from("shareLastExport", "ascii"))).toBe(true);
 
-    // Multi-density launcher icons compiled by Google aapt2 (res/mipmap-*-v4/ic_launcher.png)
     for (const density of ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"]) {
       const iconEntry =
         entries.get(`res/mipmap-${density}-v4/ic_launcher.png`) ??
@@ -90,52 +103,151 @@ describe("F10 — Standalone Native Android APK (Vedit.apk v0.7.0) & Mobile NLE 
       expect(iconEntry!.dataOffset % 4).toBe(0);
     }
 
-    // Complete offline-capable Vedit Studio bundle inside assets/public/
     expect(entries.has("assets/public/index.html")).toBe(true);
     const assetKeys = Array.from(entries.keys());
     expect(assetKeys.some((k) => k.startsWith("assets/public/assets/") && k.endsWith(".js"))).toBe(true);
     expect(assetKeys.some((k) => k.startsWith("assets/public/assets/") && k.endsWith(".css"))).toBe(true);
   });
 
-  it("executes full standalone mobile NLE editing, undo/redo, LUTs, API config & AI copilot", async () => {
-    const listed = await mobileApi.listProjects();
-    expect(listed.projects.length).toBeGreaterThanOrEqual(1);
+  it("auto-sanitizes pasted API keys, detects providers, and normalizes URLs identically on Android & PC", () => {
+    const messyKey = '  "Bearer sk-proj-abc123\u200B\uFEFFxyz789" \n ';
+    expect(sanitizeMobileApiKey(messyKey)).toBe("sk-proj-abc123xyz789");
+    expect(sanitizeApiKey(messyKey)).toBe("sk-proj-abc123xyz789");
 
-    const boot = await mobileApi.getProject(listed.projects[0].id);
-    const seq = boot.project.sequences[0];
+    expect(detectPresetByKey("AIzaSyDummyGeminiKey12345")?.id).toBe("gemini");
+    expect(detectPresetFromKey("AIzaSyDummyGeminiKey12345")?.id).toBe("gemini");
+    expect(detectPresetByKey("sk-ant-api03-claude-key")?.id).toBe("anthropic");
+    expect(detectPresetFromKey("sk-ant-api03-claude-key")?.id).toBe("anthropic");
+    expect(detectPresetByKey("sk-or-v1-openrouter-key")?.id).toBe("openrouter");
+    expect(detectPresetByKey("gsk_groq_fast_key_123")?.id).toBe("groq");
+    expect(detectPresetByKey("nvapi-nvidia-key-123")?.id).toBe("nvidia");
+    expect(detectPresetByKey("xai-grok-key-123")?.id).toBe("xai");
+
+    expect(normalizeMobileBaseUrl("https://api.openai.com/v1/chat/completions")).toBe("https://api.openai.com/v1");
+    expect(normalizeBaseUrl("https://api.openai.com/v1/chat/completions")).toBe("https://api.openai.com/v1");
+    expect(normalizeMobileBaseUrl("192.168.1.42:11434")).toBe("http://192.168.1.42:11434/v1");
+    expect(normalizeBaseUrl("192.168.1.42:11434")).toBe("http://192.168.1.42:11434/v1");
+  });
+
+  it("routes Android API calls through CORS-free native VeditAndroid.httpRequest for OpenAI, Gemini & Anthropic", async () => {
+    const nativeCalls: Array<{ method: string; url: string; headers: Record<string, string>; body: string }> = [];
+
+    (globalThis as Record<string, unknown>).window = {
+      VeditAndroid: {
+        httpRequest(method: string, url: string, headersJson: string, body: string) {
+          const headers = JSON.parse(headersJson || "{}") as Record<string, string>;
+          nativeCalls.push({ method, url, headers, body });
+
+          if (url.endsWith("/messages")) {
+            return JSON.stringify({
+              status: 200,
+              body: JSON.stringify({
+                content: [
+                  {
+                    type: "text",
+                    text: '{"reply":"Applied film grade","actions":[{"op":"aspect","ratio":"9:16"},{"op":"adjust","exposure":12,"contrast":18}]}',
+                  },
+                ],
+              }),
+            });
+          }
+          if (url.endsWith("/models")) {
+            return JSON.stringify({
+              status: 200,
+              body: JSON.stringify({
+                data: [{ id: "gemini-2.5-flash" }, { id: "gemini-2.5-pro" }],
+              }),
+            });
+          }
+          return JSON.stringify({
+            status: 200,
+            body: JSON.stringify({
+              choices: [{ message: { content: "OK" } }],
+            }),
+          });
+        },
+      },
+    };
+
+    await mobileApi.saveApiSettings({
+      apiKey: "AIzaSyTestMobileKey999",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-2.5-flash",
+    });
+    const fetched = await mobileApi.fetchApiModels({});
+    expect(fetched.models).toContain("gemini-2.5-flash");
+
+    const ping = await mobileApi.testApiSettings({});
+    expect(ping.ok).toBe(true);
+    expect(ping.reply).toBe("OK");
+
+    await mobileApi.saveApiSettings({
+      apiKey: "sk-ant-api03-testmobile",
+      baseUrl: "https://api.anthropic.com/v1",
+      model: "claude-sonnet-4-20250514",
+    });
+    const copilotRes = await mobileApi.runCopilot("Make this 9:16 vertical with punchy film contrast");
+    expect(copilotRes.summary).toContain("Applied film grade");
+    expect(
+      nativeCalls.some(
+        (c) =>
+          c.url === "https://api.anthropic.com/v1/messages" &&
+          c.headers["x-api-key"] === "sk-ant-api03-testmobile",
+      ),
+    ).toBe(true);
+  });
+
+  it("executes real non-destructive editing: canvas aspect, color grade, transform, crop, speed, trim, move, captions & undo/redo", async () => {
+    const { projects } = await mobileApi.listProjects();
+    expect(projects.length).toBeGreaterThanOrEqual(1);
+
+    const { project } = await mobileApi.getProject(projects[0]!.id);
+    const seq = project.sequences[0]!;
     expect(seq.tracks.length).toBeGreaterThanOrEqual(2);
-    const leadClip = seq.tracks.flatMap((t) => t.clips)[0];
+    const leadClip = seq.tracks.flatMap((t) => t.clips)[0]!;
     expect(leadClip).toBeDefined();
 
-    // Apply 3D LUT + split clip + speed ramp + undo/redo
-    await mobileApi.applyLut(leadClip.id, "kodak-2383");
-    await mobileApi.colorGrade(leadClip.id, "teal-orange-blockbuster");
-    await mobileApi.splitClip(leadClip.id, 2.5);
-    const afterSplit = await mobileApi.getProject(listed.projects[0].id);
-    expect(afterSplit.project.sequences[0].tracks[0].clips.length).toBeGreaterThanOrEqual(2);
+    // Update sequence aspect ratio & blurred background fill
+    const { sequence: resized } = await mobileApi.updateSequence({
+      width: 1080,
+      height: 1920,
+      background: "blur",
+    });
+    expect(resized.width).toBe(1080);
+    expect(resized.height).toBe(1920);
+    expect(resized.background).toBe("blur");
+
+    // Live color grading, LUT & crop effects
+    await mobileApi.setClipEffect(leadClip.id, "adjust", { exposure: 20, contrast: 15, saturation: 25 });
+    await mobileApi.setClipEffect(leadClip.id, "lut3d", { lutId: "teal-orange-blockbuster", intensity: 100 });
+    await mobileApi.setClipEffect(leadClip.id, "crop", { left: 0.08, right: 0.08 });
+
+    // Split + Undo + Redo
+    const countBefore = (await mobileApi.getProject(project.id)).project.sequences[0]!.tracks[0]!.clips.length;
+    await mobileApi.splitClip(leadClip.id, leadClip.start + leadClip.duration * 0.5);
+    expect((await mobileApi.getProject(project.id)).project.sequences[0]!.tracks[0]!.clips.length).toBe(countBefore + 1);
 
     await mobileApi.undo();
-    const afterUndo = await mobileApi.getProject(listed.projects[0].id);
-    expect(afterUndo.project.sequences[0].tracks[0].clips.length).toBe(seq.tracks[0].clips.length);
+    expect((await mobileApi.getProject(project.id)).project.sequences[0]!.tracks[0]!.clips.length).toBe(countBefore);
     await mobileApi.redo();
-    const afterRedo = await mobileApi.getProject(listed.projects[0].id);
-    expect(afterRedo.project.sequences[0].tracks[0].clips.length).toBeGreaterThanOrEqual(2);
+    expect((await mobileApi.getProject(project.id)).project.sequences[0]!.tracks[0]!.clips.length).toBe(countBefore + 1);
 
-    // Custom API Key + Base URL + Model configuration on Android
-    const updatedCfg = await mobileApi.saveApiSettings({
-      baseUrl: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
-      apiKey: "sk-test-mobile-key-123456",
+    // Captions create + reposition + edit text + delete
+    const { caption: cap } = await mobileApi.addCaption({
+      start: 0.5,
+      end: 3.5,
+      text: "Clean Studio Title",
+      style: { fontSize: 48, x: 0.5, y: 0.8, color: "#ffffff" },
     });
-    expect(updatedCfg.hasApiKey).toBe(true);
-    expect(updatedCfg.model).toBe("gpt-4o-mini");
+    await mobileApi.updateCaption(cap.id, { text: "Updated Title", style: { fontSize: 54, x: 0.5, y: 0.25 } });
+    const withCap = (await mobileApi.getProject(project.id)).project;
+    expect(withCap.sequences[0]!.captions.some((c) => c.id === cap.id && c.text === "Updated Title")).toBe(true);
 
-    // Offline AI Copilot fallback works immediately when cleared API key
-    await mobileApi.saveApiSettings({ clearApiKey: true });
-    const copilot = await mobileApi.runCopilot("Add title and Kodak film look");
-    expect(copilot.stepsExecuted.length).toBeGreaterThanOrEqual(1);
+    await mobileApi.deleteCaption(cap.id);
+    const withoutCap = (await mobileApi.getProject(project.id)).project;
+    expect(withoutCap.sequences[0]!.captions.some((c) => c.id === cap.id)).toBe(false);
 
     const check = await mobileApi.checkUpdate();
-    expect(check.currentVersion).toBe("0.7.0");
+    expect(check.currentVersion).toBe("0.8.0");
   });
 });

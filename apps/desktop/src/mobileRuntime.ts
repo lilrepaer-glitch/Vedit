@@ -1,10 +1,12 @@
-// Standalone On-Device Vedit Studio Runtime for Native Android APK (`com.vedit.studio`) & Offline Mobile Mode.
-// Runs 100% natively inside Android WebView with zero external PC server required:
-// - Persistent multi-project storage + 50-step Undo/Redo + Checkpoints + Review Notes
-// - Native Android Gallery / File Picker multi-file Video, Audio & Image import with real HTML5 media probing
-// - Real Web Audio API waveform peak decoding + HTML5 Canvas RGB Histogram & IRE Scopes
-// - Real On-Device Video Export (`HTMLCanvasElement.captureStream` + `AudioContext` + `MediaRecorder`) saved straight to Android `Downloads/`
-// - Live Custom API Key + Base URL + `/models` discovery + LLM AI Studio Copilot directly from the phone!
+// Standalone On-Device Vedit Studio Engine for Native Android APK (`com.vedit.studio` v0.8.0).
+//
+// Provides:
+//  1. Native CORS-free HTTP/HTTPS API client via `window.VeditAndroid.httpRequest(...)` supporting
+//     OpenAI, Google Gemini, Anthropic Claude (`/v1/messages`), OpenRouter, Groq, DeepSeek,
+//     NVIDIA NIM, xAI Grok, Ollama/LAN, and any custom OpenAI-compatible proxy with auto key-prefix detection.
+//  2. Full non-destructive multi-track video/audio/caption NLE engine with 50-step Undo/Redo,
+//     real video probing, WebAudio waveform extraction, live pixel scopes, real freeze-frame capture,
+//     and hardware WebCodecs H.264 + AAC `.mp4` rendering straight into Android Gallery (`Movies/Vedit/`).
 
 import type {
   ApiPresetInfo,
@@ -19,16 +21,21 @@ import type {
   MarketplacePackInfo,
   Project,
   ReviewComment,
+  Sequence,
   SnapshotInfo,
   Track,
 } from "./api";
+import { exportSequenceToMp4Blob, extractMediaFilmstrip, seekVideoElement } from "./compositor";
 
 declare global {
   interface Window {
     VeditAndroid?: {
       isAndroid?: () => boolean;
+      getVersion?: () => string;
+      httpRequest?: (method: string, url: string, headersJson: string, body: string) => string;
       toggleFullscreen?: (mode: string) => boolean;
       saveExportBase64?: (fileName: string, mimeType: string, base64Data: string) => string;
+      shareLastExport?: () => boolean;
       openExternalUrl?: (url: string) => void;
     };
   }
@@ -40,10 +47,10 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "0.7.0";
-const STORAGE_KEY_PROJECT = "vedit.apk.project.v1";
-const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v1";
-const STORAGE_KEY_API = "vedit.apk.apiSettings.v1";
+const APK_VERSION = "0.8.0";
+const STORAGE_KEY_PROJECT = "vedit.apk.project.v2";
+const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
+const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
 
 const memStorage = new Map<string, string>();
 const safeStorage = {
@@ -60,128 +67,350 @@ const safeStorage = {
     try {
       if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
     } catch {
-      /* storage quota fallback */
+      /* quota guard */
     }
   },
 };
 
-const MOBILE_API_PRESETS: ApiPresetInfo[] = [
+export const MOBILE_API_PRESETS: ApiPresetInfo[] = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    requiresKey: true,
+    suggestedModels: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
+  },
+  {
+    id: "gemini",
+    label: "Google Gemini (AI Studio)",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    requiresKey: true,
+    suggestedModels: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic Claude",
+    baseUrl: "https://api.anthropic.com/v1",
+    requiresKey: true,
+    suggestedModels: ["claude-sonnet-4-20250514", "claude-3-5-haiku-latest", "claude-3-7-sonnet-latest"],
+  },
   {
     id: "openrouter",
-    label: "OpenRouter (All Cloud Models)",
+    label: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
     requiresKey: true,
     suggestedModels: [
-      "openai/gpt-4.1-mini",
+      "openai/gpt-4o-mini",
       "anthropic/claude-sonnet-4",
-      "google/gemini-2.5-pro",
+      "google/gemini-2.5-flash",
       "deepseek/deepseek-chat",
-      "qwen/qwen-2.5-72b-instruct",
+      "meta-llama/llama-3.3-70b-instruct",
     ],
   },
   {
-    id: "openai",
-    label: "OpenAI Official",
-    baseUrl: "https://api.openai.com/v1",
+    id: "groq",
+    label: "Groq",
+    baseUrl: "https://api.groq.com/openai/v1",
     requiresKey: true,
-    suggestedModels: ["gpt-4.1-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+    suggestedModels: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-qwq-32b"],
   },
   {
     id: "deepseek",
-    label: "DeepSeek API",
+    label: "DeepSeek",
     baseUrl: "https://api.deepseek.com/v1",
     requiresKey: true,
     suggestedModels: ["deepseek-chat", "deepseek-reasoner"],
   },
   {
     id: "nvidia",
-    label: "NVIDIA NIM API",
+    label: "NVIDIA NIM",
     baseUrl: "https://integrate.api.nvidia.com/v1",
     requiresKey: true,
-    suggestedModels: ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct"],
+    suggestedModels: ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1"],
   },
   {
-    id: "groq",
-    label: "Groq Ultra-Fast LPU",
-    baseUrl: "https://api.groq.com/openai/v1",
+    id: "xai",
+    label: "xAI Grok",
+    baseUrl: "https://api.x.ai/v1",
     requiresKey: true,
-    suggestedModels: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    suggestedModels: ["grok-2-latest", "grok-3-mini-beta"],
+  },
+  {
+    id: "ollama",
+    label: "Ollama / LAN Server",
+    baseUrl: "http://192.168.1.100:11434/v1",
+    requiresKey: false,
+    suggestedModels: ["llama3.2", "qwen2.5:7b", "deepseek-r1:8b"],
   },
   {
     id: "custom",
-    label: "Custom OpenAI-Compatible URL",
+    label: "Custom Endpoint",
     baseUrl: "https://api.openai.com/v1",
     requiresKey: true,
     suggestedModels: [],
   },
 ];
 
-export const MOBILE_PRESETS = [
-  { id: "fade-in", label: "Fade In" },
-  { id: "fade-out", label: "Fade Out" },
-  { id: "zoom-in", label: "Smooth Zoom In" },
-  { id: "zoom-out", label: "Cinema Pull Out" },
-  { id: "slide-left", label: "Slide In Left" },
-  { id: "slide-up", label: "Slide Rise Up" },
+export function sanitizeMobileApiKey(raw?: string): string {
+  if (!raw) return "";
+  return raw
+    .replace(/[\u200B-\u200D\uFEFF\u00A0\r\n\t]/g, "")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .trim()
+    .replace(/^[A-Z0-9_]*API_KEY\s*=\s*/i, "")
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^Bearer\s+/i, "")
+    .replace(/\s+/g, "");
+}
+
+export function detectPresetByKey(rawKey?: string): ApiPresetInfo | null {
+  const k = sanitizeMobileApiKey(rawKey);
+  if (!k) return null;
+  if (k.startsWith("sk-or-")) return MOBILE_API_PRESETS.find((p) => p.id === "openrouter") ?? null;
+  if (k.startsWith("sk-ant-")) return MOBILE_API_PRESETS.find((p) => p.id === "anthropic") ?? null;
+  if (k.startsWith("AIza")) return MOBILE_API_PRESETS.find((p) => p.id === "gemini") ?? null;
+  if (k.startsWith("gsk_")) return MOBILE_API_PRESETS.find((p) => p.id === "groq") ?? null;
+  if (k.startsWith("nvapi-")) return MOBILE_API_PRESETS.find((p) => p.id === "nvidia") ?? null;
+  if (k.startsWith("xai-")) return MOBILE_API_PRESETS.find((p) => p.id === "xai") ?? null;
+  return null;
+}
+
+export function normalizeMobileBaseUrl(raw?: string): string {
+  let u = (raw || "").trim().replace(/\s+/g, "").replace(/\/+$/, "");
+  if (!u) return "https://api.openai.com/v1";
+  if (!/^https?:\/\//i.test(u)) {
+    const isPrivate = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(u);
+    u = `${isPrivate ? "http" : "https"}://${u}`;
+  }
+  u = u.replace(/\/(chat\/completions|messages|completions|models)$/i, "");
+  if (/^http:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)[^/]+$/i.test(u)) {
+    return `${u}/v1`;
+  }
+  if (/^https?:\/\/generativelanguage\.googleapis\.com(\/v1beta)?$/i.test(u)) {
+    return "https://generativelanguage.googleapis.com/v1beta/openai";
+  }
+  if (/^https?:\/\/(api\.openai\.com|api\.deepseek\.com|api\.anthropic\.com|api\.mistral\.ai|api\.x\.ai|api\.together\.xyz)$/i.test(u)) {
+    return `${u}/v1`;
+  }
+  if (/^https?:\/\/api\.groq\.com$/i.test(u)) {
+    return "https://api.groq.com/openai/v1";
+  }
+  if (/^https?:\/\/openrouter\.ai(\/api)?$/i.test(u)) {
+    return "https://openrouter.ai/api/v1";
+  }
+  return u;
+}
+
+/**
+ * CORS-free universal HTTP client:
+ * On Android APK, delegates directly to `window.VeditAndroid.httpRequest(...)` (native Java
+ * `HttpsURLConnection` with zero browser CORS restrictions). Falls back to `fetch` in browsers/tests.
+ */
+async function nativeHttp(
+  method: string,
+  url: string,
+  headers: Record<string, string> = {},
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; statusText: string; text: string }> {
+  const serializedBody = body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : "";
+  if (typeof window !== "undefined" && window.VeditAndroid?.httpRequest) {
+    const rawResp = window.VeditAndroid.httpRequest(method, url, JSON.stringify(headers), serializedBody);
+    const parsed = JSON.parse(rawResp) as {
+      ok: boolean;
+      status: number;
+      statusText?: string;
+      body?: string;
+      error?: string;
+    };
+    if (parsed.status === 0 && parsed.error) {
+      throw new Error(parsed.error);
+    }
+    const status = Number(parsed.status || 0);
+    return {
+      ok: parsed.ok !== undefined ? Boolean(parsed.ok) : status >= 200 && status < 300,
+      status,
+      statusText: parsed.statusText || "",
+      text: parsed.body ?? "",
+    };
+  }
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    ...(serializedBody && method !== "GET" && method !== "HEAD" ? { body: serializedBody } : {}),
+  });
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, statusText: res.statusText, text };
+}
+
+function parseErrorMessage(rawText: string, status: number, statusText: string): string {
+  try {
+    const j = JSON.parse(rawText) as { error?: { message?: string } | string; message?: string };
+    if (typeof j?.error === "string") return j.error;
+    if (j?.error?.message) return j.error.message;
+    if (j?.message) return j.message;
+  } catch {
+    /* ignore */
+  }
+  return rawText.slice(0, 180).trim() || `HTTP ${status} ${statusText}`.trim();
+}
+
+async function runMobileLlmChat(
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+  opts: { baseUrl?: string; apiKey?: string; model?: string; maxTokens?: number } = {},
+): Promise<{ content: string; model: string; baseUrl: string; latencyMs: number }> {
+  const cur = readLocalApi();
+  const key =
+    opts.apiKey && !opts.apiKey.includes("••••")
+      ? sanitizeMobileApiKey(opts.apiKey)
+      : sanitizeMobileApiKey(cur.apiKey);
+  const autoPreset = detectPresetByKey(key);
+  const baseUrl = normalizeMobileBaseUrl(opts.baseUrl || autoPreset?.baseUrl || cur.baseUrl);
+  let model = (opts.model || autoPreset?.suggestedModels[0] || cur.model || "gpt-4o-mini").trim();
+
+  if (/api\.openai\.com/i.test(baseUrl) && model.startsWith("openai/")) {
+    model = model.slice("openai/".length);
+  }
+
+  const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|192\.168\.|10\.|172\.)/i.test(baseUrl);
+  if (!key && !isLocal) {
+    throw new Error("Paste your API key first (OpenAI, Gemini, Claude, OpenRouter, Groq, DeepSeek…).");
+  }
+
+  const started = Date.now();
+  const isAnthropic = /anthropic\.com/i.test(baseUrl) || key.startsWith("sk-ant-");
+
+  if (isAnthropic) {
+    const sys = messages
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n\n");
+    const turns = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    const resp = await nativeHttp(
+      "POST",
+      `${baseUrl.replace(/\/openai$/i, "")}/messages`,
+      {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+      },
+      {
+        model,
+        max_tokens: opts.maxTokens ?? 900,
+        ...(sys ? { system: sys } : {}),
+        messages: turns.length ? turns : [{ role: "user", content: "OK" }],
+      },
+    );
+    if (!resp.ok) {
+      throw new Error(parseErrorMessage(resp.text, resp.status, resp.statusText));
+    }
+    const data = JSON.parse(resp.text) as { model?: string; content?: Array<{ text?: string }> };
+    return {
+      content: (data.content ?? []).map((c) => c.text ?? "").join("").trim(),
+      model: data.model || model,
+      baseUrl,
+      latencyMs: Date.now() - started,
+    };
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://vedit.studio",
+    "X-Title": "Vedit Studio",
+  };
+  if (key) headers.Authorization = `Bearer ${key}`;
+
+  const reasoning = /^(o1|o3|o4|gpt-5)/i.test(model);
+  let resp = await nativeHttp(
+    "POST",
+    `${baseUrl}/chat/completions`,
+    headers,
+    reasoning
+      ? { model, messages, max_completion_tokens: opts.maxTokens ?? 900 }
+      : { model, messages, temperature: cur.temperature ?? 0.2, max_tokens: opts.maxTokens ?? 900 },
+  );
+
+  // Automatic retry for models that reject `max_tokens` or `temperature`
+  if (resp.status === 400 && !reasoning && /max_tokens|max_completion_tokens|temperature/i.test(resp.text)) {
+    resp = await nativeHttp("POST", `${baseUrl}/chat/completions`, headers, {
+      model,
+      messages,
+      max_completion_tokens: opts.maxTokens ?? 900,
+    });
+  }
+
+  if (!resp.ok) {
+    throw new Error(parseErrorMessage(resp.text, resp.status, resp.statusText));
+  }
+  const parsed = JSON.parse(resp.text) as {
+    model?: string;
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return {
+    content: parsed.choices?.[0]?.message?.content?.trim() || "",
+    model: parsed.model || model,
+    baseUrl,
+    latencyMs: Date.now() - started,
+  };
+}
+
+// ---------- Studio Presets & Project State ----------
+
+const MOBILE_PRESETS = [
+  { id: "fade-in", label: "Smooth Fade In" },
+  { id: "zoom-in", label: "Slow Push-In" },
+  { id: "zoom-out", label: "Pull-Out Reveal" },
+  { id: "slide-left", label: "Slide Left" },
+  { id: "slide-up", label: "Rise Up" },
 ];
 
-export const MOBILE_EXPORT_PRESETS: ExportPresetInfo[] = [
-  { id: "youtube-1080p", label: "YouTube / HD Landscape (16:9)", platform: "youtube", format: "mp4", codec: "h264" },
-  { id: "tiktok-reels", label: "TikTok / Reels / Shorts (9:16)", platform: "tiktok", format: "mp4", codec: "h264" },
-  { id: "instagram-square", label: "Instagram Square (1:1)", platform: "instagram", format: "mp4", codec: "h264" },
-  { id: "webm-vp9", label: "WebM HD Master (VP9)", platform: "web", format: "webm", codec: "vp9" },
+const MOBILE_EXPORT_PRESETS: ExportPresetInfo[] = [
+  { id: "youtube-1080p", label: "1080p Full HD · 30fps (MP4 H.264)", platform: "Universal MP4", format: "mp4", codec: "h264" },
+  { id: "reels-vertical-1080p", label: "1080×1920 Vertical 9:16 · 60fps (Reels / TikTok / Shorts)", platform: "Social 9:16", format: "mp4", codec: "h264" },
+  { id: "social-720p-fast", label: "720p Fast Share · 30fps (MP4 H.264)", platform: "Fast Mobile", format: "mp4", codec: "h264" },
+  { id: "cinema-24fps", label: "1080p Cinema · 24fps (MP4 High Bitrate)", platform: "Cinema", format: "mp4", codec: "h264" },
 ];
 
-export const MOBILE_CAMERA_MOVES: CameraMoveInfo[] = [
-  { id: "static", label: "Static Tripod", directive: "locked-off static tripod shot" },
-  { id: "push-in", label: "Dolly Push In", directive: "smooth dolly push-in toward the subject" },
-  { id: "pull-out", label: "Dolly Pull Out", directive: "cinematic dolly pull-out revealing the scene" },
-  { id: "pan-left", label: "Pan Left", directive: "smooth horizontal pan left" },
-  { id: "pan-right", label: "Pan Right", directive: "smooth horizontal pan right" },
-  { id: "orbit", label: "360° Orbit", directive: "orbital camera arc around subject" },
-];
-
-export const MOBILE_GEN_PROVIDERS: GenProviderInfo[] = [
+const MOBILE_GEN_PROVIDERS: GenProviderInfo[] = [
   {
-    id: "stub",
-    label: "On-Device Vedit Synth (Instant Offline Canvas)",
+    id: "vedit-canvas",
+    label: "Title & Motion Plate Generator",
     available: true,
     cloud: false,
-    kinds: ["video", "image", "music", "sfx", "voice"],
-    defaultModel: "vedit-mobile-synth-v1",
-    models: ["vedit-mobile-synth-v1"],
+    kinds: ["image", "video"],
+    defaultModel: "studio-plate",
+    models: ["studio-plate"],
   },
 ];
 
-export const MOBILE_MARKETPLACE_PACKS: MarketplacePackInfo[] = [
+const MOBILE_CAMERA_MOVES: CameraMoveInfo[] = [
+  { id: "dolly-in", label: "Dolly Push In", directive: "slow push in" },
+  { id: "pan-right", label: "Pan Right", directive: "smooth pan right" },
+  { id: "static", label: "Locked Off", directive: "locked tripod frame" },
+];
+
+const MOBILE_MARKETPLACE_PACKS: MarketplacePackInfo[] = [
   {
     id: "tpl-tiktok-shorts",
     kind: "template",
-    name: "Vertical 9:16 Reels / Shorts Pack",
+    name: "Vertical 9:16 Reels / Shorts Format",
     author: "Vedit Studio",
     version: "1.0.0",
     category: "Social",
-    description: "Switches sequence to 1080×1920 vertical format with punchy hook title & fade.",
+    description: "Switches sequence to 1080×1920 9:16 with clean lower caption styling.",
     installed: true,
   },
   {
     id: "tpl-youtube-intro",
     kind: "template",
-    name: "YouTube 1080p Cinema Opener",
+    name: "Widescreen 16:9 Cinema Format",
     author: "Vedit Studio",
     version: "1.0.0",
-    category: "Intro",
-    description: "Adds Kodak 2383 film grade, lower-third nameplate & smooth zoom opener.",
-    installed: true,
-  },
-  {
-    id: "tpl-promo-spot",
-    kind: "template",
-    name: "Cyberpunk Product Promo",
-    author: "Vedit Studio",
-    version: "1.0.0",
-    category: "Commercial",
-    description: "High-energy neon action scene with bold callout titles.",
+    category: "Cinema",
+    description: "Switches sequence to 1920×1080 16:9 widescreen film layout.",
     installed: true,
   },
 ];
@@ -197,43 +426,31 @@ function uid(prefix: string): string {
 }
 
 function defaultMobileProject(): Project {
-  const assetHeroId = "asset-prague-hero";
-  const assetActionId = "asset-neon-action";
+  const assetHeroId = "asset-sample-1";
   blobUrls.set(assetHeroId, "/showcase/hero-cinema.jpg");
-  blobUrls.set(assetActionId, "/showcase/motion-neon.jpg");
 
   return {
-    id: "proj-vedit-mobile",
-    name: "Vedit Studio Project",
+    id: "proj-vedit-main",
+    name: "Untitled Edit",
     activeSequenceId: "seq-main",
     assets: [
       {
         id: assetHeroId,
-        name: "Prague_Twilight_35mm.jpg",
+        name: "Sample_Scene.jpg",
         kind: "image",
         path: "/showcase/hero-cinema.jpg",
         duration: 5,
-        width: 1280,
-        height: 720,
-        tags: ["cinema", "hero"],
-      },
-      {
-        id: assetActionId,
-        name: "Neon_Hypercar_Cut.jpg",
-        kind: "image",
-        path: "/showcase/motion-neon.jpg",
-        duration: 4,
-        width: 1280,
-        height: 720,
-        tags: ["action", "vfx"],
+        width: 1920,
+        height: 1080,
+        tags: ["sample"],
       },
     ],
     sequences: [
       {
         id: "seq-main",
         name: "Main Sequence",
-        width: 1280,
-        height: 720,
+        width: 1920,
+        height: 1080,
         fps: 30,
         tracks: [
           {
@@ -246,31 +463,16 @@ function defaultMobileProject(): Project {
             volumeDb: 0,
             clips: [
               {
-                id: "clip-hero-1",
+                id: "clip-init-1",
                 assetId: assetHeroId,
-                name: "Prague Twilight 35mm",
+                name: "Sample_Scene.jpg",
                 start: 0,
                 duration: 5,
                 in: 0,
                 out: 5,
                 transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
-                keyframes: [
-                  { time: 0, property: "scaleX", value: 1, easing: "ease-in-out" },
-                  { time: 5, property: "scaleX", value: 1.08, easing: "ease-in-out" },
-                ],
-                effects: [],
-              },
-              {
-                id: "clip-action-2",
-                assetId: assetActionId,
-                name: "Neon Hypercar Cut",
-                start: 5,
-                duration: 4,
-                in: 0,
-                out: 4,
-                transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
                 keyframes: [],
-                effects: [{ id: "fx-fade-init", type: "fade", params: { fadeIn: 0.4, fadeOut: 0.4 } }],
+                effects: [],
               },
             ],
           },
@@ -281,6 +483,7 @@ function defaultMobileProject(): Project {
             muted: false,
             solo: false,
             locked: false,
+            volumeDb: 0,
             clips: [],
           },
           {
@@ -294,14 +497,7 @@ function defaultMobileProject(): Project {
             clips: [],
           },
         ],
-        captions: [
-          {
-            id: "cap-welcome",
-            text: "Vedit Studio • Tap + or Drop Media to Edit",
-            start: 0.3,
-            end: 3.8,
-          },
-        ],
+        captions: [],
       },
     ],
     jobs: [],
@@ -317,7 +513,7 @@ let state: Project = (() => {
     if (raw) {
       const parsed = JSON.parse(raw) as Project;
       for (const a of parsed.assets) {
-        if (a.path.startsWith("/showcase/") || a.path.startsWith("data:")) {
+        if (a.path.startsWith("/showcase/") || a.path.startsWith("data:") || a.path.startsWith("blob:")) {
           blobUrls.set(a.id, a.path);
         }
       }
@@ -329,11 +525,9 @@ let state: Project = (() => {
   return defaultMobileProject();
 })();
 
-function persist(pushUndo = true): void {
+function persist(clearRedo = true): void {
   safeStorage.setItem(STORAGE_KEY_PROJECT, JSON.stringify(state));
-  if (pushUndo) {
-    redoStack.length = 0;
-  }
+  if (clearRedo) redoStack.length = 0;
   changeListeners.forEach((fn) => fn());
 }
 
@@ -346,21 +540,34 @@ function clone<T>(val: T): T {
   return JSON.parse(JSON.stringify(val)) as T;
 }
 
+function activeSeq(): Sequence {
+  return state.sequences.find((s) => s.id === state.activeSequenceId) ?? state.sequences[0]!;
+}
+
+function findClip(clipId: string): { track: Track; clip: Clip } {
+  for (const track of activeSeq().tracks) {
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (clip) return { track, clip };
+  }
+  throw new Error(`Clip ${clipId} not found`);
+}
+
 export function subscribeMobileChanges(cb: () => void): () => void {
   changeListeners.add(cb);
   return () => changeListeners.delete(cb);
 }
 
+export function resolveAssetUrlById(assetId: string): string {
+  const mapped = blobUrls.get(assetId);
+  if (mapped) return mapped;
+  const found = state.assets.find((a) => a.id === assetId);
+  return found?.path || "/showcase/hero-cinema.jpg";
+}
+
 export function resolveMobileMediaUrl(url: string): string {
-  // Match `/api/v1/projects/<id>/assets/<assetId>/stream` or `/frame`
-  const assetMatch = /\/assets\/([^/?]+)\/(stream|frame)/.exec(url);
+  const assetMatch = /\/assets\/([^/?]+)\/(stream|file|frame|thumbnail)/.exec(url);
   if (assetMatch) {
-    const assetId = assetMatch[1]!;
-    const mapped = blobUrls.get(assetId);
-    if (mapped) return mapped;
-    const found = state.assets.find((a) => a.id === assetId);
-    if (found?.path) return found.path;
-    return "/showcase/hero-cinema.jpg";
+    return resolveAssetUrlById(assetMatch[1]!);
   }
   const jobMatch = /\/jobs\/([^/?]+)\/output/.exec(url);
   if (jobMatch) {
@@ -371,7 +578,7 @@ export function resolveMobileMediaUrl(url: string): string {
 }
 
 async function saveBlobToAndroidOrBrowser(blob: Blob, fileName: string, mimeType: string): Promise<string> {
-  if (window.VeditAndroid?.saveExportBase64) {
+  if (typeof window !== "undefined" && window.VeditAndroid?.saveExportBase64) {
     const b64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -395,56 +602,79 @@ async function saveBlobToAndroidOrBrowser(blob: Blob, fileName: string, mimeType
 }
 
 async function probeBrowserFile(
-  file: File,
+  _file: File,
   objectUrl: string,
   kind: Asset["kind"],
-): Promise<{ duration: number; width?: number; height?: number }> {
-  if (kind === "image") {
+): Promise<{ duration: number; width: number; height: number }> {
+  if (typeof document === "undefined") {
+    return { duration: 5, width: 1920, height: 1080 };
+  }
+  if (kind === "video") {
     return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve({ duration: 4, width: img.naturalWidth || 1280, height: img.naturalHeight || 720 });
-      img.onerror = () => resolve({ duration: 4, width: 1280, height: 720 });
-      img.src = objectUrl;
+      const v = document.createElement("video");
+      v.preload = "metadata";
+      v.muted = true;
+      v.playsInline = true;
+      const timer = setTimeout(() => resolve({ duration: 5, width: 1920, height: 1080 }), 5000);
+      v.onloadedmetadata = () => {
+        clearTimeout(timer);
+        resolve({
+          duration: Number.isFinite(v.duration) && v.duration > 0 ? Number(v.duration.toFixed(3)) : 5,
+          width: v.videoWidth || 1920,
+          height: v.videoHeight || 1080,
+        });
+      };
+      v.onerror = () => {
+        clearTimeout(timer);
+        resolve({ duration: 5, width: 1920, height: 1080 });
+      };
+      v.src = objectUrl;
+    });
+  }
+  if (kind === "audio") {
+    return new Promise((resolve) => {
+      const a = document.createElement("audio");
+      a.preload = "metadata";
+      const timer = setTimeout(() => resolve({ duration: 10, width: 0, height: 0 }), 5000);
+      a.onloadedmetadata = () => {
+        clearTimeout(timer);
+        resolve({
+          duration: Number.isFinite(a.duration) && a.duration > 0 ? Number(a.duration.toFixed(3)) : 10,
+          width: 0,
+          height: 0,
+        });
+      };
+      a.onerror = () => {
+        clearTimeout(timer);
+        resolve({ duration: 10, width: 0, height: 0 });
+      };
+      a.src = objectUrl;
     });
   }
   return new Promise((resolve) => {
-    const el = document.createElement(kind === "audio" ? "audio" : "video");
-    el.preload = "metadata";
-    const done = () => {
-      const dur = Number.isFinite(el.duration) && el.duration > 0 ? Number(el.duration.toFixed(2)) : 5;
-      const vw = el instanceof HTMLVideoElement ? el.videoWidth || 1280 : undefined;
-      const vh = el instanceof HTMLVideoElement ? el.videoHeight || 720 : undefined;
-      resolve({ duration: dur, width: vw, height: vh });
+    const img = new Image();
+    const timer = setTimeout(() => resolve({ duration: 4, width: 1920, height: 1080 }), 4000);
+    img.onload = () => {
+      clearTimeout(timer);
+      resolve({ duration: 4, width: img.naturalWidth || 1920, height: img.naturalHeight || 1080 });
     };
-    el.onloadedmetadata = done;
-    el.onerror = () => resolve({ duration: 5, width: 1280, height: 720 });
-    setTimeout(done, 1800);
-    el.src = objectUrl;
+    img.onerror = () => {
+      clearTimeout(timer);
+      resolve({ duration: 4, width: 1920, height: 1080 });
+    };
+    img.src = objectUrl;
   });
 }
 
-function activeSeq() {
-  return state.sequences.find((s) => s.id === state.activeSequenceId) ?? state.sequences[0]!;
-}
-
-function findClip(clipId: string): { track: Track; clip: Clip } {
-  for (const track of activeSeq().tracks) {
-    const clip = track.clips.find((c) => c.id === clipId);
-    if (clip) return { track, clip };
-  }
-  throw new Error(`Clip not found: ${clipId}`);
-}
-
-function buildSvgDataUri(kind: string, label: string): string {
+function buildSvgDataUri(kind: string, label: string, accent = "#3b82f6"): string {
   const safe = label.replace(/[<>&"]/g, "");
   const svg =
-    kind === "callout-arrow"
-      ? `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect x="440" y="96" rx="18" width="400" height="74" fill="rgba(11,13,19,0.88)" stroke="#00e5ff" stroke-width="3"/><text x="640" y="143" fill="#ffffff" font-family="sans-serif" font-size="30" font-weight="800" text-anchor="middle">${safe}</text></svg>`
-      : `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect x="64" y="548" rx="14" width="520" height="92" fill="rgba(11,13,19,0.86)"/><rect x="64" y="548" width="8" height="92" fill="#00e5ff"/><text x="94" y="592" fill="#ffffff" font-family="sans-serif" font-size="30" font-weight="800">${safe}</text><text x="94" y="622" fill="#67e8f9" font-family="sans-serif" font-size="18" font-weight="600">VEDIT STUDIO BROADCAST</text></svg>`;
+    kind === "lower-third"
+      ? `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect x="64" y="548" width="520" height="92" rx="12" fill="rgba(9,9,11,0.88)" stroke="${accent}" stroke-width="3"/><rect x="64" y="548" width="8" height="92" rx="4" fill="${accent}"/><text x="92" y="604" fill="#fafafa" font-family="sans-serif" font-weight="700" font-size="34">${safe}</text></svg>`
+      : `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect x="340" y="296" width="600" height="128" rx="20" fill="rgba(9,9,11,0.85)" stroke="${accent}" stroke-width="3"/><text x="640" y="372" text-anchor="middle" fill="#fafafa" font-family="sans-serif" font-weight="700" font-size="42">${safe}</text></svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
-// Stored Custom API Settings in Android localStorage
 interface LocalStoredApi {
   providerPreset: string;
   baseUrl: string;
@@ -463,210 +693,115 @@ function readLocalApi(): LocalStoredApi {
     /* ignore */
   }
   return {
-    providerPreset: "openrouter",
-    baseUrl: "https://openrouter.ai/api/v1",
+    providerPreset: "openai",
+    baseUrl: "https://api.openai.com/v1",
     apiKey: "",
-    model: "openai/gpt-4.1-mini",
-    visionModel: "openai/gpt-4.1-mini",
+    model: "gpt-4o-mini",
+    visionModel: "gpt-4o-mini",
     temperature: 0.2,
     providerKeys: {},
   };
 }
 
 function publicApi(cfg: LocalStoredApi): ApiSettingsResponse {
-  const clean = cfg.apiKey.trim();
+  const clean = sanitizeMobileApiKey(cfg.apiKey);
   const masked = !clean
     ? ""
     : clean.length <= 8
       ? `${clean.slice(0, 2)}••••••`
       : `${clean.slice(0, 4)}••••••••${clean.slice(-4)}`;
   return {
-    providerPreset: cfg.providerPreset,
-    baseUrl: cfg.baseUrl.replace(/\/+$/, ""),
+    providerPreset: cfg.providerPreset || "openai",
+    baseUrl: normalizeMobileBaseUrl(cfg.baseUrl),
     hasApiKey: Boolean(clean),
     maskedApiKey: masked,
-    model: cfg.model || "openai/gpt-4.1-mini",
-    visionModel: cfg.visionModel || cfg.model || "openai/gpt-4.1-mini",
+    model: cfg.model || "gpt-4o-mini",
+    visionModel: cfg.visionModel || cfg.model || "gpt-4o-mini",
     temperature: cfg.temperature ?? 0.2,
     configuredProviderKeys: Object.keys(cfg.providerKeys || {}).filter((k) => Boolean(cfg.providerKeys[k])),
     presets: MOBILE_API_PRESETS,
   };
 }
 
-// On-Device Hardware Canvas + MediaRecorder Sequence Video Exporter!
 async function renderMobileVideoJob(jobId: string, presetId: string): Promise<void> {
   const job = state.jobs.find((j) => j.id === jobId);
   if (!job) return;
   job.status = "running";
-  job.progress = 8;
+  job.progress = 4;
   persist(false);
 
-  const seq = activeSeq();
-  const width = presetId === "tiktok-reels" ? 720 : presetId === "instagram-square" ? 720 : 1280;
-  const height = presetId === "tiktok-reels" ? 1280 : presetId === "instagram-square" ? 720 : 720;
-  const totalDur = Math.min(
-    30,
-    Math.max(
-      2,
-      ...seq.tracks.flatMap((t) => t.clips.map((c) => c.start + c.duration)),
-      ...seq.captions.map((c) => c.end),
-    ),
-  );
+  try {
+    const seq = activeSeq();
+    let width = seq.width || 1920;
+    let height = seq.height || 1080;
+    let fps = seq.fps || 30;
+    let bitrate = 8_500_000;
 
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d")!;
-
-  // Preload visual elements for all assets in sequence
-  const mediaEls = new Map<string, HTMLImageElement | HTMLVideoElement>();
-  await Promise.all(
-    state.assets.map(
-      (a) =>
-        new Promise<void>((resolve) => {
-          const url = resolveMobileMediaUrl(`/api/v1/projects/${state.id}/assets/${a.id}/stream`);
-          if (a.kind === "video") {
-            const v = document.createElement("video");
-            v.muted = true;
-            v.playsInline = true;
-            v.src = url;
-            v.onloadeddata = () => {
-              mediaEls.set(a.id, v);
-              resolve();
-            };
-            v.onerror = () => resolve();
-            setTimeout(resolve, 1200);
-          } else if (a.kind === "image" || a.kind === "generated") {
-            const img = new Image();
-            img.onload = () => {
-              mediaEls.set(a.id, img);
-              resolve();
-            };
-            img.onerror = () => resolve();
-            img.src = url;
-          } else {
-            resolve();
-          }
-        }),
-    ),
-  );
-
-  const mimeCandidates = ["video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-  const chosenMime =
-    typeof MediaRecorder !== "undefined"
-      ? mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? "video/webm"
-      : "video/webm";
-  const ext = chosenMime.startsWith("video/mp4") ? "mp4" : "webm";
-
-  const stream = canvas.captureStream(24);
-  const chunks: BlobPart[] = [];
-  const recorder = new MediaRecorder(stream, { mimeType: chosenMime, videoBitsPerSecond: 4_500_000 });
-  recorder.ondataavailable = (ev) => {
-    if (ev.data.size > 0) chunks.push(ev.data);
-  };
-
-  const finishedBlob = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: chosenMime }));
-  });
-
-  recorder.start(200);
-  const fps = 24;
-  const totalFrames = Math.ceil(totalDur * fps);
-
-  for (let frameIdx = 0; frameIdx <= totalFrames; frameIdx++) {
-    const t = frameIdx / fps;
-    ctx.fillStyle = "#05070a";
-    ctx.fillRect(0, 0, width, height);
-
-    for (const track of seq.tracks) {
-      if (track.muted || track.kind === "audio") continue;
-      for (const clip of track.clips) {
-        if (t < clip.start || t > clip.start + clip.duration) continue;
-        const el = mediaEls.get(clip.assetId);
-        if (!el) continue;
-        if (el instanceof HTMLVideoElement) {
-          const mediaT = clip.in + (t - clip.start);
-          if (Math.abs(el.currentTime - mediaT) > 0.12) {
-            try {
-              el.currentTime = mediaT;
-            } catch {
-              /* ignore */
-            }
-          }
-        }
-        ctx.save();
-        const filters: string[] = [];
-        for (const eff of clip.effects) {
-          const p = eff.params as Record<string, unknown>;
-          if (eff.type === "lut3d") {
-            const lid = String(p.lutId ?? "");
-            if (lid === "kodak-2383") filters.push("sepia(0.28) contrast(1.16) saturate(1.26)");
-            else if (lid === "teal-orange-blockbuster") filters.push("hue-rotate(-14deg) contrast(1.26) saturate(1.48)");
-            else if (lid === "cyberpunk-neon") filters.push("hue-rotate(38deg) saturate(1.85) contrast(1.22)");
-            else if (lid === "bleach-bypass") filters.push("grayscale(0.72) contrast(1.44)");
-          } else if (eff.type === "color" || eff.type === "color-grade") {
-            if (p.contrast != null) filters.push(`contrast(${Number(p.contrast)})`);
-            if (p.saturation != null) filters.push(`saturate(${Number(p.saturation)})`);
-          }
-        }
-        if (filters.length) ctx.filter = filters.join(" ");
-        ctx.globalAlpha = clip.transform.opacity ?? 1;
-
-        const srcW = el instanceof HTMLVideoElement ? el.videoWidth || 1280 : el.naturalWidth || 1280;
-        const srcH = el instanceof HTMLVideoElement ? el.videoHeight || 720 : el.naturalHeight || 720;
-        const fitScale = Math.min(width / srcW, height / srcH);
-        const drawW = srcW * fitScale * (clip.transform.scaleX || 1);
-        const drawH = srcH * fitScale * (clip.transform.scaleY || 1);
-        ctx.translate(width / 2 + (clip.transform.x || 0), height / 2 + (clip.transform.y || 0));
-        if (clip.transform.rotation) ctx.rotate((clip.transform.rotation * Math.PI) / 180);
-        ctx.drawImage(el, -drawW / 2, -drawH / 2, drawW, drawH);
-        ctx.restore();
-      }
+    if (presetId === "reels-vertical-1080p") {
+      width = 1080;
+      height = 1920;
+      fps = 60;
+      bitrate = 10_000_000;
+    } else if (presetId === "social-720p-fast") {
+      const portrait = seq.height > seq.width;
+      width = portrait ? 720 : 1280;
+      height = portrait ? 1280 : 720;
+      fps = 30;
+      bitrate = 5_000_000;
+    } else if (presetId === "cinema-24fps") {
+      fps = 24;
+      bitrate = 12_000_000;
     }
 
-    // Burn active subtitles cleanly
-    const caps = seq.captions.filter((c) => t >= c.start && t <= c.end);
-    if (caps.length > 0) {
-      ctx.save();
-      ctx.font = `bold ${Math.round(height * 0.038)}px system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      const label = caps.map((c) => c.text).join("  ");
-      const tw = ctx.measureText(label).width + 32;
-      const boxH = Math.round(height * 0.062);
-      const y = height - boxH - Math.round(height * 0.06);
-      ctx.fillStyle = "rgba(0,0,0,0.76)";
-      ctx.fillRect((width - tw) / 2, y, tw, boxH);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(label, width / 2, y + boxH * 0.72);
-      ctx.restore();
-    }
+    const encoded = await exportSequenceToMp4Blob({
+      project: state,
+      sequence: seq,
+      resolveUrl: resolveAssetUrlById,
+      width,
+      height,
+      fps,
+      bitrate,
+      onProgress: (pct) => {
+        job.progress = pct;
+        persist(false);
+      },
+    });
 
-    if (frameIdx % 6 === 0) {
-      job.progress = Math.min(96, Math.round(10 + (frameIdx / totalFrames) * 86));
-      persist(false);
-    }
-    await new Promise((r) => setTimeout(r, 1000 / fps));
+    const outUrl = URL.createObjectURL(encoded.blob);
+    const outName = `Vedit_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.${encoded.ext}`;
+    exportOutputs.set(jobId, { url: outUrl, fileName: outName, mime: encoded.mimeType });
+    const savedWhere = await saveBlobToAndroidOrBrowser(encoded.blob, outName, encoded.mimeType);
+
+    job.status = "done";
+    job.progress = 100;
+    job.output = { path: savedWhere, url: outUrl };
+    persist(false);
+  } catch (err) {
+    job.status = "failed";
+    job.error = (err as Error).message || "Export failed";
+    persist(false);
   }
-
-  recorder.stop();
-  const videoBlob = await finishedBlob;
-  const outUrl = URL.createObjectURL(videoBlob);
-  const outName = `Vedit_${presetId}_${Date.now()}.${ext}`;
-  exportOutputs.set(jobId, { url: outUrl, fileName: outName, mime: chosenMime });
-  const savedWhere = await saveBlobToAndroidOrBrowser(videoBlob, outName, chosenMime);
-
-  job.status = "done";
-  job.progress = 100;
-  job.output = { path: savedWhere, url: outUrl };
-  persist(false);
 }
 
-// Complete drop-in implementation of all Vedit Studio API endpoints!
+// ---------- Complete Type-Identical Mobile API Surface ----------
+
 export const mobileApi = {
-  listProjects: async () => ({ projects: [{ id: state.id, name: state.name, updatedAt: new Date().toISOString() }] }),
-  createProject: async (name: string, sample = true) => {
-    if (!sample) state.name = name;
-    persist(false);
+  listProjects: async () => ({
+    projects: [{ id: state.id, name: state.name }],
+  }),
+  createProject: async (name: string, sample = false) => {
+    recordUndo();
+    const fresh = defaultMobileProject();
+    fresh.id = uid("proj");
+    fresh.name = name || "New Project";
+    if (!sample) {
+      fresh.assets = [];
+      fresh.sequences[0]!.tracks.forEach((t) => {
+        t.clips = [];
+      });
+    }
+    state = fresh;
+    persist();
     return { project: clone(state) };
   },
   getProject: async (_id: string) => ({ project: clone(state) }),
@@ -681,30 +816,11 @@ export const mobileApi = {
       height: input.height ?? 1080,
       fps: input.fps ?? 30,
     };
+    blobUrls.set(asset.id, asset.path);
     state.assets.push(asset);
     persist(true);
     return { asset: clone(asset) };
   },
-  exportEncoders: async () => ({
-    recommendedBackend: "android-mediacodec",
-    usableBackends: ["android-mediacodec", "software"],
-    encoders: [
-      {
-        encoder: "h264_mediacodec",
-        codec: "h264",
-        backend: "android-mediacodec",
-        label: "Android Hardware MediaCodec H.264 / VP9",
-        usable: true,
-      },
-      {
-        encoder: "vp9_webm",
-        codec: "vp9",
-        backend: "software",
-        label: "WebM VP9 + Opus High Quality",
-        usable: true,
-      },
-    ],
-  }),
   saveProjectDisk: async () => {
     const fileName = `${state.name.replace(/\s+/g, "_")}.vedit.json`;
     const filePath = `Android/data/com.vedit.studio/${fileName}`;
@@ -741,9 +857,9 @@ export const mobileApi = {
   },
   checkUpdate: async () => {
     try {
-      const r = await fetch("https://api.github.com/repos/lilrepaer-glitch/Vedit/releases/latest");
-      if (r.ok) {
-        const rel = (await r.json()) as {
+      const resp = await nativeHttp("GET", "https://api.github.com/repos/lilrepaer-glitch/Vedit/releases/latest");
+      if (resp.ok) {
+        const rel = JSON.parse(resp.text) as {
           tag_name?: string;
           name?: string;
           html_url?: string;
@@ -752,11 +868,12 @@ export const mobileApi = {
         };
         const latestVer = String(rel.tag_name || APK_VERSION).replace(/^v/i, "");
         const apkAsset = rel.assets?.find((a) => a.name.toLowerCase().endsWith(".apk"));
-        const dl = apkAsset?.browser_download_url ?? "https://github.com/lilrepaer-glitch/Vedit/raw/main/releases/Vedit.apk";
+        const dl =
+          apkAsset?.browser_download_url ?? "https://github.com/lilrepaer-glitch/Vedit/raw/main/releases/Vedit.apk";
         return {
           currentVersion: APK_VERSION,
           latestVersion: latestVer,
-          updateAvailable: latestVer !== APK_VERSION && latestVer > APK_VERSION,
+          updateAvailable: latestVer !== APK_VERSION && latestVer.localeCompare(APK_VERSION, undefined, { numeric: true }) > 0,
           releaseName: rel.name ?? `Vedit v${latestVer}`,
           releaseUrl: rel.html_url ?? "https://github.com/lilrepaer-glitch/Vedit/releases/latest",
           downloadUrl: dl,
@@ -771,7 +888,7 @@ export const mobileApi = {
       currentVersion: APK_VERSION,
       latestVersion: APK_VERSION,
       updateAvailable: false,
-      releaseName: `Vedit Android v${APK_VERSION}`,
+      releaseName: `Vedit v${APK_VERSION}`,
       releaseUrl: "https://github.com/lilrepaer-glitch/Vedit/releases/latest",
       downloadUrl: "https://github.com/lilrepaer-glitch/Vedit/raw/main/releases/Vedit.apk",
       sizeBytes: null,
@@ -815,9 +932,28 @@ export const mobileApi = {
         ? "image"
         : "video";
     const meta = await probeBrowserFile(file, url, kind);
+
+    // Replace initial untouched sample image automatically on first user media import
+    const seq = activeSeq();
+    const onlySample =
+      state.assets.length === 1 &&
+      state.assets[0]?.id === "asset-sample-1" &&
+      seq.tracks[0]?.clips.length === 1 &&
+      seq.tracks[0]?.clips[0]?.id === "clip-init-1";
+
+    if (onlySample && kind !== "audio") {
+      state.assets = [];
+      seq.tracks[0]!.clips = [];
+      if (meta.width > 0 && meta.height > 0) {
+        seq.width = Math.round(meta.width / 2) * 2;
+        seq.height = Math.round(meta.height / 2) * 2;
+      }
+      at = 0;
+    }
+
     const asset: Asset = {
       id: uid("asset"),
-      name: file.name || `clip-${Date.now()}`,
+      name: file.name || `media-${Date.now()}`,
       kind,
       path: url,
       duration: meta.duration,
@@ -827,20 +963,36 @@ export const mobileApi = {
     blobUrls.set(asset.id, url);
     state.assets.push(asset);
 
-    let createdClip: Clip | undefined;
+    if (kind === "video" || kind === "image") {
+      void extractMediaFilmstrip(asset.id, url, kind, meta.duration, 6).then(() => {
+        changeListeners.forEach((fn) => fn());
+      });
+    }
+
+    let createdClip: Clip | null = null;
     if (insert) {
-      const seq = activeSeq();
       const targetKind = kind === "audio" ? "audio" : "video";
-      let track = trackId ? seq.tracks.find((t) => t.id === trackId) : seq.tracks.find((t) => t.kind === targetKind && !t.locked);
+      let track = trackId
+        ? seq.tracks.find((t) => t.id === trackId)
+        : seq.tracks.find((t) => t.kind === targetKind && !t.locked);
       if (!track) {
-        track = { id: uid("track"), name: targetKind === "audio" ? "A2" : "V2", kind: targetKind, muted: false, solo: false, locked: false, clips: [] };
+        track = {
+          id: uid("track"),
+          name: targetKind === "audio" ? "A2" : "V2",
+          kind: targetKind,
+          muted: false,
+          solo: false,
+          locked: false,
+          volumeDb: 0,
+          clips: [],
+        };
         seq.tracks.push(track);
       }
       createdClip = {
         id: uid("clip"),
         assetId: asset.id,
         name: asset.name,
-        start: Math.max(0, at),
+        start: Math.max(0, Number(at.toFixed(3))),
         duration: meta.duration,
         in: 0,
         out: meta.duration,
@@ -863,7 +1015,7 @@ export const mobileApi = {
     persist();
     return { asset: clone(a) };
   },
-  waveform: async (assetId: string, buckets = 48) => {
+  waveform: async (assetId: string, buckets = 64) => {
     const url = blobUrls.get(assetId);
     if (url && typeof AudioContext !== "undefined") {
       try {
@@ -885,11 +1037,11 @@ export const mobileApi = {
         void actx.close();
         return { peaks, samples: peaks.length };
       } catch {
-        /* synthesized visual waveform fallback for video/image clips */
+        /* fallback */
       }
     }
     const peaks = Array.from({ length: buckets }, (_, i) =>
-      Number((0.25 + 0.55 * Math.abs(Math.sin(i * 0.45 + assetId.length))).toFixed(2)),
+      Number((0.2 + 0.5 * Math.abs(Math.sin(i * 0.42 + assetId.length))).toFixed(2)),
     );
     return { peaks, samples: peaks.length };
   },
@@ -922,7 +1074,25 @@ export const mobileApi = {
     persist();
     return { track: clone(track) };
   },
-  addClip: async (body: { trackId: string; assetId: string; start?: number; duration?: number; in?: number; out?: number }) => {
+  updateSequence: async (patch: { width?: number; height?: number; fps?: number; name?: string; background?: string }) => {
+    recordUndo();
+    const seq = activeSeq();
+    if (patch.width != null) seq.width = Math.max(16, Math.round(patch.width / 2) * 2);
+    if (patch.height != null) seq.height = Math.max(16, Math.round(patch.height / 2) * 2);
+    if (patch.fps != null) seq.fps = Math.max(1, Math.min(120, patch.fps));
+    if (patch.name) seq.name = patch.name;
+    if (patch.background !== undefined) seq.background = patch.background;
+    persist();
+    return { sequence: clone(seq) };
+  },
+  addClip: async (body: {
+    trackId: string;
+    assetId: string;
+    start: number;
+    duration?: number;
+    in?: number;
+    out?: number;
+  }) => {
     recordUndo();
     const track = activeSeq().tracks.find((t) => t.id === body.trackId) ?? activeSeq().tracks[0]!;
     const asset = state.assets.find((a) => a.id === body.assetId);
@@ -955,24 +1125,87 @@ export const mobileApi = {
     persist();
     return { clip: clone(clip) };
   },
+  setClipEffect: async (clipId: string, type: string, params: Record<string, unknown>) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    const fxId = uid("fx");
+    clip.effects = [...clip.effects.filter((e) => e.type !== type), { id: fxId, type, params }];
+    persist();
+    return { effect: { id: fxId } };
+  },
+  addKeyframes: async (
+    clipId: string,
+    keyframes: Array<{ time: number; property: string; value: number; easing?: string }>,
+  ) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    for (const kf of keyframes) {
+      clip.keyframes = clip.keyframes.filter(
+        (existing) => !(existing.property === kf.property && Math.abs(existing.time - kf.time) < 0.04),
+      );
+      clip.keyframes.push({ time: kf.time, property: kf.property, value: kf.value, easing: kf.easing });
+    }
+    clip.keyframes.sort((a, b) => a.time - b.time);
+    persist();
+    return { clip: clone(clip) };
+  },
+  moveClip: async (clipId: string, start: number, trackId?: string) => {
+    recordUndo();
+    const { track: curTrack, clip } = findClip(clipId);
+    clip.start = Math.max(0, Number(start.toFixed(3)));
+    if (trackId && trackId !== curTrack.id) {
+      const dest = activeSeq().tracks.find((t) => t.id === trackId);
+      if (dest) {
+        curTrack.clips = curTrack.clips.filter((c) => c.id !== clipId);
+        dest.clips.push(clip);
+        dest.clips.sort((a, b) => a.start - b.start);
+      }
+    } else {
+      curTrack.clips.sort((a, b) => a.start - b.start);
+    }
+    persist();
+    return { clip: clone(clip) };
+  },
+  trimClip: async (clipId: string, edge: "start" | "end", time: number) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    const rate = Number(clip.effects.find((e) => e.type === "speed")?.params?.rate ?? 1) || 1;
+    if (edge === "start") {
+      const clampedStart = Math.max(0, Math.min(clip.start + clip.duration - 0.12, time));
+      const delta = clampedStart - clip.start;
+      clip.in = Math.max(0, Number((clip.in + delta * rate).toFixed(3)));
+      clip.start = Number(clampedStart.toFixed(3));
+      clip.duration = Math.max(0.12, Number((clip.duration - delta).toFixed(3)));
+    } else {
+      const clampedEnd = Math.max(clip.start + 0.12, time);
+      const nextDur = clampedEnd - clip.start;
+      clip.duration = Number(nextDur.toFixed(3));
+      clip.out = Number((clip.in + nextDur * rate).toFixed(3));
+    }
+    persist();
+    return { clip: clone(clip) };
+  },
   splitClip: async (clipId: string, at: number) => {
     recordUndo();
     const { track, clip } = findClip(clipId);
-    if (at <= clip.start + 0.08 || at >= clip.start + clip.duration - 0.08) {
-      throw new Error("Move playhead inside the selected clip to split");
+    if (at <= clip.start + 0.05 || at >= clip.start + clip.duration - 0.05) {
+      throw new Error("Move playhead inside the clip to split");
     }
+    const speedFx = clip.effects.find((e) => e.type === "speed");
+    const rate = Number(speedFx?.params?.rate ?? 1) || 1;
     const leftDur = Number((at - clip.start).toFixed(3));
     const rightDur = Number((clip.duration - leftDur).toFixed(3));
+    const sourceSplit = Number((clip.in + leftDur * rate).toFixed(3));
     const right: Clip = {
       ...clone(clip),
       id: uid("clip"),
-      start: at,
+      start: Number(at.toFixed(3)),
       duration: rightDur,
-      in: Number((clip.in + leftDur).toFixed(3)),
+      in: sourceSplit,
       out: clip.out,
     };
     clip.duration = leftDur;
-    clip.out = Number((clip.in + leftDur).toFixed(3));
+    clip.out = sourceSplit;
     track.clips.push(right);
     track.clips.sort((a, b) => a.start - b.start);
     persist();
@@ -999,15 +1232,15 @@ export const mobileApi = {
     if (presetId === "fade-in") {
       clip.keyframes.push({ time: 0, property: "opacity", value: 0 }, { time: Math.min(0.8, d), property: "opacity", value: 1 });
     } else if (presetId === "zoom-in") {
-      clip.transform.scaleX = 1.12;
-      clip.transform.scaleY = 1.12;
+      clip.keyframes.push({ time: 0, property: "scaleX", value: 1 }, { time: d, property: "scaleX", value: 1.15 });
+      clip.keyframes.push({ time: 0, property: "scaleY", value: 1 }, { time: d, property: "scaleY", value: 1.15 });
     } else if (presetId === "zoom-out") {
-      clip.transform.scaleX = 0.92;
-      clip.transform.scaleY = 0.92;
+      clip.keyframes.push({ time: 0, property: "scaleX", value: 1.15 }, { time: d, property: "scaleX", value: 1 });
+      clip.keyframes.push({ time: 0, property: "scaleY", value: 1.15 }, { time: d, property: "scaleY", value: 1 });
     } else if (presetId === "slide-left") {
-      clip.keyframes.push({ time: 0, property: "x", value: 80 }, { time: Math.min(0.7, d), property: "x", value: 0 });
+      clip.keyframes.push({ time: 0, property: "x", value: 120 }, { time: Math.min(0.6, d), property: "x", value: 0 });
     } else {
-      clip.keyframes.push({ time: 0, property: "y", value: 50 }, { time: Math.min(0.7, d), property: "y", value: 0 });
+      clip.keyframes.push({ time: 0, property: "y", value: 90 }, { time: Math.min(0.6, d), property: "y", value: 0 });
     }
     persist();
     return { clip: clone(clip) };
@@ -1015,30 +1248,92 @@ export const mobileApi = {
   setClipSpeed: async (clipId: string, speed: number) => {
     recordUndo();
     const { clip } = findClip(clipId);
-    clip.effects = [...clip.effects.filter((e) => e.type !== "speed"), { id: uid("fx"), type: "speed", params: { rate: speed } }];
-    clip.duration = Math.max(0.2, Number((clip.duration / speed).toFixed(2)));
+    const prevFx = clip.effects.find((e) => e.type === "speed");
+    const prevRate = Number(prevFx?.params?.rate ?? 1) || 1;
+    const baseMediaSpan = clip.duration * prevRate;
+    const clamped = Math.max(0.2, Math.min(4, speed));
+    clip.effects = [...clip.effects.filter((e) => e.type !== "speed"), { id: uid("fx"), type: "speed", params: { rate: clamped } }];
+    clip.duration = Math.max(0.15, Number((baseMediaSpan / clamped).toFixed(3)));
     persist();
     return { clip: clone(clip) };
   },
   reverseClip: async (clipId: string) => {
     recordUndo();
     const { clip } = findClip(clipId);
-    clip.effects.push({ id: uid("fx"), type: "reverse", params: { reversed: true } });
-    clip.name = `⏪ ${clip.name.replace(/^⏪\s*/, "")}`;
+    const already = clip.effects.some((e) => e.type === "reverse");
+    clip.effects = already
+      ? clip.effects.filter((e) => e.type !== "reverse")
+      : [...clip.effects, { id: uid("fx"), type: "reverse", params: { reversed: true } }];
     persist();
     return { outPath: clip.assetId };
   },
-  freezeClip: async (clipId: string, at?: number, holdDuration = 1.5) => {
+  freezeClip: async (clipId: string, at?: number, holdDuration = 2.0) => {
     recordUndo();
     const { track, clip } = findClip(clipId);
+    const asset = state.assets.find((a) => a.id === clip.assetId);
+    const insertAt = at != null && at >= clip.start && at <= clip.start + clip.duration ? at : clip.start + clip.duration;
+    let dataUrl = resolveAssetUrlById(clip.assetId);
+
+    // Capture real pixel frame from the video at the exact playhead timestamp!
+    if (asset?.kind === "video" && typeof document !== "undefined") {
+      try {
+        const v = document.createElement("video");
+        v.muted = true;
+        v.playsInline = true;
+        v.src = dataUrl;
+        await new Promise<void>((res) => {
+          const t = setTimeout(res, 3000);
+          v.onloadeddata = () => {
+            clearTimeout(t);
+            res();
+          };
+          v.onerror = () => {
+            clearTimeout(t);
+            res();
+          };
+        });
+        const localT = Math.max(0, insertAt - clip.start);
+        await seekVideoElement(v, clip.in + localT, 1500);
+        const c = document.createElement("canvas");
+        c.width = v.videoWidth || 1280;
+        c.height = v.videoHeight || 720;
+        c.getContext("2d")?.drawImage(v, 0, 0, c.width, c.height);
+        dataUrl = c.toDataURL("image/jpeg", 0.92);
+        v.src = "";
+      } catch {
+        /* fallback */
+      }
+    }
+
+    const freezeAsset: Asset = {
+      id: uid("freeze"),
+      name: `Freeze_${clip.name}.jpg`,
+      kind: "image",
+      path: dataUrl,
+      duration: holdDuration,
+      width: asset?.width ?? 1920,
+      height: asset?.height ?? 1080,
+    };
+    blobUrls.set(freezeAsset.id, dataUrl);
+    state.assets.push(freezeAsset);
+
+    // Shift subsequent clips to make room cleanly
+    for (const c of track.clips) {
+      if (c.start >= insertAt) c.start = Number((c.start + holdDuration).toFixed(3));
+    }
     const freezeClipObj: Clip = {
       ...clone(clip),
       id: uid("clip"),
-      name: `❄ Freeze (${clip.name})`,
-      start: at ?? clip.start + clip.duration,
+      assetId: freezeAsset.id,
+      name: `Freeze · ${clip.name}`,
+      start: Number(insertAt.toFixed(3)),
       duration: holdDuration,
+      in: 0,
+      out: holdDuration,
+      effects: clip.effects.filter((e) => e.type !== "speed" && e.type !== "reverse"),
     };
     track.clips.push(freezeClipObj);
+    track.clips.sort((a, b) => a.start - b.start);
     persist();
     return { outPath: freezeClipObj.id };
   },
@@ -1057,13 +1352,7 @@ export const mobileApi = {
       blueHistogram: bHist,
       waveform: Array.from({ length: 32 }, (_, i) => {
         const med = Math.round(46 + 18 * Math.sin(i * 0.2 + timeSec * 0.4));
-        return {
-          min: Math.max(4, med - 28),
-          p25: Math.max(8, med - 14),
-          median: med,
-          p75: Math.min(94, med + 15),
-          max: Math.min(99, med + 28),
-        };
+        return { min: Math.max(4, med - 28), p25: Math.max(8, med - 14), median: med, p75: Math.min(94, med + 15), max: Math.min(99, med + 28) };
       }),
       metrics: {
         avgLumaIre: 48.6,
@@ -1087,7 +1376,7 @@ export const mobileApi = {
       vTrack.clips.push({
         id: uid("clip"),
         assetId: a.id,
-        name: `Cam: ${a.name}`,
+        name: a.name,
         start: cursor,
         duration: autoIntervalSec,
         in: 0,
@@ -1107,18 +1396,8 @@ export const mobileApi = {
   colorGrade: async (clipId: string, preset: string) => {
     recordUndo();
     const { clip } = findClip(clipId);
-    const map: Record<string, Record<string, number>> = {
-      "cinematic-contrast": { contrast: 1.28, saturation: 1.25, brightness: 0.02 },
-      "warm-golden": { contrast: 1.12, saturation: 1.35, brightness: 0.06 },
-      "cool-noir": { contrast: 1.25, saturation: 0.72, brightness: -0.04 },
-      "vivid-social": { contrast: 1.2, saturation: 1.5, brightness: 0.04 },
-      neutral: { contrast: 1, saturation: 1, brightness: 0 },
-    };
     const fxId = uid("fx");
-    clip.effects = [
-      ...clip.effects.filter((e) => e.type !== "color-grade"),
-      { id: fxId, type: "color-grade", params: map[preset] ?? map["cinematic-contrast"]! },
-    ];
+    clip.effects = [...clip.effects.filter((e) => e.type !== "color-grade"), { id: fxId, type: "color-grade", params: { preset, intensity: 100 } }];
     persist();
     return { effect: { id: fxId } };
   },
@@ -1141,7 +1420,7 @@ export const mobileApi = {
   applyLut: async (clipId: string, lutId: string) => {
     recordUndo();
     const { clip } = findClip(clipId);
-    clip.effects = [...clip.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId } }];
+    clip.effects = [...clip.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId, intensity: 100 } }];
     persist();
     return { cubePath: `luts/${lutId}.cube` };
   },
@@ -1150,17 +1429,20 @@ export const mobileApi = {
     const { clip } = findClip(clipId);
     clip.transform.scaleX = Math.max(1.06, clip.transform.scaleX);
     clip.transform.scaleY = Math.max(1.06, clip.transform.scaleY);
-    clip.effects.push({ id: uid("fx"), type: "stabilize", params: { shakiness: 5 } });
+    clip.effects = [...clip.effects.filter((e) => e.type !== "stabilize"), { id: uid("fx"), type: "stabilize", params: { zoom: 1.06 } }];
     persist();
-    return { outPath: clip.assetId, method: "Mobile Optical Zoom Crop Stabilizer" };
+    return { outPath: clip.assetId, method: "Optical Crop Stabilization" };
   },
   applyLayout: async (clipId: string, layout: string) => {
     recordUndo();
     const { clip } = findClip(clipId);
-    if (layout === "pip-bottom-right") clip.transform = { ...clip.transform, x: 180, y: 100, scaleX: 0.42, scaleY: 0.42 };
-    else if (layout === "pip-top-right") clip.transform = { ...clip.transform, x: 180, y: -100, scaleX: 0.42, scaleY: 0.42 };
-    else if (layout === "split-left") clip.transform = { ...clip.transform, x: -150, y: 0, scaleX: 0.5, scaleY: 1 };
-    else if (layout === "split-right") clip.transform = { ...clip.transform, x: 150, y: 0, scaleX: 0.5, scaleY: 1 };
+    const seq = activeSeq();
+    const ox = Math.round(seq.width * 0.25);
+    const oy = Math.round(seq.height * 0.25);
+    if (layout === "pip-bottom-right") clip.transform = { ...clip.transform, x: ox, y: oy, scaleX: 0.4, scaleY: 0.4 };
+    else if (layout === "pip-top-right") clip.transform = { ...clip.transform, x: ox, y: -oy, scaleX: 0.4, scaleY: 0.4 };
+    else if (layout === "split-left") clip.transform = { ...clip.transform, x: -Math.round(seq.width * 0.25), y: 0, scaleX: 0.5, scaleY: 1 };
+    else if (layout === "split-right") clip.transform = { ...clip.transform, x: Math.round(seq.width * 0.25), y: 0, scaleX: 0.5, scaleY: 1 };
     else clip.transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
     persist();
     return { clip: clone(clip) };
@@ -1168,16 +1450,18 @@ export const mobileApi = {
   enhanceAudio: async (clipId?: string) => {
     recordUndo();
     const target = clipId ? findClip(clipId).clip : activeSeq().tracks.flatMap((t) => t.clips)[0];
-    if (target) target.effects.push({ id: uid("fx"), type: "audio-enhance", params: { lufs: -16 } });
+    if (target) {
+      target.effects = [...target.effects.filter((e) => e.type !== "volume"), { id: uid("fx"), type: "volume", params: { gain: 1.25 } }];
+    }
     persist();
-    return { outPath: "Android/Audio/enhanced.wav", duration: target?.duration ?? 5 };
+    return { outPath: "Audio/enhanced", duration: target?.duration ?? 5 };
   },
   duckAudio: async (musicClipId: string, _voiceClipId?: string) => {
     recordUndo();
     const { clip } = findClip(musicClipId);
-    clip.effects.push({ id: uid("fx"), type: "audio-duck", params: { ratio: 4 } });
+    clip.effects = [...clip.effects.filter((e) => e.type !== "volume"), { id: uid("fx"), type: "volume", params: { gain: 0.28 } }];
     persist();
-    return { speechIntervals: [{ start: 0.5, end: 3.5 }], reductionDb: 12 };
+    return { speechIntervals: [{ start: 0, end: clip.duration }], reductionDb: 11 };
   },
   removeEffect: async (clipId: string, effectId: string) => {
     recordUndo();
@@ -1190,91 +1474,163 @@ export const mobileApi = {
     recordUndo();
     const cfg = readLocalApi();
     const seq = activeSeq();
-    const lead = seq.tracks.flatMap((t) => t.clips)[0];
+    const allClips = seq.tracks.flatMap((t) => t.clips);
+    const lead = allClips[0];
     const steps: Array<{ step: string; detail: string }> = [];
 
-    if (cfg.apiKey.trim()) {
-      try {
-        const res = await fetch(`${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${cfg.apiKey.trim()}`,
+    if (sanitizeMobileApiKey(cfg.apiKey) || /^https?:\/\/(127\.0\.0\.1|localhost|192\.168\.|10\.)/i.test(cfg.baseUrl)) {
+      const timelineContext = JSON.stringify({
+        resolution: `${seq.width}x${seq.height}`,
+        fps: seq.fps,
+        clips: allClips.map((c) => ({ id: c.id, name: c.name, start: c.start, duration: c.duration })),
+        captions: seq.captions,
+      });
+
+      const llmRes = await runMobileLlmChat(
+        [
+          {
+            role: "system",
+            content:
+              `You are the Vedit Video Editor AI Engine. Inspect the user's timeline: ${timelineContext}. ` +
+              `Respond ONLY with valid JSON matching: ` +
+              `{"reply":"concise human summary in the user's language","actions":[` +
+              `{"op":"lut","lutId":"kodak-2383|teal-orange-blockbuster|fuji-eterna|warm-golden|cool-noir|bleach-bypass|silver-mono|cyberpunk-neon"},` +
+              `{"op":"adjust","exposure":0,"contrast":15,"saturation":12,"temperature":8,"vignette":15},` +
+              `{"op":"speed","rate":1.25},` +
+              `{"op":"transition","kind":"dissolve|fade-black|slide-left|zoom-in","duration":0.5},` +
+              `{"op":"fade","fadeIn":0.5,"fadeOut":0.5},` +
+              `{"op":"aspect","ratio":"9:16|16:9|1:1|4:5"},` +
+              `{"op":"caption","text":"Subtitle text","start":0.2,"end":3.5},` +
+              `{"op":"split","at":2.0}` +
+              `]}. Include only actions requested by the user.`,
           },
-          body: JSON.stringify({
-            model: cfg.model || "openai/gpt-4.1-mini",
-            temperature: 0.2,
-            max_tokens: 500,
-            messages: [
-              {
-                role: "system",
-                content:
-                  'You are Vedit Studio Mobile AI Copilot. Return ONLY JSON: {"reply":"short message","lutId":"optional kodak-2383|teal-orange-blockbuster|cyberpunk-neon|bleach-bypass","caption":"optional subtitle text","speed":1}',
-              },
-              { role: "user", content: prompt },
-            ],
-          }),
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-          const raw = data.choices?.[0]?.message?.content ?? "";
-          const m = /\{[\s\S]*\}/.exec(raw);
-          if (m) {
-            const plan = JSON.parse(m[0]) as { reply?: string; lutId?: string; caption?: string; speed?: number };
-            if (plan.lutId && lead) {
-              lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId: plan.lutId } }];
-              steps.push({ step: "lut3d", detail: `Applied ${plan.lutId}` });
+          { role: "user", content: prompt },
+        ],
+        { maxTokens: 700 },
+      );
+
+      const jsonMatch = /\{[\s\S]*\}/.exec(llmRes.content);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]) as {
+          reply?: string;
+          actions?: Array<Record<string, unknown>>;
+        };
+        for (const act of parsed.actions ?? []) {
+          const op = String(act.op || "");
+          if (op === "lut" && lead) {
+            const lutId = String(act.lutId || "kodak-2383");
+            lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId, intensity: 100 } }];
+            steps.push({ step: "LUT", detail: lutId });
+          } else if (op === "adjust" && lead) {
+            const params: Record<string, number> = {};
+            for (const k of ["exposure", "brightness", "contrast", "saturation", "temperature", "tint", "fade", "vignette", "blur"]) {
+              if (act[k] != null) params[k] = Number(act[k]);
             }
-            if (plan.caption) {
-              seq.captions.push({ id: uid("cap"), text: plan.caption, start: 0.2, end: 3.5 });
-              steps.push({ step: "caption", detail: plan.caption });
+            lead.effects = [...lead.effects.filter((e) => e.type !== "adjust"), { id: uid("fx"), type: "adjust", params }];
+            steps.push({ step: "Color", detail: "Updated color adjustments" });
+          } else if (op === "speed" && lead) {
+            const rate = Math.max(0.25, Math.min(4, Number(act.rate ?? 1.25)));
+            lead.effects = [...lead.effects.filter((e) => e.type !== "speed"), { id: uid("fx"), type: "speed", params: { rate } }];
+            lead.duration = Math.max(0.2, Number((lead.duration / rate).toFixed(3)));
+            steps.push({ step: "Speed", detail: `${rate}×` });
+          } else if (op === "transition") {
+            const kind = String(act.kind || "dissolve");
+            const duration = Number(act.duration ?? 0.5);
+            for (const c of allClips) {
+              c.effects = [...c.effects.filter((e) => e.type !== "transition"), { id: uid("fx"), type: "transition", params: { kind, duration } }];
             }
-            if (plan.speed && plan.speed !== 1 && lead) {
-              lead.duration = Math.max(0.3, Number((lead.duration / plan.speed).toFixed(2)));
-              steps.push({ step: "speed", detail: `${plan.speed}×` });
+            steps.push({ step: "Transition", detail: `${kind} (${duration}s)` });
+          } else if (op === "fade" && lead) {
+            const fadeIn = Number(act.fadeIn ?? 0.5);
+            const fadeOut = Number(act.fadeOut ?? 0.5);
+            lead.effects = [...lead.effects.filter((e) => e.type !== "fade"), { id: uid("fx"), type: "fade", params: { fadeIn, fadeOut } }];
+            steps.push({ step: "Fade", detail: `${fadeIn}s / ${fadeOut}s` });
+          } else if (op === "aspect") {
+            const ratio = String(act.ratio || "9:16");
+            if (ratio === "9:16") { seq.width = 1080; seq.height = 1920; }
+            else if (ratio === "1:1") { seq.width = 1080; seq.height = 1080; }
+            else if (ratio === "4:5") { seq.width = 1080; seq.height = 1350; }
+            else { seq.width = 1920; seq.height = 1080; }
+            steps.push({ step: "Canvas", detail: `${seq.width}×${seq.height}` });
+          } else if (op === "caption" && act.text) {
+            seq.captions.push({
+              id: uid("cap"),
+              text: String(act.text),
+              start: Number(act.start ?? 0.2),
+              end: Number(act.end ?? 3.5),
+            });
+            steps.push({ step: "Caption", detail: String(act.text) });
+          } else if (op === "split" && lead) {
+            const at = Number(act.at ?? lead.start + lead.duration / 2);
+            if (at > lead.start + 0.1 && at < lead.start + lead.duration - 0.1) {
+              const leftDur = Number((at - lead.start).toFixed(3));
+              const right: Clip = { ...clone(lead), id: uid("clip"), start: at, duration: Number((lead.duration - leftDur).toFixed(3)), in: lead.in + leftDur };
+              lead.duration = leftDur;
+              lead.out = lead.in + leftDur;
+              seq.tracks[0]!.clips.push(right);
+              steps.push({ step: "Split", detail: `Split at ${at.toFixed(2)}s` });
             }
-            persist();
-            return {
-              checkpointId: uid("snap"),
-              stepsExecuted: steps,
-              summary: `[${cfg.model}] ${plan.reply || "Applied AI edits on timeline"}`,
-            };
           }
         }
-      } catch {
-        /* fallback offline parser */
+        persist();
+        return {
+          checkpointId: uid("snap"),
+          stepsExecuted: steps,
+          summary: parsed.reply || llmRes.content.slice(0, 240),
+        };
       }
+      persist();
+      return {
+        checkpointId: uid("snap"),
+        stepsExecuted: steps,
+        summary: llmRes.content,
+      };
     }
 
+    // Deterministic offline command parser (works with zero API key)
     const low = prompt.toLowerCase();
-    if (lead && /kodak|film|lut/.test(low)) {
-      lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId: "kodak-2383" } }];
-      steps.push({ step: "lut3d", detail: "Kodak 2383 3D LUT" });
-    } else if (lead && /cyber|neon/.test(low)) {
-      lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId: "cyberpunk-neon" } }];
-      steps.push({ step: "lut3d", detail: "Cyberpunk Neon LUT" });
+    if (lead && /kodak|film|lut|kino|cinema/.test(low)) {
+      lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId: "kodak-2383", intensity: 100 } }];
+      steps.push({ step: "LUT", detail: "Kodak 2383" });
+    } else if (lead && /mono|černobíl|bw/.test(low)) {
+      lead.effects = [...lead.effects.filter((e) => e.type !== "lut3d"), { id: uid("fx"), type: "lut3d", params: { lutId: "silver-mono", intensity: 100 } }];
+      steps.push({ step: "LUT", detail: "Ilford Silver Mono" });
     }
-    if (/lower|title|titul/.test(low)) {
-      seq.captions.push({ id: uid("cap"), text: "Vedit Studio", start: 0.2, end: 3.5 });
-      steps.push({ step: "caption", detail: "Added Vedit Studio subtitle" });
+    if (/9:16|tiktok|reel|short|vertikál/.test(low)) {
+      seq.width = 1080;
+      seq.height = 1920;
+      steps.push({ step: "Canvas", detail: "1080×1920 (9:16)" });
+    }
+    if (/title|titul|text|caption/.test(low)) {
+      const cleaned = prompt.replace(/^.*?(title|titulky|titulek|text|caption)\s*:?\s*/i, "").trim() || "New Title";
+      seq.captions.push({ id: uid("cap"), text: cleaned, start: 0.2, end: 3.5 });
+      steps.push({ step: "Title", detail: cleaned });
     }
     if (!steps.length && lead) {
-      lead.effects.push({ id: uid("fx"), type: "fade", params: { fadeIn: 0.5, fadeOut: 0.5 } });
-      steps.push({ step: "polish", detail: "Applied smooth cinema polish" });
+      lead.effects = [...lead.effects.filter((e) => e.type !== "fade"), { id: uid("fx"), type: "fade", params: { fadeIn: 0.4, fadeOut: 0.4 } }];
+      steps.push({ step: "Fade", detail: "Smooth 0.4s fade in/out" });
     }
     persist();
     return {
       checkpointId: uid("snap"),
       stepsExecuted: steps,
-      summary: `Copilot applied ${steps.map((s) => s.detail).join(" • ")}`,
+      summary: `Applied: ${steps.map((s) => `${s.step} (${s.detail})`).join(", ")}`,
     };
   },
-  addGraphic: async (body: { kind: string; label?: string; svgMarkup?: string; start?: number; duration?: number }) => {
+  addGraphic: async (body: {
+    kind: string;
+    label?: string;
+    svgMarkup?: string;
+    accentColor?: string;
+    start?: number;
+    duration?: number;
+    animationPreset?: string;
+  }) => {
     recordUndo();
     const seq = activeSeq();
     const dataUri = body.svgMarkup
       ? `data:image/svg+xml;utf8,${encodeURIComponent(body.svgMarkup)}`
-      : buildSvgDataUri(body.kind, body.label || "Vedit Studio");
+      : buildSvgDataUri(body.kind, body.label || "Title", body.accentColor || "#3b82f6");
     const asset: Asset = {
       id: uid("gfx"),
       name: `${body.label || body.kind}.svg`,
@@ -1288,8 +1644,8 @@ export const mobileApi = {
     state.assets.push(asset);
     let gTrack = seq.tracks.find((t) => t.kind === "graphics");
     if (!gTrack) {
-      gTrack = { id: uid("track"), name: "V2 Graphics", kind: "graphics", muted: false, solo: false, locked: false, clips: [] };
-      seq.tracks.unshift(gTrack);
+      gTrack = { id: uid("track"), name: "V2 Overlay", kind: "graphics", muted: false, solo: false, locked: false, clips: [] };
+      seq.tracks.push(gTrack);
     }
     const clip: Clip = {
       id: uid("clip"),
@@ -1308,18 +1664,50 @@ export const mobileApi = {
     return { asset: clone(asset), clip: clone(clip), outPath: dataUri };
   },
   exportThumbnail: async (_title?: string, at?: number) => {
-    const resp = await fetch("/showcase/hero-cinema.jpg");
+    const firstAsset = state.assets[0];
+    const srcUrl = firstAsset ? resolveAssetUrlById(firstAsset.id) : "/showcase/hero-cinema.jpg";
+    const resp = await fetch(srcUrl);
     const blob = await resp.blob();
-    const outPath = await saveBlobToAndroidOrBrowser(blob, `Vedit_Thumbnail_${Date.now()}.jpg`, "image/jpeg");
-    return { outPath, selectedTime: at ?? 1.2, width: 1280, sizeBytes: blob.size };
+    const outPath = await saveBlobToAndroidOrBrowser(blob, `Vedit_Frame_${Date.now()}.jpg`, "image/jpeg");
+    return { outPath, selectedTime: at ?? 0, width: 1920, sizeBytes: blob.size };
   },
-  addCaption: async (body: { text: string; start: number; end: number }) => {
+  addCaption: async (body: { text: string; start: number; end: number; style?: Record<string, unknown> }) => {
     recordUndo();
-    const caption: Caption = { id: uid("cap"), text: body.text, start: body.start, end: body.end };
+    const caption: Caption = {
+      id: uid("cap"),
+      text: body.text,
+      start: Number(body.start.toFixed(3)),
+      end: Number(body.end.toFixed(3)),
+      ...(body.style ? { style: body.style } : {}),
+    };
     activeSeq().captions.push(caption);
     persist();
-    return { caption };
+    return { caption: clone(caption) };
   },
+  updateCaption: async (
+    captionId: string,
+    patch: { text?: string; start?: number; end?: number; style?: Record<string, unknown> },
+  ) => {
+    recordUndo();
+    const cap = activeSeq().captions.find((c) => c.id === captionId);
+    if (!cap) throw new Error("Caption not found");
+    if (patch.text !== undefined) cap.text = patch.text;
+    if (patch.start !== undefined) cap.start = Number(patch.start.toFixed(3));
+    if (patch.end !== undefined) cap.end = Number(patch.end.toFixed(3));
+    if (patch.style !== undefined) cap.style = { ...(cap.style ?? {}), ...patch.style };
+    persist();
+    return { caption: clone(cap) };
+  },
+  deleteCaption: async (captionId: string) => {
+    recordUndo();
+    const seq = activeSeq();
+    seq.captions = seq.captions.filter((c) => c.id !== captionId);
+    persist();
+    return { ok: true };
+  },
+  shareExport: async () => ({
+    shared: Boolean(window.VeditAndroid?.shareLastExport?.()),
+  }),
   genVideo: async (prompt: string, duration = 5) => mobileApi.generateMedia({ prompt, kind: "video", duration }),
   exportRender: async (preset = "youtube-1080p", _hwAccel = "auto", _loudnessTargetLufs?: number) => {
     const jobId = uid("render");
@@ -1329,6 +1717,14 @@ export const mobileApi = {
     return { jobId };
   },
   exportPresets: async () => ({ presets: MOBILE_EXPORT_PRESETS }),
+  exportEncoders: async () => ({
+    recommendedBackend: "hardware-h264",
+    usableBackends: ["hardware-h264", "webm-vp9"],
+    encoders: [
+      { encoder: "avc1_hardware", codec: "h264", backend: "hardware-h264", label: "Hardware H.264 + AAC (.mp4)", usable: true },
+      { encoder: "vp9_opus", codec: "vp9", backend: "webm-vp9", label: "VP9 + Opus (.webm)", usable: true },
+    ],
+  }),
   batchExport: async (presets: string[]) => {
     const jobIds: string[] = [];
     for (const p of presets.slice(0, 1)) {
@@ -1344,16 +1740,16 @@ export const mobileApi = {
     if (templateId === "tpl-tiktok-shorts") {
       seq.width = 1080;
       seq.height = 1920;
-      seq.captions.push({ id: uid("cap"), text: String(params.title || "Watch Till The End 🔥"), start: 0, end: 3 });
+      if (params.title) seq.captions.push({ id: uid("cap"), text: String(params.title), start: 0, end: 3 });
     } else {
-      seq.width = 1280;
-      seq.height = 720;
-      seq.captions.push({ id: uid("cap"), text: String(params.title || "Vedit Cinema Opener"), start: 0, end: 3.5 });
+      seq.width = 1920;
+      seq.height = 1080;
+      if (params.title) seq.captions.push({ id: uid("cap"), text: String(params.title), start: 0, end: 3.5 });
     }
     persist();
     return {
-      appliedName: templateId === "tpl-tiktok-shorts" ? "Vertical Shorts 9:16" : "Vedit Cinema Opener",
-      captionsAdded: 1,
+      appliedName: templateId === "tpl-tiktok-shorts" ? "Vertical 9:16" : "Widescreen 16:9",
+      captionsAdded: params.title ? 1 : 0,
     };
   },
   runPlugin: async (_pluginId: string, _params: Record<string, string> = {}) => ({ ok: true }) as Record<string, unknown>,
@@ -1362,7 +1758,7 @@ export const mobileApi = {
     const snap: SnapshotInfo = {
       id: uid("snap"),
       label,
-      author: "Mobile Editor",
+      author: "Editor",
       createdAt: new Date().toISOString(),
       sequenceDuration: 10,
       clipCount: activeSeq().tracks.flatMap((t) => t.clips).length,
@@ -1380,8 +1776,8 @@ export const mobileApi = {
     }
     const found = (state.snapshots ?? []).find((s) => s.id === snapshotId) ?? {
       id: snapshotId,
-      label: "Restored Snapshot",
-      author: "Mobile Editor",
+      label: "Restored",
+      author: "Editor",
       createdAt: new Date().toISOString(),
       sequenceDuration: 10,
       clipCount: activeSeq().tracks.flatMap((t) => t.clips).length,
@@ -1391,7 +1787,7 @@ export const mobileApi = {
   addComment: async (text: string, timecode: number) => {
     const comment: ReviewComment = {
       id: uid("cmt"),
-      author: "Director",
+      author: "Editor",
       text,
       timecode,
       resolved: false,
@@ -1409,8 +1805,8 @@ export const mobileApi = {
     return { comment: c };
   },
   aiCaps: async () => ({
-    tts: { engine: "android-speech-synth", available: true },
-    asr: { engine: "caption-auto-sync", available: true },
+    tts: { engine: "speech-synthesis", available: true },
+    asr: { engine: "auto-captions", available: true },
     voices: ["en-US", "cs-CZ"],
   }),
   genProviders: async () => ({ providers: MOBILE_GEN_PROVIDERS, cameraMoves: MOBILE_CAMERA_MOVES }),
@@ -1418,37 +1814,34 @@ export const mobileApi = {
     recordUndo();
     const jobId = uid("gen");
     const c = document.createElement("canvas");
-    c.width = 1280;
-    c.height = 720;
+    const seq = activeSeq();
+    c.width = seq.width || 1920;
+    c.height = seq.height || 1080;
     const g = c.getContext("2d")!;
-    const grad = g.createLinearGradient(0, 0, 1280, 720);
-    grad.addColorStop(0, "#0b132b");
-    grad.addColorStop(0.5, "#00a8cc");
-    grad.addColorStop(1, "#3a0ca3");
+    const grad = g.createLinearGradient(0, 0, c.width, c.height);
+    grad.addColorStop(0, "#09090b");
+    grad.addColorStop(0.55, "#18181b");
+    grad.addColorStop(1, "#1e293b");
     g.fillStyle = grad;
-    g.fillRect(0, 0, 1280, 720);
-    g.fillStyle = "#ffffff";
-    g.font = "bold 46px system-ui, sans-serif";
+    g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#fafafa";
+    g.font = `700 ${Math.round(c.height * 0.055)}px Inter, system-ui, sans-serif`;
     g.textAlign = "center";
-    g.fillText(body.prompt.slice(0, 42), 640, 355);
-    g.font = "24px system-ui, sans-serif";
-    g.fillStyle = "#a5f3fc";
-    g.fillText(`AI Generated ${body.kind.toUpperCase()} • ${body.cameraMove || "Cinema"}`, 640, 412);
-    const dataUrl = c.toDataURL("image/jpeg", 0.88);
+    g.fillText(body.prompt.slice(0, 48), c.width / 2, c.height * 0.5);
+    const dataUrl = c.toDataURL("image/jpeg", 0.92);
     const dur = body.duration ?? 4;
     const asset: Asset = {
-      id: uid("genasset"),
-      name: `AI_${body.prompt.slice(0, 18).replace(/\s+/g, "_")}.jpg`,
+      id: uid("titleplate"),
+      name: `${body.prompt.slice(0, 20).replace(/\s+/g, "_")}.jpg`,
       kind: "generated",
       path: dataUrl,
       duration: dur,
-      width: 1280,
-      height: 720,
-      source: { provider: "vedit-mobile", model: body.model || "synth-v1", prompt: body.prompt, simulated: false },
+      width: c.width,
+      height: c.height,
+      source: { provider: "vedit-canvas", model: "plate", prompt: body.prompt, simulated: false },
     };
     blobUrls.set(asset.id, dataUrl);
     state.assets.push(asset);
-    const seq = activeSeq();
     seq.tracks[0]!.clips.push({
       id: uid("clip"),
       assetId: asset.id,
@@ -1458,10 +1851,15 @@ export const mobileApi = {
       in: 0,
       out: dur,
       transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
-      keyframes: [
-        { time: 0, property: "scaleX", value: 1 },
-        { time: dur, property: "scaleX", value: 1.12 },
-      ],
+      keyframes:
+        body.cameraMove === "dolly-in"
+          ? [
+              { time: 0, property: "scaleX", value: 1 },
+              { time: dur, property: "scaleX", value: 1.1 },
+              { time: 0, property: "scaleY", value: 1 },
+              { time: dur, property: "scaleY", value: 1.1 },
+            ]
+          : [],
       effects: [],
     });
     state.jobs.push({ id: jobId, type: `gen.${body.kind}`, status: "done", progress: 100 });
@@ -1484,65 +1882,112 @@ export const mobileApi = {
     persist();
     return { jobId };
   },
-  transcribe: async (assetId: string, _language = "en") => {
+  transcribe: async (assetId: string, language = "cs") => {
     recordUndo();
     const asset = state.assets.find((a) => a.id === assetId);
-    activeSeq().captions.push({
-      id: uid("cap"),
-      text: `[Auto Subtitle] ${asset?.name ?? "Clip"}`,
-      start: 0,
-      end: Math.min(4, asset?.duration ?? 4),
-    });
+    const cfg = readLocalApi();
+    const dur = Math.max(2, asset?.duration ?? 5);
+
+    if (sanitizeMobileApiKey(cfg.apiKey)) {
+      try {
+        const ai = await runMobileLlmChat(
+          [
+            {
+              role: "system",
+              content:
+                `Generate concise timed video captions in language "${language}" for clip "${asset?.name ?? "Video"}" (${dur.toFixed(1)}s). ` +
+                `Return ONLY JSON array: [{"text":"...","start":0.2,"end":2.4}]`,
+            },
+            { role: "user", content: "Create natural timed subtitles across the clip duration." },
+          ],
+          { maxTokens: 450 },
+        );
+        const arrMatch = /\[[\s\S]*\]/.exec(ai.content);
+        if (arrMatch) {
+          const segs = JSON.parse(arrMatch[0]) as Array<{ text: string; start: number; end: number }>;
+          for (const seg of segs) {
+            if (seg.text) {
+              activeSeq().captions.push({
+                id: uid("cap"),
+                text: String(seg.text),
+                start: Number(seg.start ?? 0),
+                end: Number(seg.end ?? 2),
+              });
+            }
+          }
+        }
+      } catch {
+        activeSeq().captions.push({ id: uid("cap"), text: asset?.name ?? "Subtitle", start: 0.2, end: Math.min(3.5, dur) });
+      }
+    } else {
+      activeSeq().captions.push({ id: uid("cap"), text: asset?.name ?? "Subtitle", start: 0.2, end: Math.min(3.5, dur) });
+    }
     const jobId = uid("stt");
     state.jobs.push({ id: jobId, type: "ai.transcribe", status: "done", progress: 100 });
     persist();
     return { jobId };
   },
-  removeSilences: async (_clipId?: string) => {
+  removeSilences: async (clipId?: string) => {
     recordUndo();
     const seq = activeSeq();
-    for (const c of seq.tracks.flatMap((t) => t.clips)) {
-      c.duration = Math.max(0.5, Number((c.duration * 0.88).toFixed(2)));
+    const targetClip = clipId ? findClip(clipId).clip : seq.tracks.flatMap((t) => t.clips)[0];
+    let saved = 0.6;
+    if (targetClip) {
+      const before = targetClip.duration;
+      targetClip.in = Number((targetClip.in + Math.min(0.35, before * 0.08)).toFixed(3));
+      targetClip.duration = Math.max(0.4, Number((before * 0.86).toFixed(3)));
+      targetClip.out = Number((targetClip.in + targetClip.duration).toFixed(3));
+      saved = Number((before - targetClip.duration).toFixed(2));
     }
     persist();
-    return { trackId: seq.tracks[0]?.id ?? "track-v1", savedDuration: 0.85 };
+    return { trackId: seq.tracks[0]?.id ?? "track-v1", savedDuration: Math.max(0.1, saved) };
   },
   highlight: async (targetDuration = 15) => {
     recordUndo();
     const seq = activeSeq();
-    const clips = seq.tracks.flatMap((t) => t.clips);
+    const clips = seq.tracks[0]?.clips ?? [];
     let cursor = 0;
-    const per = Math.max(1.5, Number((targetDuration / Math.max(1, clips.length)).toFixed(2)));
+    const per = Math.max(1.2, Number((targetDuration / Math.max(1, clips.length)).toFixed(2)));
     for (const c of clips) {
-      c.start = cursor;
+      c.start = Number(cursor.toFixed(3));
       c.duration = Math.min(c.duration, per);
+      c.out = Number((c.in + c.duration).toFixed(3));
       cursor += c.duration;
     }
     persist();
-    return { trackId: seq.tracks[0]?.id ?? "track-v1", clips: clips.map((c) => c.id), totalDuration: cursor };
+    return { trackId: seq.tracks[0]?.id ?? "track-v1", clips: clips.map((c) => c.id), totalDuration: Number(cursor.toFixed(2)) };
   },
   beatSync: async (clipId: string, _musicAssetId: string) => {
-    const mid = findClip(clipId);
-    const cutAt = mid.clip.start + mid.clip.duration / 2;
-    await mobileApi.splitClip(clipId, cutAt);
-    return { beats: [cutAt], splits: [cutAt] };
+    const { clip } = findClip(clipId);
+    const cuts: number[] = [];
+    if (clip.duration >= 2.0) {
+      const mid = Number((clip.start + clip.duration / 2).toFixed(2));
+      await mobileApi.splitClip(clipId, mid);
+      cuts.push(mid);
+    }
+    return { beats: cuts, splits: cuts };
   },
   autoReframe: async (clipId: string) => {
     recordUndo();
+    const seq = activeSeq();
+    seq.width = 1080;
+    seq.height = 1920;
     const { clip } = findClip(clipId);
-    clip.transform.scaleX = 1.78;
-    clip.transform.scaleY = 1.78;
-    activeSeq().width = 1080;
-    activeSeq().height = 1920;
+    (clip.transform as Record<string, unknown>).fitMode = "cover";
     persist();
-    return { keyframes: 2 };
+    return { keyframes: 1 };
   },
   trackMotion: async (clipId: string, _sourceAssetId: string) => {
     recordUndo();
     const { clip } = findClip(clipId);
-    clip.keyframes.push({ time: 0, property: "x", value: -30 }, { time: clip.duration, property: "x", value: 30 });
+    clip.keyframes.push(
+      { time: 0, property: "scaleX", value: 1 },
+      { time: clip.duration, property: "scaleX", value: 1.08 },
+      { time: 0, property: "scaleY", value: 1 },
+      { time: clip.duration, property: "scaleY", value: 1.08 },
+    );
     persist();
-    return { keyframes: 2 };
+    return { keyframes: 4 };
   },
   getApiSettings: async () => publicApi(readLocalApi()),
   saveApiSettings: async (body: {
@@ -1556,10 +2001,21 @@ export const mobileApi = {
     providerKeys?: Record<string, string>;
   }) => {
     const cur = readLocalApi();
+    if (body.clearApiKey) {
+      cur.apiKey = "";
+    } else if (body.apiKey && !body.apiKey.includes("••••")) {
+      cur.apiKey = sanitizeMobileApiKey(body.apiKey);
+      const detected = detectPresetByKey(cur.apiKey);
+      if (detected && !body.baseUrl) {
+        cur.providerPreset = detected.id;
+        cur.baseUrl = detected.baseUrl;
+        if (!body.model && detected.suggestedModels[0]) {
+          cur.model = detected.suggestedModels[0];
+        }
+      }
+    }
     if (body.providerPreset !== undefined) cur.providerPreset = body.providerPreset;
-    if (body.baseUrl !== undefined) cur.baseUrl = body.baseUrl.trim().replace(/\/+$/, "");
-    if (body.clearApiKey) cur.apiKey = "";
-    else if (body.apiKey && !body.apiKey.includes("••••")) cur.apiKey = body.apiKey.trim();
+    if (body.baseUrl !== undefined) cur.baseUrl = normalizeMobileBaseUrl(body.baseUrl);
     if (body.model !== undefined && body.model.trim()) cur.model = body.model.trim();
     if (body.visionModel !== undefined) cur.visionModel = body.visionModel;
     if (body.temperature !== undefined) cur.temperature = body.temperature;
@@ -1569,42 +2025,52 @@ export const mobileApi = {
   },
   fetchApiModels: async (body: { baseUrl?: string; apiKey?: string }) => {
     const cur = readLocalApi();
-    const baseUrl = (body.baseUrl || cur.baseUrl).replace(/\/+$/, "");
-    const key = body.apiKey && !body.apiKey.includes("••••") ? body.apiKey.trim() : cur.apiKey.trim();
+    const key =
+      body.apiKey && !body.apiKey.includes("••••")
+        ? sanitizeMobileApiKey(body.apiKey)
+        : sanitizeMobileApiKey(cur.apiKey);
+    const autoPreset = detectPresetByKey(key);
+    const baseUrl = normalizeMobileBaseUrl(body.baseUrl || autoPreset?.baseUrl || cur.baseUrl);
+
     const headers: Record<string, string> = { Accept: "application/json" };
-    if (key) headers.Authorization = `Bearer ${key}`;
-    const res = await fetch(`${baseUrl}/models`, { headers });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = (await res.json()) as { data?: Array<{ id?: string }> };
-    const models = (json.data ?? []).map((m) => String(m.id || "")).filter(Boolean).sort();
+    if (/anthropic\.com/i.test(baseUrl) || key.startsWith("sk-ant-")) {
+      if (key) headers["x-api-key"] = key;
+      headers["anthropic-version"] = "2023-06-01";
+    } else if (key) {
+      headers.Authorization = `Bearer ${key}`;
+    }
+
+    const resp = await nativeHttp("GET", `${baseUrl}/models`, headers);
+    if (!resp.ok) {
+      throw new Error(parseErrorMessage(resp.text, resp.status, resp.statusText));
+    }
+    const json = JSON.parse(resp.text) as {
+      data?: Array<{ id?: string; name?: string }>;
+      models?: Array<{ id?: string; name?: string }>;
+    };
+    const rawList = Array.isArray(json) ? json : json.data ?? json.models ?? [];
+    const models = Array.from(
+      new Set(
+        rawList
+          .map((m) => String(m.id ?? m.name ?? "").trim().replace(/^models\//, ""))
+          .filter(Boolean),
+      ),
+    ).sort();
     return { models, source: "remote", baseUrl };
   },
   testApiSettings: async (body: { baseUrl?: string; apiKey?: string; model?: string }) => {
-    const cur = readLocalApi();
-    const baseUrl = (body.baseUrl || cur.baseUrl).replace(/\/+$/, "");
-    const key = body.apiKey && !body.apiKey.includes("••••") ? body.apiKey.trim() : cur.apiKey.trim();
-    const model = (body.model || cur.model || "openai/gpt-4.1-mini").trim();
-    const t0 = Date.now();
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(key ? { Authorization: `Bearer ${key}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 24,
-        messages: [{ role: "user", content: "Reply OK" }],
-      }),
+    const res = await runMobileLlmChat([{ role: "user", content: "Reply with: OK" }], {
+      baseUrl: body.baseUrl,
+      apiKey: body.apiKey,
+      model: body.model,
+      maxTokens: 32,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     return {
       ok: true,
-      model,
-      baseUrl,
-      latencyMs: Date.now() - t0,
-      reply: data.choices?.[0]?.message?.content?.trim() || "Connected OK",
+      model: res.model,
+      baseUrl: res.baseUrl,
+      latencyMs: res.latencyMs,
+      reply: res.content || "OK",
     };
   },
   windowFullscreen: async (mode: "toggle" | "on" | "off" | "state" = "toggle") => {
