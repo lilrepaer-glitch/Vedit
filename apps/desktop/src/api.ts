@@ -214,26 +214,49 @@ const isDesktop =
   (location.protocol === "tauri:" ||
     location.hostname === "tauri.localhost" ||
     location.hostname.endsWith(".localhost"));
-const API_ORIGIN = env?.VITE_API_BASE ?? (isDesktop ? "http://127.0.0.1:47000" : "");
-
 import {
   IS_ANDROID_APK,
   mobileApi,
   resolveMobileMediaUrl,
+  sanitizeProjectShape,
   subscribeMobileChanges,
 } from "./mobileRuntime";
+
+let standaloneFallbackActive = false;
+
+export function enableStandaloneFallback(): void {
+  standaloneFallbackActive = true;
+}
+
+export function isStandaloneMode(): boolean {
+  return IS_ANDROID_APK || standaloneFallbackActive;
+}
+
+function resolveDesktopApiOrigin(): string {
+  if (env?.VITE_API_BASE) return env.VITE_API_BASE;
+  if (typeof window !== "undefined") {
+    const injectedPort = (window as unknown as { __VEDIT_PORT__?: number }).__VEDIT_PORT__;
+    if (injectedPort && Number.isFinite(injectedPort) && isDesktop) {
+      return `http://127.0.0.1:${injectedPort}`;
+    }
+  }
+  return isDesktop ? "http://127.0.0.1:47000" : "";
+}
 
 const API_TOKEN = env?.VITE_API_TOKEN ?? "dev";
 
 export function apiUrl(path: string): string {
-  return `${API_ORIGIN}/api/v1${path}`;
+  return `${resolveDesktopApiOrigin()}/api/v1${path}`;
 }
 
 export function withToken(url: string): string {
-  if (IS_ANDROID_APK) return resolveMobileMediaUrl(url);
-  const abs = url.startsWith("/") ? `${API_ORIGIN}${url}` : url;
+  if (isStandaloneMode()) return resolveMobileMediaUrl(url);
+  const origin = resolveDesktopApiOrigin();
+  const abs = url.startsWith("/") ? `${origin}${url}` : url;
   return `${abs}${abs.includes("?") ? "&" : "?"}token=${encodeURIComponent(API_TOKEN)}`;
 }
+
+export { sanitizeProjectShape };
 
 async function req<T>(method: string, path: string, body?: unknown, timeoutMs = 60000): Promise<T> {
   const controller = new AbortController();
@@ -641,7 +664,11 @@ const rawApi = {
   },
 };
 
-export const api: typeof rawApi = IS_ANDROID_APK ? mobileApi : rawApi;
+export const api: typeof rawApi = new Proxy(rawApi, {
+  get(_target, prop: keyof typeof rawApi) {
+    return (isStandaloneMode() ? mobileApi : rawApi)[prop];
+  },
+});
 
 export let currentId = "";
 
@@ -650,9 +677,13 @@ export function setCurrentId(id: string): void {
 }
 
 export function connectWs(onChange: () => void): () => void {
-  if (IS_ANDROID_APK) return subscribeMobileChanges(onChange);
+  if (isStandaloneMode()) return subscribeMobileChanges(onChange);
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const wsUrl = isDesktop ? "ws://127.0.0.1:47000/ws" : `${proto}://${location.host}/ws`;
+  const injectedPort =
+    typeof window !== "undefined" ? (window as unknown as { __VEDIT_PORT__?: number }).__VEDIT_PORT__ : undefined;
+  const wsUrl = isDesktop
+    ? `ws://127.0.0.1:${injectedPort && Number.isFinite(injectedPort) ? injectedPort : 47000}/ws`
+    : `${proto}://${location.host}/ws`;
   let ws: WebSocket | null = null;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;

@@ -296,8 +296,11 @@ fn main() {
                 }
             }
 
-            // Navigate main window onto same-origin `http://127.0.0.1:<chosen_port>/` immediately when healthy!
-            if wait_for_healthy(chosen_port, 2500) {
+            // Inject chosen sidecar port immediately and never stall Win32 message pump >400ms on cold boot!
+            if let Some(win) = app.webview_windows().values().next() {
+                let _ = win.eval(&format!("window.__VEDIT_PORT__ = {chosen_port};"));
+            }
+            if wait_for_healthy(chosen_port, 400) {
                 if let Some(win) = app.webview_windows().values().next() {
                     if let Ok(url) = format!("http://127.0.0.1:{chosen_port}/").parse::<tauri::Url>() {
                         let _ = win.navigate(url);

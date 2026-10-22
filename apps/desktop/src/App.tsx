@@ -3,6 +3,8 @@ import {
   activeSequence,
   api,
   connectWs,
+  enableStandaloneFallback,
+  sanitizeProjectShape,
   setCurrentId,
   withToken,
   type ApiSettingsResponse,
@@ -188,9 +190,10 @@ export function App() {
     if (!target) return null;
     setCurrentId(target);
     const res = await api.getProject(target);
-    setProject(res.project);
+    const cleanProj = sanitizeProjectShape(res.project);
+    setProject(cleanProj);
     if (res.history) setHistoryState(res.history);
-    return res.project;
+    return cleanProj;
   }, [project?.id]);
 
   // Schedule a single coalesced API write so 60 FPS slider/canvas drags have 0ms lag & 1 clean undo step
@@ -259,25 +262,54 @@ export function App() {
     return res.projects;
   }, []);
 
-  // Initial load: open project, load API config & export presets
+  // Initial load: open project cleanly with automatic sidecar retry + instant standalone NLE fallback
   useEffect(() => {
-    (async () => {
-      try {
+    let cancelled = false;
+    const bootStudio = async () => {
+      const openInitial = async () => {
         const list = await refreshProjectsList();
         const res =
           list.length > 0
             ? await api.getProject(list[0]!.id)
             : { ...(await api.createProject("Untitled Edit", false)), history: undefined };
-        setCurrentId(res.project.id);
-        setProject(res.project);
+        if (cancelled) return;
+        const cleanProj = sanitizeProjectShape(res.project);
+        setCurrentId(cleanProj.id);
+        setProject(cleanProj);
         if (res.history) setHistoryState(res.history);
         await refreshProjectsList();
-      } catch (err) {
-        flash(`Startup error: ${(err as Error).message}`);
+      };
+
+      let booted = false;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          await openInitial();
+          booted = true;
+          break;
+        } catch {
+          if (cancelled) return;
+          await new Promise((r) => window.setTimeout(r, 280));
+        }
       }
-      api.getApiSettings().then(setApiSettings).catch(() => undefined);
-      api.exportPresets().then((r) => setExportPresets(r.presets)).catch(() => undefined);
-    })();
+
+      if (!booted && !cancelled) {
+        enableStandaloneFallback();
+        try {
+          await openInitial();
+        } catch (err) {
+          flash(`Startup error: ${(err as Error).message}`);
+        }
+      }
+
+      if (!cancelled) {
+        api.getApiSettings().then(setApiSettings).catch(() => undefined);
+        api.exportPresets().then((r) => setExportPresets(r.presets)).catch(() => undefined);
+      }
+    };
+    void bootStudio();
+    return () => {
+      cancelled = true;
+    };
   }, [refreshProjectsList, flash]);
 
   // Subscribe to live project updates without clobbering active 60 FPS slider gestures
@@ -289,7 +321,7 @@ export function App() {
       api
         .getProject(project.id)
         .then((res) => {
-          setProject(res.project);
+          setProject(sanitizeProjectShape(res.project));
           if (res.history) setHistoryState(res.history);
         })
         .catch(() => undefined);
@@ -792,6 +824,39 @@ export function App() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
+
+  const handleStageClipMove = useCallback(
+    (clipId: string, x: number, y: number, commit = false) => {
+      mutateClipLocal(clipId, (prev) => ({
+        ...prev,
+        transform: { ...prev.transform, x, y },
+      }));
+      if (commit && seq) {
+        const found = seq.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+        const base = found ? { ...found.transform, x, y } : { x, y, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
+        scheduleCommit(`pos:${clipId}`, () => api.updateClip(clipId, { transform: base }), 20);
+      }
+    },
+    [mutateClipLocal, scheduleCommit, seq],
+  );
+
+  const handleStageCaptionMove = useCallback(
+    (capId: string, x: number, y: number, commit = false) => {
+      mutateCaptionLocal(capId, (prev) => ({
+        ...prev,
+        style: { ...(prev.style ?? {}), x, y },
+      }));
+      if (commit && seq) {
+        const cap = seq.captions.find((c) => c.id === capId);
+        scheduleCommit(
+          `cap-pos:${capId}`,
+          () => api.updateCaption(capId, { style: { ...(cap?.style ?? {}), x, y } }),
+          20,
+        );
+      }
+    },
+    [mutateCaptionLocal, scheduleCommit, seq],
+  );
 
   if (!project || !seq) {
     return (
@@ -2004,39 +2069,6 @@ export function App() {
     { id: "audio", label: "Audio", icon: <IconAudio size={17} /> },
     { id: "ai", label: "AI", icon: <IconSparkles size={17} /> },
   ];
-
-  const handleStageClipMove = useCallback(
-    (clipId: string, x: number, y: number, commit = false) => {
-      mutateClipLocal(clipId, (prev) => ({
-        ...prev,
-        transform: { ...prev.transform, x, y },
-      }));
-      if (commit) {
-        const found = seq.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
-        const base = found ? { ...found.transform, x, y } : { x, y, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
-        scheduleCommit(`pos:${clipId}`, () => api.updateClip(clipId, { transform: base }), 20);
-      }
-    },
-    [mutateClipLocal, scheduleCommit, seq.tracks],
-  );
-
-  const handleStageCaptionMove = useCallback(
-    (capId: string, x: number, y: number, commit = false) => {
-      mutateCaptionLocal(capId, (prev) => ({
-        ...prev,
-        style: { ...(prev.style ?? {}), x, y },
-      }));
-      if (commit) {
-        const cap = seq.captions.find((c) => c.id === capId);
-        scheduleCommit(
-          `cap-pos:${capId}`,
-          () => api.updateCaption(capId, { style: { ...(cap?.style ?? {}), x, y } }),
-          20,
-        );
-      }
-    },
-    [mutateCaptionLocal, scheduleCommit, seq.captions],
-  );
 
   return (
     <div

@@ -52,7 +52,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Native Android shell for Vedit Studio (v0.9.1).
+ * Native Android shell for Vedit Studio (v0.9.2).
  *
  * Provides:
  *  - Local zero-latency HTTPS asset serving (`https://appassets.vedit.studio/*`)
@@ -103,7 +103,7 @@ public class MainActivity extends Activity {
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        settings.setUserAgentString(settings.getUserAgentString() + " VedStudioAPK/0.9.1");
+        settings.setUserAgentString(settings.getUserAgentString() + " VedStudioAPK/0.9.2");
 
         webView.addJavascriptInterface(new AndroidBridge(), "VeditAndroid");
 
@@ -369,7 +369,7 @@ public class MainActivity extends Activity {
                 conn.setRequestMethod(safeMethod);
                 conn.setRequestProperty("Accept", "application/json");
                 conn.setRequestProperty("Accept-Encoding", "identity");
-                conn.setRequestProperty("User-Agent", "VeditStudio/0.9.1 (Android)");
+                conn.setRequestProperty("User-Agent", "VeditStudio/0.9.2 (Android)");
                 if (attempt > 0) {
                     // Force a brand-new TCP/TLS connection if a previous pooled keep-alive socket reset
                     conn.setRequestProperty("Connection", "close");
@@ -466,7 +466,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public String getVersion() {
-            return "0.9.1";
+            return "0.9.2";
         }
 
         @JavascriptInterface

@@ -188,7 +188,7 @@ describe("F9 — Broadcast Video Scopes, Acoustic Multicam Sync, Eased Keyframe 
     const auth = <T extends request.Test>(t: T) => t.set("Authorization", "Bearer dev");
 
     const health = await request(app).get("/api/v1/health").expect(200);
-    expect(health.body.version).toBe("0.9.1");
+    expect(health.body.version).toBe("0.9.2");
 
     const created = await auth(request(app).post("/api/v1/projects").send({ name: "F9 Studio", sample: false })).expect(201);
     const pid = created.body.project.id as string;
