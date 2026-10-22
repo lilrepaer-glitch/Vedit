@@ -14,7 +14,7 @@ import {
   type Project,
 } from "./api";
 import { AiPanel, GenPanel, Inspector, JobsPanel, MediaPool, Preview, StudioPanel, Timeline, fmt } from "./components";
-import { ApiSettingsModal, CapCutCatalogBrowser, ExportModal, ShowcaseModal, type CatalogItem } from "./StudioModals";
+import { ApiSettingsModal, StudioCatalogBrowser, ExportModal, ShowcaseModal, type CatalogItem } from "./StudioModals";
 
 interface Selection {
   trackId: string;
@@ -70,7 +70,7 @@ export function App() {
   const [bootNonce, setBootNonce] = useState<number>(0);
   const [windowDragOver, setWindowDragOver] = useState<boolean>(false);
 
-  // CapCut Workspace Navigation, Search, Modals, Fullscreen & Multi-Pane Resizable Scaling
+  // Vedit Studio Workspace Navigation, Search, Modals, Fullscreen & Multi-Pane Resizable Scaling
   const [activeTab, setActiveTab] = useState<LeftTabId>("media");
   const [sectionSearch, setSectionSearch] = useState<string>("");
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
@@ -442,7 +442,7 @@ export function App() {
     [seq, act, flash],
   );
 
-  // CapCut Visual Preset Cards for Effects, LUTs, Motion/Transitions, Text & Smart Tools
+  // Vedit Studio Visual Preset Cards for Effects, LUTs, Motion/Transitions, Text & Smart Tools
   const catalogItems: CatalogItem[] = useMemo(() => {
     const withClip = (fn: (cid: string) => Promise<unknown>, msg: string) => () => {
       const cid = resolveTargetClipId();
@@ -783,7 +783,7 @@ export function App() {
         </div>
       )}
 
-      {/* ==================== CAPCUT CLEAN TOP HEADER BAR ==================== */}
+      {/* ==================== Vedit Studio TOP HEADER BAR ==================== */}
       <header className="toolbar">
         {/* Left: Brand + Project + Undo/Redo + Self-Update */}
         <div className="topbar-left">
@@ -869,7 +869,7 @@ export function App() {
           </button>
         </div>
 
-        {/* Center: Instant Universal CapCut Search Bar (Ctrl+K) */}
+        {/* Center: Instant Universal Vedit Studio Search Bar (Ctrl+K) */}
         <div className="topbar-center">
           <div className="global-search">
             <input
@@ -988,10 +988,10 @@ export function App() {
         </div>
       </header>
 
-      {/* ==================== UPPER CAPCUT 4-ZONE RESIZABLE WORKSPACE ==================== */}
+      {/* ==================== UPPER Vedit Studio 4-ZONE RESIZABLE WORKSPACE ==================== */}
       <div className="workspace-upper">
-        {/* 1. Far-Left CapCut Section Icon Rail */}
-        <nav className="capcut-rail" aria-label="Studio Sections">
+        {/* 1. Far-Left Vedit Studio Section Icon Rail */}
+        <nav className="studio-rail" aria-label="Studio Sections">
           {RAIL_TABS.map((tab) => (
             <button
               key={tab.id}
@@ -1036,7 +1036,7 @@ export function App() {
 
               <div className="drawer-scroll">
                 {searchTrimmed ? (
-                  <CapCutCatalogBrowser
+                  <StudioCatalogBrowser
                     title={`Search Results: "${sectionSearch}"`}
                     query={sectionSearch}
                     items={catalogItems}
@@ -1116,7 +1116,7 @@ export function App() {
                     />
                   </>
                 ) : activeTab === "effects" ? (
-                  <CapCutCatalogBrowser
+                  <StudioCatalogBrowser
                     title="Cinema 3D LUTs & Video Effects"
                     query=""
                     items={catalogItems.filter((i) => i.section === "effects")}
@@ -1126,7 +1126,7 @@ export function App() {
                     onApplyTemplate={() => {}}
                   />
                 ) : activeTab === "transitions" ? (
-                  <CapCutCatalogBrowser
+                  <StudioCatalogBrowser
                     title="Transitions, Motion, Speed & Layouts"
                     query=""
                     items={catalogItems.filter((i) => i.section === "transitions")}
@@ -1138,10 +1138,10 @@ export function App() {
                 ) : activeTab === "text" ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     <h2>Text, Captions &amp; Lower-Thirds</h2>
-                    <div className="capcut-card-grid">
+                    <div className="studio-card-grid">
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() =>
                           void act(
                             () =>
@@ -1154,17 +1154,17 @@ export function App() {
                           )
                         }
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #0284c7, #38bdf8)" }}>
-                          <span className="capcut-card-badge">SUBTITLE</span>
-                          <span className="capcut-card-plus">+</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #0284c7, #38bdf8)" }}>
+                          <span className="studio-card-badge">SUBTITLE</span>
+                          <span className="studio-card-plus">+</span>
                         </div>
-                        <div className="capcut-card-title">Default Caption</div>
-                        <div className="capcut-card-sub">Add 2.5s subtitle @ playhead</div>
+                        <div className="studio-card-title">Default Caption</div>
+                        <div className="studio-card-sub">Add 2.5s subtitle @ playhead</div>
                       </button>
 
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() =>
                           void act(
                             () =>
@@ -1179,17 +1179,17 @@ export function App() {
                           )
                         }
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #7c3aed, #ec4899)" }}>
-                          <span className="capcut-card-badge">TITLE</span>
-                          <span className="capcut-card-plus">+</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #7c3aed, #ec4899)" }}>
+                          <span className="studio-card-badge">TITLE</span>
+                          <span className="studio-card-plus">+</span>
                         </div>
-                        <div className="capcut-card-title">Lower Third Bar</div>
-                        <div className="capcut-card-sub">Clean broadcast nameplate</div>
+                        <div className="studio-card-title">Lower Third Bar</div>
+                        <div className="studio-card-sub">Clean broadcast nameplate</div>
                       </button>
 
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() =>
                           void act(
                             () =>
@@ -1204,12 +1204,12 @@ export function App() {
                           )
                         }
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #ea580c, #facc15)" }}>
-                          <span className="capcut-card-badge">CALLOUT</span>
-                          <span className="capcut-card-plus">+</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #ea580c, #facc15)" }}>
+                          <span className="studio-card-badge">CALLOUT</span>
+                          <span className="studio-card-plus">+</span>
                         </div>
-                        <div className="capcut-card-title">Pop Callout Badge</div>
-                        <div className="capcut-card-sub">Animated pointer badge</div>
+                        <div className="studio-card-title">Pop Callout Badge</div>
+                        <div className="studio-card-sub">Animated pointer badge</div>
                       </button>
                     </div>
 
@@ -1314,10 +1314,10 @@ export function App() {
                     </button>
 
                     <h3>1-Click Smart Actions</h3>
-                    <div className="capcut-card-grid">
+                    <div className="studio-card-grid">
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() =>
                           act(async () => {
                             const res = await api.removeSilences(clipId ?? undefined);
@@ -1325,17 +1325,17 @@ export function App() {
                           })
                         }
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #0ea5e9, #2563eb)" }}>
-                          <span className="capcut-card-badge">SMART CUT</span>
-                          <span className="capcut-card-plus">⚡</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #0ea5e9, #2563eb)" }}>
+                          <span className="studio-card-badge">SMART CUT</span>
+                          <span className="studio-card-plus">⚡</span>
                         </div>
-                        <div className="capcut-card-title">Remove Silences</div>
-                        <div className="capcut-card-sub">Strip dead air automatically</div>
+                        <div className="studio-card-title">Remove Silences</div>
+                        <div className="studio-card-sub">Strip dead air automatically</div>
                       </button>
 
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() =>
                           act(async () => {
                             const res = await api.highlight(15);
@@ -1343,17 +1343,17 @@ export function App() {
                           })
                         }
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #7c3aed, #db2777)" }}>
-                          <span className="capcut-card-badge">HIGHLIGHT</span>
-                          <span className="capcut-card-plus">⚡</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #7c3aed, #db2777)" }}>
+                          <span className="studio-card-badge">HIGHLIGHT</span>
+                          <span className="studio-card-plus">⚡</span>
                         </div>
-                        <div className="capcut-card-title">15s Highlight Reel</div>
-                        <div className="capcut-card-sub">Best high-energy moments</div>
+                        <div className="studio-card-title">15s Highlight Reel</div>
+                        <div className="studio-card-sub">Best high-energy moments</div>
                       </button>
 
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() =>
                           act(async () => {
                             const res = await api.syncMulticam(2.5);
@@ -1361,17 +1361,17 @@ export function App() {
                           })
                         }
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #0d9488, #16a34a)" }}>
-                          <span className="capcut-card-badge">MULTICAM</span>
-                          <span className="capcut-card-plus">🎥</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #0d9488, #16a34a)" }}>
+                          <span className="studio-card-badge">MULTICAM</span>
+                          <span className="studio-card-plus">🎥</span>
                         </div>
-                        <div className="capcut-card-title">Auto Multicam Sync</div>
-                        <div className="capcut-card-sub">Audio cross-correlation cuts</div>
+                        <div className="studio-card-title">Auto Multicam Sync</div>
+                        <div className="studio-card-sub">Audio cross-correlation cuts</div>
                       </button>
 
                       <button
                         type="button"
-                        className="capcut-card"
+                        className="studio-card"
                         onClick={() => {
                           const cid = resolveTargetClipId();
                           if (!cid) return flash("Select a clip first");
@@ -1381,12 +1381,12 @@ export function App() {
                           });
                         }}
                       >
-                        <div className="capcut-card-thumb" style={{ background: "linear-gradient(135deg, #d97706, #ef4444)" }}>
-                          <span className="capcut-card-badge">9:16 REELS</span>
-                          <span className="capcut-card-plus">📱</span>
+                        <div className="studio-card-thumb" style={{ background: "linear-gradient(135deg, #d97706, #ef4444)" }}>
+                          <span className="studio-card-badge">9:16 REELS</span>
+                          <span className="studio-card-plus">📱</span>
                         </div>
-                        <div className="capcut-card-title">Smart Reframe</div>
-                        <div className="capcut-card-sub">Track subject into vertical crop</div>
+                        <div className="studio-card-title">Smart Reframe</div>
+                        <div className="studio-card-sub">Track subject into vertical crop</div>
                       </button>
                     </div>
 
@@ -1469,7 +1469,7 @@ export function App() {
           />
         </div>
 
-        {/* 4. Draggable Vertical Splitter #2 + Right CapCut Property Inspector */}
+        {/* 4. Draggable Vertical Splitter #2 + Right Vedit Studio Property Inspector */}
         {!rightCollapsed && (
           <>
             <div
@@ -1580,7 +1580,7 @@ export function App() {
         onDoubleClick={() => setTimelineHeight(255)}
       />
 
-      {/* ==================== CAPCUT MULTI-TRACK TIMELINE ==================== */}
+      {/* ==================== Vedit Studio MULTI-TRACK TIMELINE ==================== */}
       <Timeline
         heightPx={timelineHeight}
         project={project}

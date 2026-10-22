@@ -2,9 +2,9 @@
 
 <img src="./docs/screenshots/hero-banner.jpg" alt="Vedit Studio Banner" width="100%" style="border-radius: 14px;" />
 
-# Vedit Studio (`v0.6.1`)
+# Vedit Studio (`v0.6.2`)
 
-**CapCut-Clean Desktop NLE Video Editor for Windows PC • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU FFmpeg Render • Built-In MCP Server**
+**Modern Pro Desktop NLE Video Editor for Windows PC • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU FFmpeg Render • Built-In MCP Server**
 
 [![Latest Release](https://img.shields.io/github/v/release/lilrepaer-glitch/Vedit?color=00c8d7&label=Download%20Windows%20Installer&logo=windows)](https://github.com/lilrepaer-glitch/Vedit/releases/latest)
 [![Tests](https://img.shields.io/badge/Vitest-91%2F91%20Passing-22c55e?logo=vitest)](./test)
@@ -20,7 +20,7 @@
 ## Visual Studio Showcase
 
 <p align="center">
-  <img src="./docs/screenshots/shot-01-editor.jpg" alt="Vedit CapCut-Style 4-Zone Multi-Track Editor" width="100%" />
+  <img src="./docs/screenshots/shot-01-editor.jpg" alt="Vedit Studio 4-Zone Multi-Track Editor" width="100%" />
 </p>
 
 <table>
@@ -56,9 +56,9 @@
 
 ---
 
-## Highlights in `v0.6.1`
+## Highlights in `v0.6.2`
 
-- **CapCut-Clean 4-Zone Resizable Studio Workspace**: Dedicated section rail (*Media*, *Audio*, *Text*, *Effects*, *Motion*, *AI Edit*, *AI Gen*, *Studio*), photographic live-filtered LUT/VFX preview cards, universal `Ctrl+K` instant search, smooth drag resizers between all panels, global UI zoom (`70% – 150%`), and top-right native Win32 **Fullscreen (`⛶` / `F11`)**.
+- **Streamlined 4-Zone Resizable Studio Workspace**: Dedicated section rail (*Media*, *Audio*, *Text*, *Effects*, *Motion*, *AI Edit*, *AI Gen*, *Studio*), photographic live-filtered LUT/VFX preview cards, universal `Ctrl+K` instant search, smooth drag resizers between all panels, global UI zoom (`70% – 150%`), and top-right native Win32 **Fullscreen (`⛶` / `F11`)**.
 - **Interactive Before / After Split-Wipe & Broadcast Scopes**: Compare raw vs. color-graded video directly inside the Player monitor (`⇆ Split Wipe`) alongside live RGB Histograms & IRE Waveforms (`📊 Scopes`).
 - **Bring Your Own API Key, Base URL & AI Model (`⚙ API & Model`)**: Connect OpenAI, OpenRouter, DeepSeek, NVIDIA NIM, Groq, Ollama, LM Studio, or any custom OpenAI-compatible `/v1` endpoint with live `/models` discovery, connection testing, and natural-language AI Copilot execution.
 - **In-Place NSIS `Update` Installer + 1-Click App Self-Updater**: `Vedit_installer.exe` detects existing installations and updates cleanly in place while keeping all user projects & API settings intact — or update directly from the top bar via **`🔄 Update`**.

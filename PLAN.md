@@ -212,7 +212,7 @@ Instalátor: ~150 MB (GPU kodeky a ML modely se stahují dle potřeby). Portable
 | Produkt | Vedit proti němu |
 |---|---|
 | DaVinci Resolve / Premiere Pro | Vedit je **AI-native**: střih, titulky i generování z jednoho místa; MCP/API first |
-| CapCut desktop | Vedit míří i na profesionální střih (NLE operace, ProRes, otevřené API) |
+| Spotřebitelské desktop editory | Vedit míří i na profesionální střih (NLE operace, ProRes, otevřené API) |
 | Webové AI editory | Vedit je **desktop ke stažení** — výkon, offline, soukromí, lokální soubory |
 | Čistě AI generátory videa | Vedit generuje **a rovnou stříhá** — generovaný klip je součástí skutečné timeline |
 

@@ -586,13 +586,13 @@ export function Preview({
               }}
             />
             <span
-              className="capcut-card-badge"
+              className="studio-card-badge"
               style={{ position: "absolute", top: 10, left: 10 }}
             >
               BEFORE (RAW)
             </span>
             <span
-              className="capcut-card-badge"
+              className="studio-card-badge"
               style={{ position: "absolute", top: 10, right: 10, border: "1px solid #00e5ff" }}
             >
               AFTER (LUT / VFX)
@@ -666,7 +666,7 @@ export function Preview({
         {audioStreamSrc && <audio ref={audioRef} src={audioStreamSrc} preload="auto" />}
       </div>
 
-      {/* CapCut Clean Transport Bar */}
+      {/* Vedit Studio Transport Bar */}
       <div
         className="preview-meta"
         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "nowrap" }}
@@ -1436,7 +1436,7 @@ export function Timeline({
         }
       }}
     >
-      {/* CapCut Style Timeline Action Ribbon */}
+      {/* Vedit Studio Timeline Action Ribbon */}
       <div className="timeline-toolbar">
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
           <button
