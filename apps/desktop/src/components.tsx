@@ -426,14 +426,18 @@ export const CompositorStage = memo(function CompositorStage({
             ? "dark"
             : "blur";
 
-    captionBoxesRef.current = renderSequenceFrame(ctx, {
-      project,
-      sequence: seq,
-      time: playhead,
-      mediaElements: mediaElsRef.current,
-      splitComparePct,
-      backdropMode,
-    });
+    try {
+      captionBoxesRef.current = renderSequenceFrame(ctx, {
+        project,
+        sequence: seq,
+        time: playhead,
+        mediaElements: mediaElsRef.current,
+        splitComparePct,
+        backdropMode,
+      });
+    } catch {
+      captionBoxesRef.current = [];
+    }
 
     if (showScopes) {
       try {

@@ -63,7 +63,7 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "0.9.1";
+const APK_VERSION = "0.9.2";
 const STORAGE_KEY_PROJECT = "vedit.apk.project.v3";
 const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
 const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
@@ -903,11 +903,94 @@ function defaultMobileProject(): Project {
   };
 }
 
+export function sanitizeProjectShape(rawProj: unknown): Project {
+  const fallback = defaultMobileProject();
+  if (!rawProj || typeof rawProj !== "object") return fallback;
+  const p = rawProj as Partial<Project>;
+  const rawAssets = Array.isArray(p.assets) ? p.assets : [];
+  const assets: Asset[] = rawAssets
+    .filter((a): a is Asset => Boolean(a && typeof a === "object"))
+    .map((a, idx) => ({
+      ...a,
+      id: String(a.id || `asset-${idx}`),
+      name: String(a.name || "Media"),
+      kind: a.kind === "audio" || a.kind === "image" || a.kind === "generated" ? a.kind : "video",
+      path: String(a.path || ""),
+    }));
+
+  const rawSeqs = Array.isArray(p.sequences) && p.sequences.length > 0 ? p.sequences : fallback.sequences;
+  const sequences: Sequence[] = rawSeqs.map((s, sIdx) => {
+    const rawTracks = Array.isArray(s?.tracks) && s.tracks.length > 0 ? s.tracks : fallback.sequences[0]!.tracks;
+    return {
+      ...s,
+      id: String(s?.id || `seq-${sIdx}`),
+      name: String(s?.name || "Main Sequence"),
+      width: Number(s?.width) > 0 ? Number(s.width) : 1920,
+      height: Number(s?.height) > 0 ? Number(s.height) : 1080,
+      fps: Number(s?.fps) > 0 ? Number(s.fps) : 30,
+      captions: (Array.isArray(s?.captions) ? s.captions : [])
+        .filter((c): c is Caption => Boolean(c && typeof c === "object"))
+        .map((c, cIdx) => ({
+          ...c,
+          id: String(c.id || `cap-${cIdx}`),
+          text: String(c.text ?? ""),
+          start: Number.isFinite(Number(c.start)) ? Number(c.start) : 0,
+          end: Number.isFinite(Number(c.end)) ? Number(c.end) : 3,
+        })),
+      tracks: rawTracks.map((tr, tIdx) => ({
+        ...tr,
+        id: String(tr?.id || `track-${tIdx}`),
+        name: String(tr?.name || `Track ${tIdx + 1}`),
+        kind: tr?.kind === "audio" || tr?.kind === "text" || tr?.kind === "graphics" ? tr.kind : "video",
+        muted: Boolean(tr?.muted),
+        solo: Boolean(tr?.solo),
+        locked: Boolean(tr?.locked),
+        clips: (Array.isArray(tr?.clips) ? tr.clips : [])
+          .filter((c): c is Clip => Boolean(c && typeof c === "object"))
+          .map((c, cIdx) => ({
+            ...c,
+            id: String(c.id || `clip-${cIdx}`),
+            assetId: String(c.assetId || ""),
+            name: String(c.name || "Clip"),
+            start: Number.isFinite(Number(c.start)) ? Number(c.start) : 0,
+            duration: Number.isFinite(Number(c.duration)) && Number(c.duration) > 0 ? Number(c.duration) : 3,
+            in: Number.isFinite(Number(c.in)) ? Number(c.in) : 0,
+            out: Number.isFinite(Number(c.out)) ? Number(c.out) : 3,
+            transform: {
+              x: Number(c.transform?.x ?? 0) || 0,
+              y: Number(c.transform?.y ?? 0) || 0,
+              scaleX: Number.isFinite(Number(c.transform?.scaleX)) ? Number(c.transform.scaleX) : 1,
+              scaleY: Number.isFinite(Number(c.transform?.scaleY)) ? Number(c.transform.scaleY) : 1,
+              rotation: Number(c.transform?.rotation ?? 0) || 0,
+              opacity: Number.isFinite(Number(c.transform?.opacity)) ? Number(c.transform.opacity) : 1,
+            },
+            keyframes: Array.isArray(c.keyframes) ? c.keyframes : [],
+            effects: Array.isArray(c.effects) ? c.effects : [],
+          })),
+      })),
+    };
+  });
+
+  return {
+    id: String(p.id || fallback.id),
+    name: String(p.name || fallback.name),
+    activeSequenceId: sequences.some((s) => s.id === p.activeSequenceId)
+      ? String(p.activeSequenceId)
+      : sequences[0]!.id,
+    assets,
+    sequences,
+    jobs: Array.isArray(p.jobs) ? p.jobs : [],
+    comments: Array.isArray(p.comments) ? p.comments : [],
+    markers: Array.isArray(p.markers) ? p.markers : [],
+    snapshots: Array.isArray(p.snapshots) ? p.snapshots : [],
+  };
+}
+
 let state: Project = (() => {
   try {
     const raw = safeStorage.getItem(STORAGE_KEY_PROJECT);
     if (raw) {
-      const parsed = JSON.parse(raw) as Project;
+      const parsed = sanitizeProjectShape(JSON.parse(raw));
       for (const a of parsed.assets) {
         if (a.path.startsWith("data:") || a.path.startsWith("blob:")) {
           blobUrls.set(a.id, a.path);
@@ -916,7 +999,7 @@ let state: Project = (() => {
       return parsed;
     }
   } catch {
-    /* ignore */
+    /* ignore corrupted localStorage and boot fresh studio cleanly */
   }
   return defaultMobileProject();
 })();
