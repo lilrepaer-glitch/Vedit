@@ -116,6 +116,13 @@ export interface Sequence {
   captions: Caption[];
 }
 
+export interface HistoryState {
+  canUndo: boolean;
+  canRedo: boolean;
+  undoCount: number;
+  redoCount: number;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -271,7 +278,7 @@ export interface GenerateMediaRequest {
 
 const rawApi = {
   listProjects: () => req<{ projects: Array<{ id: string; name: string }> }>("GET", "/projects"),
-  getProject: (id: string) => req<{ project: Project }>("GET", `/projects/${id}`),
+  getProject: (id: string) => req<{ project: Project; history?: HistoryState }>("GET", `/projects/${id}`),
   createProject: (name: string, sample = true) => req<{ project: Project }>("POST", "/projects", { name, sample }),
   addAsset: (input: Partial<Asset> & { name: string; path: string }) =>
     req<{ asset: Asset }>("POST", `/projects/${currentId}/assets`, input),
@@ -485,11 +492,12 @@ const rawApi = {
     req<{ ok: boolean }>("DELETE", `/projects/${currentId}/clips/${clipId}/effects/${effectId}`),
   colorGrade: (clipId: string, preset: string) =>
     req<{ effect: { id: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/color-grade`, { preset }),
-  chromaKey: (clipId: string, color = "#00ff00", similarity = 0.28) =>
+  chromaKey: (clipId: string, color = "#00ff00", similarity = 0.3, blend = 0.1, despill = true) =>
     req<{ effect: { id: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/chroma-key`, {
       color,
       similarity,
-      despill: true,
+      blend,
+      despill,
     }),
   setClipSpeed: (clipId: string, speed: number) =>
     req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/speed`, { speed }),
@@ -571,6 +579,58 @@ const rawApi = {
     ),
   windowFullscreen: (mode: "toggle" | "on" | "off" | "state" = "toggle") =>
     req<{ supported: boolean; fullscreen: boolean }>("POST", "/window/fullscreen", { mode }),
+  applyCurves: (
+    clipId: string,
+    opts: {
+      preset?: "linear" | "cinema-s-curve" | "matte-fade" | "high-contrast" | "soft-rolloff";
+      shadows?: number;
+      midtones?: number;
+      highlights?: number;
+      clarity?: number;
+      points?: Array<{ x: number; y: number }>;
+    },
+  ) => req<{ id: string; type: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/curves`, opts),
+  applyEq: (
+    clipId: string,
+    opts: {
+      preset?: string;
+      lowDb?: number;
+      midDb?: number;
+      highDb?: number;
+      voiceClarity?: boolean;
+    },
+  ) => req<{ effect: { id: string; type: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/eq`, opts),
+  importSubtitles: (text: string, replaceExisting = false) =>
+    req<{ captions: Caption[]; count: number }>(`POST`, `/projects/${currentId}/captions/import`, {
+      text,
+      replaceExisting,
+    }),
+  exportSubtitles: (format: "srt" | "vtt" = "srt") =>
+    req<{ format: "srt" | "vtt"; text: string; count: number }>(
+      `GET`,
+      `/projects/${currentId}/captions/export?format=${format}`,
+    ),
+  saveClientMp4: async (blob: Blob, filename = "Vedit_Export.mp4") => {
+    const res = await fetch(
+      apiUrl(`/projects/${currentId}/export/client-mp4?filename=${encodeURIComponent(filename)}`),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "video/mp4",
+          Authorization: `Bearer ${API_TOKEN}`,
+        },
+        body: blob,
+      },
+    );
+    if (!res.ok) {
+      throw new Error(`Client MP4 save failed (${res.status})`);
+    }
+    return res.json() as Promise<{
+      job: { id: string; type: string; status: string; progress: number; output?: Record<string, unknown> };
+      outPath: string;
+      sizeBytes: number;
+    }>;
+  },
 };
 
 export const api: typeof rawApi = IS_ANDROID_APK ? mobileApi : rawApi;

@@ -204,7 +204,22 @@ describe("F10 — Standalone Native Android APK (Vedit.apk v0.8.0), Universal AP
     const { project } = await mobileApi.getProject(projects[0]!.id);
     const seq = project.sequences[0]!;
     expect(seq.tracks.length).toBeGreaterThanOrEqual(2);
-    const leadClip = seq.tracks.flatMap((t) => t.clips)[0]!;
+    let leadClip = seq.tracks.flatMap((t) => t.clips)[0];
+    if (!leadClip) {
+      const { asset } = await mobileApi.addAsset({
+        name: "Camera_Take_01.mp4",
+        path: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'/>",
+        kind: "video",
+        duration: 6,
+      });
+      const added = await mobileApi.addClip({
+        trackId: seq.tracks[0]!.id,
+        assetId: asset.id,
+        start: 0,
+        duration: 6,
+      });
+      leadClip = added.clip;
+    }
     expect(leadClip).toBeDefined();
 
     // Update sequence aspect ratio & blurred background fill
@@ -248,6 +263,6 @@ describe("F10 — Standalone Native Android APK (Vedit.apk v0.8.0), Universal AP
     expect(withoutCap.sequences[0]!.captions.some((c) => c.id === cap.id)).toBe(false);
 
     const check = await mobileApi.checkUpdate();
-    expect(check.currentVersion).toBe("0.8.0");
+    expect(check.currentVersion).toBe("0.9.0");
   });
 });

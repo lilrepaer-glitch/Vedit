@@ -25,7 +25,15 @@ import type {
   SnapshotInfo,
   Track,
 } from "./api";
-import { exportSequenceToMp4Blob, extractMediaFilmstrip, seekVideoElement } from "./compositor";
+import {
+  AUDIO_EQ_PRESETS_UI,
+  computeCurvePoints,
+  exportSequenceToMp4Blob,
+  extractMediaFilmstrip,
+  seekVideoElement,
+  type ToneCurvePoint,
+  type ToneCurvePresetUi,
+} from "./compositor";
 
 declare global {
   interface Window {
@@ -47,10 +55,80 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "0.8.0";
-const STORAGE_KEY_PROJECT = "vedit.apk.project.v2";
+const APK_VERSION = "0.9.0";
+const STORAGE_KEY_PROJECT = "vedit.apk.project.v3";
 const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
 const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
+const VAULT_DB_NAME = "vedit_media_vault_v1";
+const VAULT_STORE = "media_blobs";
+
+function openMediaVault(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(VAULT_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(VAULT_STORE)) {
+          db.createObjectStore(VAULT_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function putVaultBlob(assetId: string, blob: Blob): Promise<void> {
+  const db = await openMediaVault();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(VAULT_STORE, "readwrite");
+      tx.objectStore(VAULT_STORE).put(blob, assetId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function hydrateVaultBlobs(): Promise<void> {
+  const db = await openMediaVault();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(VAULT_STORE, "readonly");
+      const store = tx.objectStore(VAULT_STORE);
+      const req = store.openCursor();
+      let restoredAny = false;
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          if (restoredAny) changeListeners.forEach((fn) => fn());
+          resolve();
+          return;
+        }
+        const id = String(cursor.key);
+        const val = cursor.value as Blob | undefined;
+        if (val instanceof Blob) {
+          const freshUrl = URL.createObjectURL(val);
+          blobUrls.set(id, freshUrl);
+          const found = state.assets.find((a) => a.id === id);
+          if (found) found.path = freshUrl;
+          restoredAny = true;
+        }
+        cursor.continue();
+      };
+      req.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
 
 const memStorage = new Map<string, string>();
 const safeStorage = {
@@ -425,26 +503,18 @@ function uid(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function defaultMobileProject(): Project {
-  const assetHeroId = "asset-sample-1";
-  blobUrls.set(assetHeroId, "/showcase/hero-cinema.jpg");
+const FALLBACK_PLATE_DATA_URI =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#09090b"/><stop offset="100%" stop-color="#18181b"/></linearGradient></defs><rect width="1280" height="720" fill="url(#g)"/></svg>`,
+  );
 
+function defaultMobileProject(): Project {
   return {
     id: "proj-vedit-main",
     name: "Untitled Edit",
     activeSequenceId: "seq-main",
-    assets: [
-      {
-        id: assetHeroId,
-        name: "Sample_Scene.jpg",
-        kind: "image",
-        path: "/showcase/hero-cinema.jpg",
-        duration: 5,
-        width: 1920,
-        height: 1080,
-        tags: ["sample"],
-      },
-    ],
+    assets: [],
     sequences: [
       {
         id: "seq-main",
@@ -461,20 +531,7 @@ function defaultMobileProject(): Project {
             solo: false,
             locked: false,
             volumeDb: 0,
-            clips: [
-              {
-                id: "clip-init-1",
-                assetId: assetHeroId,
-                name: "Sample_Scene.jpg",
-                start: 0,
-                duration: 5,
-                in: 0,
-                out: 5,
-                transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
-                keyframes: [],
-                effects: [],
-              },
-            ],
+            clips: [],
           },
           {
             id: "track-v2",
@@ -513,7 +570,7 @@ let state: Project = (() => {
     if (raw) {
       const parsed = JSON.parse(raw) as Project;
       for (const a of parsed.assets) {
-        if (a.path.startsWith("/showcase/") || a.path.startsWith("data:") || a.path.startsWith("blob:")) {
+        if (a.path.startsWith("data:") || a.path.startsWith("blob:")) {
           blobUrls.set(a.id, a.path);
         }
       }
@@ -524,6 +581,8 @@ let state: Project = (() => {
   }
   return defaultMobileProject();
 })();
+
+void hydrateVaultBlobs();
 
 function persist(clearRedo = true): void {
   safeStorage.setItem(STORAGE_KEY_PROJECT, JSON.stringify(state));
@@ -561,7 +620,8 @@ export function resolveAssetUrlById(assetId: string): string {
   const mapped = blobUrls.get(assetId);
   if (mapped) return mapped;
   const found = state.assets.find((a) => a.id === assetId);
-  return found?.path || "/showcase/hero-cinema.jpg";
+  if (found?.path && !found.path.startsWith("/showcase/")) return found.path;
+  return FALLBACK_PLATE_DATA_URI;
 }
 
 export function resolveMobileMediaUrl(url: string): string {
@@ -804,7 +864,15 @@ export const mobileApi = {
     persist();
     return { project: clone(state) };
   },
-  getProject: async (_id: string) => ({ project: clone(state) }),
+  getProject: async (_id: string) => ({
+    project: clone(state),
+    history: {
+      canUndo: undoStack.length > 0,
+      canRedo: redoStack.length > 0,
+      undoCount: undoStack.length,
+      redoCount: redoStack.length,
+    },
+  }),
   addAsset: async (input: Partial<Asset> & { name: string; path: string }) => {
     const asset: Asset = {
       id: uid("asset"),
@@ -961,7 +1029,15 @@ export const mobileApi = {
       height: meta.height,
     };
     blobUrls.set(asset.id, url);
+    void putVaultBlob(asset.id, file);
     state.assets.push(asset);
+
+    // Auto-match empty sequence canvas dimensions to first imported video/photo
+    const hasAnyVisualClips = seq.tracks.some((t) => t.kind !== "audio" && t.clips.length > 0);
+    if (!hasAnyVisualClips && kind !== "audio" && meta.width > 0 && meta.height > 0) {
+      seq.width = Math.max(16, Math.round(meta.width / 2) * 2);
+      seq.height = Math.max(16, Math.round(meta.height / 2) * 2);
+    }
 
     if (kind === "video" || kind === "image") {
       void extractMediaFilmstrip(asset.id, url, kind, meta.duration, 6).then(() => {
@@ -1401,11 +1477,14 @@ export const mobileApi = {
     persist();
     return { effect: { id: fxId } };
   },
-  chromaKey: async (clipId: string, color = "#00ff00", similarity = 0.28) => {
+  chromaKey: async (clipId: string, color = "#00ff00", similarity = 0.3, blend = 0.1, despill = true) => {
     recordUndo();
     const { clip } = findClip(clipId);
     const fxId = uid("fx");
-    clip.effects.push({ id: fxId, type: "chroma-key", params: { color, similarity } });
+    clip.effects = [
+      ...clip.effects.filter((e) => e.type !== "chroma-key" && e.type !== "chromakey"),
+      { id: fxId, type: "chroma-key", params: { color, similarity, blend, despill } },
+    ];
     persist();
     return { effect: { id: fxId } };
   },
@@ -1665,7 +1744,7 @@ export const mobileApi = {
   },
   exportThumbnail: async (_title?: string, at?: number) => {
     const firstAsset = state.assets[0];
-    const srcUrl = firstAsset ? resolveAssetUrlById(firstAsset.id) : "/showcase/hero-cinema.jpg";
+    const srcUrl = firstAsset ? resolveAssetUrlById(firstAsset.id) : FALLBACK_PLATE_DATA_URI;
     const resp = await fetch(srcUrl);
     const blob = await resp.blob();
     const outPath = await saveBlobToAndroidOrBrowser(blob, `Vedit_Frame_${Date.now()}.jpg`, "image/jpeg");
@@ -2078,5 +2157,140 @@ export const mobileApi = {
       return { supported: true, fullscreen: Boolean(window.VeditAndroid.toggleFullscreen(mode)) };
     }
     return { supported: false, fullscreen: false };
+  },
+  applyCurves: async (
+    clipId: string,
+    opts: {
+      preset?: ToneCurvePresetUi["id"];
+      shadows?: number;
+      midtones?: number;
+      highlights?: number;
+      clarity?: number;
+      points?: ToneCurvePoint[];
+    },
+  ) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    const points =
+      opts.points && opts.points.length >= 2
+        ? opts.points
+        : computeCurvePoints(
+            opts.shadows ?? 0,
+            opts.midtones ?? 0,
+            opts.highlights ?? 0,
+            opts.preset ?? "cinema-s-curve",
+          );
+    const fxId = uid("fx");
+    clip.effects = [
+      ...clip.effects.filter((e) => e.type !== "curves"),
+      {
+        id: fxId,
+        type: "curves",
+        params: {
+          preset: opts.preset ?? "custom",
+          shadows: opts.shadows ?? 0,
+          midtones: opts.midtones ?? 0,
+          highlights: opts.highlights ?? 0,
+          clarity: opts.clarity ?? 0,
+          points,
+        },
+      },
+    ];
+    persist();
+    return { id: fxId, type: "curves" };
+  },
+  applyEq: async (
+    clipId: string,
+    opts: {
+      preset?: string;
+      lowDb?: number;
+      midDb?: number;
+      highDb?: number;
+      voiceClarity?: boolean;
+    },
+  ) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    const presetObj = AUDIO_EQ_PRESETS_UI.find((p) => p.id === opts.preset);
+    const lowDb = opts.lowDb ?? presetObj?.lowDb ?? 0;
+    const midDb = opts.midDb ?? presetObj?.midDb ?? 0;
+    const highDb = opts.highDb ?? presetObj?.highDb ?? 0;
+    const voiceClarity = opts.voiceClarity ?? presetObj?.voiceClarity ?? false;
+    const fxId = uid("fx");
+    clip.effects = [
+      ...clip.effects.filter((e) => e.type !== "eq"),
+      {
+        id: fxId,
+        type: "eq",
+        params: {
+          preset: opts.preset ?? "custom",
+          lowDb,
+          midDb,
+          highDb,
+          voiceClarity,
+        },
+      },
+    ];
+    persist();
+    return { effect: { id: fxId, type: "eq" } };
+  },
+  importSubtitles: async (text: string, replaceExisting = false) => {
+    recordUndo();
+    const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const blocks = normalized.split(/\n\s*\n/);
+    const parseTs = (raw: string) => {
+      const parts = raw.trim().replace(",", ".").split(":").map(Number);
+      if (parts.some((n) => !Number.isFinite(n))) return 0;
+      if (parts.length === 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+      if (parts.length === 2) return parts[0]! * 60 + parts[1]!;
+      return parts[0] ?? 0;
+    };
+    const seq = activeSeq();
+    if (replaceExisting) seq.captions = [];
+    const added: Caption[] = [];
+    for (const block of blocks) {
+      const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (!lines.length || /^WEBVTT/i.test(lines[0]!) || /^NOTE\b/i.test(lines[0]!)) continue;
+      const cueIdx = lines.findIndex((l) => l.includes("-->"));
+      if (cueIdx < 0) continue;
+      const parts = lines[cueIdx]!.split("-->");
+      if (parts.length < 2) continue;
+      const start = Number(parseTs(parts[0]!).toFixed(3));
+      const end = Number(Math.max(start + 0.2, parseTs(parts[1]!.trim().split(/\s+/)[0]!)).toFixed(3));
+      const body = lines.slice(cueIdx + 1).join("\n").replace(/<[^>]+>/g, "").trim();
+      if (body) {
+        const cap: Caption = { id: uid("cap"), text: body, start, end };
+        seq.captions.push(cap);
+        added.push(cap);
+      }
+    }
+    persist();
+    return { captions: clone(added), count: added.length };
+  },
+  exportSubtitles: async (format: "srt" | "vtt" = "srt") => {
+    const sorted = [...activeSeq().captions].sort((a, b) => a.start - b.start);
+    const fmtTs = (s: number, sep: "," | ".") => {
+      const ms = Math.round(Math.max(0, s) * 1000);
+      const h = Math.floor(ms / 3_600_000);
+      const m = Math.floor((ms % 3_600_000) / 60_000);
+      const sec = Math.floor((ms % 60_000) / 1000);
+      const rem = ms % 1000;
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}${sep}${String(rem).padStart(3, "0")}`;
+    };
+    const text =
+      format === "vtt"
+        ? ["WEBVTT", "", ...sorted.flatMap((c, i) => [String(i + 1), `${fmtTs(c.start, ".")} --> ${fmtTs(c.end, ".")}`, c.text.trim() || " ", ""])].join("\n")
+        : sorted.map((c, i) => `${i + 1}\n${fmtTs(c.start, ",")} --> ${fmtTs(c.end, ",")}\n${c.text.trim() || " "}\n`).join("\n");
+    return { format, text, count: sorted.length };
+  },
+  saveClientMp4: async (blob: Blob, filename = "Vedit_Export.mp4") => {
+    const outUrl = URL.createObjectURL(blob);
+    const jobId = uid("render");
+    exportOutputs.set(jobId, { url: outUrl, fileName: filename, mime: blob.type || "video/mp4" });
+    const savedPath = await saveBlobToAndroidOrBrowser(blob, filename, blob.type || "video/mp4");
+    const job = { id: jobId, type: "render", status: "done", progress: 100, output: { path: savedPath, url: outUrl } };
+    state.jobs.push(job);
+    persist(false);
+    return { job, outPath: savedPath, sizeBytes: blob.size };
   },
 };

@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   activeSequence,
+  api,
   withToken,
   type Asset,
   type Caption,
@@ -10,17 +11,21 @@ import {
 } from "./api";
 import {
   analyzeCanvasScopes,
+  extractBrowserWaveformPeaks,
   extractMediaFilmstrip,
+  getCachedWaveform,
   getClipFadeEnvelope,
   getClipSpeed,
   getClipTransition,
   getClipVolumeGain,
+  getLastRenderedClipBoxes,
   getSequenceDuration,
   isClipReversed,
+  readClipAudioEq,
+  readClipChromaKey,
   renderSequenceFrame,
+  setCachedWaveform,
 } from "./compositor";
-
-type LiveScopeData = ReturnType<typeof analyzeCanvasScopes>;
 import {
   IconFullscreen,
   IconImport,
@@ -39,6 +44,71 @@ import {
   IconZoomOut,
 } from "./Icons";
 
+type LiveScopeData = ReturnType<typeof analyzeCanvasScopes>;
+
+interface LiveAudioGraph {
+  ctx: AudioContext;
+  hp: BiquadFilterNode;
+  low: BiquadFilterNode;
+  mid: BiquadFilterNode;
+  high: BiquadFilterNode;
+  comp: DynamicsCompressorNode;
+  gain: GainNode;
+}
+
+const mediaAudioGraphs = new WeakMap<HTMLMediaElement, LiveAudioGraph>();
+let sharedLiveAudioCtx: AudioContext | null = null;
+
+function ensureLiveAudioGraph(el: HTMLMediaElement): LiveAudioGraph | null {
+  const existing = mediaAudioGraphs.get(el);
+  if (existing) return existing;
+  if (typeof AudioContext === "undefined") return null;
+  try {
+    if (!sharedLiveAudioCtx) {
+      sharedLiveAudioCtx = new AudioContext();
+    }
+    const ctx = sharedLiveAudioCtx;
+    const src = ctx.createMediaElementSource(el);
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 10;
+
+    const low = ctx.createBiquadFilter();
+    low.type = "lowshelf";
+    low.frequency.value = 120;
+
+    const mid = ctx.createBiquadFilter();
+    mid.type = "peaking";
+    mid.frequency.value = 1200;
+    mid.Q.value = 1.1;
+
+    const high = ctx.createBiquadFilter();
+    high.type = "highshelf";
+    high.frequency.value = 4800;
+
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = 0;
+    comp.ratio.value = 1;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+
+    src.connect(hp);
+    hp.connect(low);
+    low.connect(mid);
+    mid.connect(high);
+    high.connect(comp);
+    comp.connect(gain);
+    gain.connect(ctx.destination);
+
+    const graph: LiveAudioGraph = { ctx, hp, low, mid, high, comp, gain };
+    mediaAudioGraphs.set(el, graph);
+    return graph;
+  } catch {
+    return null;
+  }
+}
+
 export function formatTimecode(seconds: number): string {
   const s = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
   const mins = Math.floor(s / 60);
@@ -54,11 +124,14 @@ export const CompositorStage = memo(function CompositorStage({
   playhead,
   playing,
   muted,
+  selectedClipId,
   selectedCaptionId,
   onPlayhead,
   onPlaying,
   onToggleMute,
+  onSelectClip,
   onSelectCaption,
+  onMoveClipPosition,
   onMoveCaptionPosition,
   onImportRequest,
   onQuickSplit,
@@ -67,12 +140,15 @@ export const CompositorStage = memo(function CompositorStage({
   playhead: number;
   playing: boolean;
   muted: boolean;
+  selectedClipId?: string | null;
   selectedCaptionId: string | null;
   onPlayhead: (t: number) => void;
   onPlaying: (playing: boolean) => void;
   onToggleMute: () => void;
+  onSelectClip?: (clipId: string | null) => void;
   onSelectCaption: (captionId: string | null) => void;
-  onMoveCaptionPosition: (captionId: string, normX: number, normY: number) => void;
+  onMoveClipPosition?: (clipId: string, x: number, y: number, commit?: boolean) => void;
+  onMoveCaptionPosition: (captionId: string, normX: number, normY: number, commit?: boolean) => void;
   onImportRequest: () => void;
   onQuickSplit?: () => void;
 }) {
@@ -86,6 +162,7 @@ export const CompositorStage = memo(function CompositorStage({
   const [splitComparePct, setSplitComparePct] = useState<number | undefined>(undefined);
   const [showScopes, setShowScopes] = useState(false);
   const [liveScopes, setLiveScopes] = useState<LiveScopeData | null>(null);
+  const [snapGuides, setSnapGuides] = useState<{ x: boolean; y: boolean }>({ x: false, y: false });
   const [, setMediaReadyTick] = useState(0);
 
   const seq = useMemo(() => activeSequence(project), [project]);
@@ -152,7 +229,7 @@ export const CompositorStage = memo(function CompositorStage({
           vid = document.createElement("video");
           vid.playsInline = true;
           vid.preload = "auto";
-          if (/^https?:/i.test(url)) vid.crossOrigin = "anonymous";
+          vid.crossOrigin = "anonymous";
           const bump = () => setMediaReadyTick((n) => n + 1);
           vid.addEventListener("loadeddata", bump);
           vid.addEventListener("seeked", bump);
@@ -165,7 +242,7 @@ export const CompositorStage = memo(function CompositorStage({
         let img = mediaElsRef.current.get(item.id);
         if (!(img instanceof HTMLImageElement)) {
           img = new Image();
-          if (/^https?:/i.test(url)) img.crossOrigin = "anonymous";
+          img.crossOrigin = "anonymous";
           img.onload = () => setMediaReadyTick((n) => n + 1);
           img.src = url;
           mediaElsRef.current.set(item.id, img);
@@ -174,11 +251,50 @@ export const CompositorStage = memo(function CompositorStage({
     }
   }, [project.id, project.assets, seq.tracks]);
 
-  // Synchronize video & audio elements to playhead, speed, volume, fades, and play/pause state
+  // Synchronize video & audio elements to playhead, speed, volume (0%..200%), fades, and 3-Band EQ
   useEffect(() => {
     const assetMap = new Map<string, Asset>(project.assets.map((m) => [m.id, m]));
+    const soloActive = seq.tracks.some((t) => t.solo);
+
+    if (playing && sharedLiveAudioCtx?.state === "suspended") {
+      void sharedLiveAudioCtx.resume().catch(() => undefined);
+    }
+
+    const syncElementAudio = (el: HTMLMediaElement, clip: Clip, rawGain: number, reversed: boolean) => {
+      const eq = readClipAudioEq(clip);
+      const needsWebAudio =
+        rawGain > 1.005 ||
+        eq.voiceClarity ||
+        Math.abs(eq.lowDb) > 0.05 ||
+        Math.abs(eq.midDb) > 0.05 ||
+        Math.abs(eq.highDb) > 0.05 ||
+        mediaAudioGraphs.has(el);
+
+      if (needsWebAudio) {
+        const graph = ensureLiveAudioGraph(el);
+        if (graph) {
+          if (playing && graph.ctx.state === "suspended") {
+            void graph.ctx.resume().catch(() => undefined);
+          }
+          el.muted = reversed;
+          el.volume = 1;
+          graph.hp.frequency.value = eq.voiceClarity ? 85 : 10;
+          graph.low.gain.value = eq.lowDb;
+          graph.mid.gain.value = eq.midDb;
+          graph.high.gain.value = eq.highDb;
+          graph.comp.threshold.value = eq.voiceClarity ? -18 : 0;
+          graph.comp.ratio.value = eq.voiceClarity ? 3.2 : 1;
+          graph.gain.gain.value = reversed ? 0 : Math.max(0, Math.min(3, rawGain));
+          return;
+        }
+      }
+
+      el.muted = rawGain <= 0.001 || reversed;
+      el.volume = Math.max(0, Math.min(1, rawGain));
+    };
 
     for (const track of seq.tracks) {
+      const trackAudible = !track.muted && (!soloActive || track.solo);
       for (const clip of track.clips) {
         const item = assetMap.get(clip.assetId);
         if (!item) continue;
@@ -193,13 +309,12 @@ export const CompositorStage = memo(function CompositorStage({
           : Math.min(Math.max(0, srcDur - 0.01), clip.in + Math.max(0, localOffset));
 
         const env = getClipFadeEnvelope(clip, localTime);
-        const gain = muted ? 0 : Math.max(0, Math.min(1, getClipVolumeGain(clip, track) * env));
+        const rawGain = muted || !trackAudible ? 0 : getClipVolumeGain(clip, track) * env;
 
         if (track.kind !== "audio" && item.kind === "video") {
           const vid = mediaElsRef.current.get(item.id);
           if (vid instanceof HTMLVideoElement) {
-            vid.muted = gain <= 0.001 || reversed;
-            vid.volume = gain;
+            syncElementAudio(vid, clip, rawGain, reversed);
             const safeRate = Math.max(0.25, Math.min(4, speed));
             if (Math.abs(vid.playbackRate - safeRate) > 0.01) vid.playbackRate = safeRate;
 
@@ -226,11 +341,11 @@ export const CompositorStage = memo(function CompositorStage({
           if (!aud) {
             aud = new Audio();
             aud.preload = "auto";
+            aud.crossOrigin = "anonymous";
             aud.src = withToken(`/api/v1/projects/${project.id}/assets/${item.id}/file`);
             audioElsRef.current.set(clip.id, aud);
           }
-          aud.muted = gain <= 0.001;
-          aud.volume = gain;
+          syncElementAudio(aud, clip, rawGain, reversed);
           const safeRate = Math.max(0.25, Math.min(4, speed));
           if (Math.abs(aud.playbackRate - safeRate) > 0.01) aud.playbackRate = safeRate;
 
@@ -329,10 +444,29 @@ export const CompositorStage = memo(function CompositorStage({
     }
   });
 
-  // Direct touch / pointer manipulation on the preview canvas (drag titles & drag split-compare bar)
+  // Direct touch / pointer manipulation on the preview canvas (drag titles, video/PiP clips & split bar)
   const dragStateRef = useRef<
     | { mode: "split" }
-    | { mode: "caption"; captionId: string; startX: number; startY: number; origX: number; origY: number }
+    | {
+        mode: "caption";
+        captionId: string;
+        startX: number;
+        startY: number;
+        origX: number;
+        origY: number;
+        lastX: number;
+        lastY: number;
+      }
+    | {
+        mode: "clip";
+        clipId: string;
+        startClientX: number;
+        startClientY: number;
+        origTx: number;
+        origTy: number;
+        lastTx: number;
+        lastTy: number;
+      }
     | null
   >(null);
 
@@ -343,14 +477,12 @@ export const CompositorStage = memo(function CompositorStage({
     const relX = (e.clientX - rect.left) / Math.max(1, rect.width);
     const relY = (e.clientY - rect.top) / Math.max(1, rect.height);
 
-    // Check before/after split wipe handle first
     if (splitComparePct !== undefined && Math.abs(relX * 100 - splitComparePct) < 6) {
       dragStateRef.current = { mode: "split" };
       e.currentTarget.setPointerCapture(e.pointerId);
       return;
     }
 
-    // Hit-test exact rendered caption bounding boxes in canvas pixel space
     const px = relX * canvas.width;
     const py = relY * canvas.height;
     for (let i = captionBoxesRef.current.length - 1; i >= 0; i--) {
@@ -361,6 +493,7 @@ export const CompositorStage = memo(function CompositorStage({
         const cx = typeof st.x === "number" ? st.x : 0.5;
         const cy = typeof st.y === "number" ? st.y : 0.85;
         onSelectCaption(b.id);
+        onSelectClip?.(null);
         dragStateRef.current = {
           mode: "caption",
           captionId: b.id,
@@ -368,9 +501,36 @@ export const CompositorStage = memo(function CompositorStage({
           startY: relY,
           origX: cx,
           origY: cy,
+          lastX: cx,
+          lastY: cy,
         };
         e.currentTarget.setPointerCapture(e.pointerId);
         return;
+      }
+    }
+
+    // Hit-test rendered visual / PiP clips from top-most overlay track down
+    const clipBoxes = getLastRenderedClipBoxes();
+    for (let i = clipBoxes.length - 1; i >= 0; i--) {
+      const cb = clipBoxes[i]!;
+      if (px >= cb.x && px <= cb.x + cb.w && py >= cb.y && py <= cb.y + cb.h) {
+        const foundClip = seq.tracks.flatMap((t) => t.clips).find((c) => c.id === cb.clipId);
+        if (foundClip && onMoveClipPosition) {
+          onSelectCaption(null);
+          onSelectClip?.(foundClip.id);
+          dragStateRef.current = {
+            mode: "clip",
+            clipId: foundClip.id,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            origTx: foundClip.transform.x ?? 0,
+            origTy: foundClip.transform.y ?? 0,
+            lastTx: foundClip.transform.x ?? 0,
+            lastTy: foundClip.transform.y ?? 0,
+          };
+          e.currentTarget.setPointerCapture(e.pointerId);
+          return;
+        }
       }
     }
   };
@@ -386,14 +546,41 @@ export const CompositorStage = memo(function CompositorStage({
     if (st.mode === "split") {
       setSplitComparePct(Math.max(5, Math.min(95, Math.round(relX * 100))));
     } else if (st.mode === "caption") {
-      const nextX = Number(Math.max(0.08, Math.min(0.92, st.origX + (relX - st.startX))).toFixed(3));
-      const nextY = Number(Math.max(0.08, Math.min(0.92, st.origY + (relY - st.startY))).toFixed(3));
-      onMoveCaptionPosition(st.captionId, nextX, nextY);
+      let nextX = Math.max(0.06, Math.min(0.94, st.origX + (relX - st.startX)));
+      let nextY = Math.max(0.06, Math.min(0.94, st.origY + (relY - st.startY)));
+      const snapX = Math.abs(nextX - 0.5) < 0.024;
+      const snapY = Math.abs(nextY - 0.5) < 0.024;
+      if (snapX) nextX = 0.5;
+      if (snapY) nextY = 0.5;
+      setSnapGuides({ x: snapX, y: snapY });
+      st.lastX = Number(nextX.toFixed(3));
+      st.lastY = Number(nextY.toFixed(3));
+      onMoveCaptionPosition(st.captionId, st.lastX, st.lastY, false);
+    } else if (st.mode === "clip" && onMoveClipPosition) {
+      const scaleFactor = canvas.width / Math.max(1, rect.width);
+      let nextTx = Math.round(st.origTx + (e.clientX - st.startClientX) * scaleFactor);
+      let nextTy = Math.round(st.origTy + (e.clientY - st.startClientY) * scaleFactor);
+      const snapX = Math.abs(nextTx) < 14;
+      const snapY = Math.abs(nextTy) < 14;
+      if (snapX) nextTx = 0;
+      if (snapY) nextTy = 0;
+      setSnapGuides({ x: snapX, y: snapY });
+      st.lastTx = nextTx;
+      st.lastTy = nextTy;
+      onMoveClipPosition(st.clipId, nextTx, nextTy, false);
     }
   };
 
   const handleCanvasPointerUp = () => {
+    const st = dragStateRef.current;
     dragStateRef.current = null;
+    setSnapGuides({ x: false, y: false });
+    if (!st) return;
+    if (st.mode === "caption" && (st.lastX !== st.origX || st.lastY !== st.origY)) {
+      onMoveCaptionPosition(st.captionId, st.lastX, st.lastY, true);
+    } else if (st.mode === "clip" && onMoveClipPosition && (st.lastTx !== st.origTx || st.lastTy !== st.origTy)) {
+      onMoveClipPosition(st.clipId, st.lastTx, st.lastTy, true);
+    }
   };
 
   return (
@@ -406,8 +593,37 @@ export const CompositorStage = memo(function CompositorStage({
             onPointerDown={handleCanvasPointerDown}
             onPointerMove={handleCanvasPointerMove}
             onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerUp}
             onDoubleClick={() => onPlaying(!playing)}
           />
+
+          {/* Live Magnetic Center Alignment Crosshairs */}
+          {snapGuides.x && (
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                bottom: 0,
+                left: "50%",
+                width: 1,
+                background: "rgba(96, 165, 250, 0.9)",
+                pointerEvents: "none",
+              }}
+            />
+          )}
+          {snapGuides.y && (
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: "50%",
+                height: 1,
+                background: "rgba(96, 165, 250, 0.9)",
+                pointerEvents: "none",
+              }}
+            />
+          )}
 
           {/* Clean empty-state prompt right on canvas when project has no clips yet */}
           {!hasAnyTimelineContent && (
@@ -420,19 +636,19 @@ export const CompositorStage = memo(function CompositorStage({
                 alignItems: "center",
                 justifyContent: "center",
                 gap: 10,
-                background: "rgba(9, 9, 11, 0.72)",
+                background: "rgba(9, 9, 11, 0.78)",
               }}
             >
-              <button type="button" className="btn-primary" onClick={onImportRequest} style={{ padding: "9px 16px" }}>
+              <button type="button" className="btn-primary" onClick={onImportRequest} style={{ padding: "9px 18px" }}>
                 <IconImport size={16} /> Import Video or Photo
               </button>
               <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
-                MP4 · MOV · WebM · JPG · PNG · MP3 · WAV
+                MP4 · MOV · WebM · JPG · PNG · MP3 · WAV · SRT
               </span>
             </div>
           )}
 
-          {/* Selected caption selection indicator */}
+          {/* Selected caption indicator */}
           {selectedCaptionId &&
             (() => {
               const cap = seq.captions.find(
@@ -452,6 +668,34 @@ export const CompositorStage = memo(function CompositorStage({
                     padding: "10px 34px",
                     border: "1.5px dashed #60a5fa",
                     borderRadius: 6,
+                    pointerEvents: "none",
+                  }}
+                />
+              );
+            })()}
+
+          {/* Subtle selected overlay/scaled clip indicator */}
+          {selectedClipId &&
+            !selectedCaptionId &&
+            (() => {
+              const canvas = canvasRef.current;
+              const cb = getLastRenderedClipBoxes().find((b) => b.clipId === selectedClipId);
+              if (!canvas || !cb) return null;
+              const rx = stageBox.w / Math.max(1, canvas.width);
+              const ry = stageBox.h / Math.max(1, canvas.height);
+              const wCss = cb.w * rx;
+              const hCss = cb.h * ry;
+              if (Math.abs(wCss - stageBox.w) < 4 && Math.abs(hCss - stageBox.h) < 4) return null;
+              return (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: cb.x * rx,
+                    top: cb.y * ry,
+                    width: wCss,
+                    height: hCss,
+                    border: "1.5px solid rgba(96, 165, 250, 0.85)",
+                    borderRadius: 4,
                     pointerEvents: "none",
                   }}
                 />
@@ -543,7 +787,7 @@ export const CompositorStage = memo(function CompositorStage({
               onPlaying(false);
               onPlayhead(Math.max(0, playhead - 1 / Math.max(24, seq.fps || 30)));
             }}
-            title="Previous Frame"
+            title="Previous Frame (Left Arrow)"
           >
             <IconStepBack size={15} />
           </button>
@@ -564,7 +808,7 @@ export const CompositorStage = memo(function CompositorStage({
               onPlaying(false);
               onPlayhead(Math.min(duration, playhead + 1 / Math.max(24, seq.fps || 30)));
             }}
-            title="Next Frame"
+            title="Next Frame (Right Arrow)"
           >
             <IconStepFwd size={15} />
           </button>
@@ -576,7 +820,7 @@ export const CompositorStage = memo(function CompositorStage({
               type="button"
               className="btn-ghost"
               onClick={onQuickSplit}
-              title="Split clip at playhead"
+              title="Split clip at playhead (S)"
               style={{ padding: "5px 8px", fontSize: 11.5 }}
             >
               <IconScissors size={14} /> Split
@@ -640,11 +884,14 @@ export const StudioTimeline = memo(function StudioTimeline({
   onAddTrack: (kind: "video" | "audio") => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const laneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [filmstrips, setFilmstrips] = useState<Record<string, string[]>>({});
+  const [waveforms, setWaveforms] = useState<Record<string, number[]>>({});
   const [dragPreview, setDragPreview] = useState<{
     id: string;
     start: number;
     duration: number;
+    targetTrackId?: string;
   } | null>(null);
 
   const seq = useMemo(() => activeSequence(project), [project]);
@@ -656,32 +903,58 @@ export const StudioTimeline = memo(function StudioTimeline({
     [project.assets],
   );
 
-  // Asynchronously extract real multi-frame filmstrips for video & image assets
+  // Extract real multi-frame filmstrips AND real decoded audio waveforms
   useEffect(() => {
     let cancelled = false;
     for (const item of project.assets) {
-      if (filmstrips[item.id] || item.kind === "audio") continue;
       const url = withToken(`/api/v1/projects/${project.id}/assets/${item.id}/file`);
-      const thumbFallback = withToken(`/api/v1/projects/${project.id}/assets/${item.id}/thumbnail`);
-      extractMediaFilmstrip(item.id, url, item.kind, item.duration ?? 5, 6)
-        .then((frames) => {
-          if (!cancelled) {
-            setFilmstrips((prev) => ({
-              ...prev,
-              [item.id]: frames.length > 0 ? frames : [thumbFallback],
-            }));
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setFilmstrips((prev) => ({ ...prev, [item.id]: [thumbFallback] }));
-          }
-        });
+      if (!filmstrips[item.id] && item.kind !== "audio") {
+        const thumbFallback = withToken(`/api/v1/projects/${project.id}/assets/${item.id}/thumbnail`);
+        extractMediaFilmstrip(item.id, url, item.kind, item.duration ?? 5, 6)
+          .then((frames) => {
+            if (!cancelled) {
+              setFilmstrips((prev) => ({
+                ...prev,
+                [item.id]: frames.length > 0 ? frames : [thumbFallback],
+              }));
+            }
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setFilmstrips((prev) => ({ ...prev, [item.id]: [thumbFallback] }));
+            }
+          });
+      }
+
+      if (!waveforms[item.id] && (item.kind === "audio" || item.kind === "video")) {
+        const cached = getCachedWaveform(item.id);
+        if (cached) {
+          setWaveforms((prev) => ({ ...prev, [item.id]: cached }));
+        } else {
+          extractBrowserWaveformPeaks(item.id, url, 72)
+            .then(async (peaks) => {
+              if (peaks.length > 0) return peaks;
+              try {
+                const srv = await api.waveform(item.id, 72);
+                setCachedWaveform(item.id, srv.peaks);
+                return srv.peaks;
+              } catch {
+                return [];
+              }
+            })
+            .then((peaks) => {
+              if (!cancelled && peaks.length > 0) {
+                setWaveforms((prev) => ({ ...prev, [item.id]: peaks }));
+              }
+            })
+            .catch(() => undefined);
+        }
+      }
     }
     return () => {
       cancelled = true;
     };
-  }, [project.id, project.assets, filmstrips]);
+  }, [project.id, project.assets, filmstrips, waveforms]);
 
   // Keep playhead visible smoothly while playing
   useEffect(() => {
@@ -692,6 +965,17 @@ export const StudioTimeline = memo(function StudioTimeline({
       el.scrollLeft = Math.max(0, x - el.clientWidth * 0.3);
     }
   }, [playhead, pxPerSec]);
+
+  // Desktop Ctrl+Wheel Zoom & Horizontal Wheel Scroll
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      onZoomChange(Math.max(18, Math.min(280, Math.round(pxPerSec * factor))));
+    } else if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && scrollRef.current) {
+      scrollRef.current.scrollLeft += e.deltaY * 0.75;
+    }
+  };
 
   // 2-finger pinch-to-zoom on touch screens
   const pinchDistRef = useRef<number | null>(null);
@@ -748,9 +1032,10 @@ export const StudioTimeline = memo(function StudioTimeline({
     [snapEnabled, pxPerSec, snapPoints],
   );
 
-  // Interactive clip move / left-trim / right-trim via Pointer Events
+  // Interactive clip move (horizontal + vertical across compatible tracks!) / left-trim / right-trim
   const beginClipGesture = (
     e: React.PointerEvent,
+    sourceTrack: Track,
     clip: Clip,
     mode: "move" | "trim-left" | "trim-right",
   ) => {
@@ -763,16 +1048,29 @@ export const StudioTimeline = memo(function StudioTimeline({
     const origDur = clip.duration;
     const speed = getClipSpeed(clip);
     const media = assetsById.get(clip.assetId);
-    const maxMediaDur = media && media.kind !== "video" && media.kind !== "audio" ? 300 : Math.max(clip.out, media?.duration ?? 300);
+    const maxMediaDur =
+      media && media.kind !== "video" && media.kind !== "audio" ? 300 : Math.max(clip.out, media?.duration ?? 300);
 
     let latestStart = origStart;
     let latestDur = origDur;
+    let latestTrackId = sourceTrack.id;
 
     const onMove = (ev: PointerEvent) => {
       const dt = (ev.clientX - startClientX) / pxPerSec;
       if (mode === "move") {
         latestStart = snapTime(Math.max(0, origStart + dt), true);
         latestDur = origDur;
+        // Detect vertical track switch across compatible lanes
+        for (const tr of seq.tracks) {
+          if ((sourceTrack.kind === "audio") !== (tr.kind === "audio") || tr.locked) continue;
+          const el = laneRefs.current.get(tr.id);
+          if (!el) continue;
+          const r = el.getBoundingClientRect();
+          if (ev.clientY >= r.top && ev.clientY <= r.bottom) {
+            latestTrackId = tr.id;
+            break;
+          }
+        }
       } else if (mode === "trim-left") {
         const maxTrimIn = origDur - 0.12;
         const minTrimIn = -clip.in / speed;
@@ -785,18 +1083,19 @@ export const StudioTimeline = memo(function StudioTimeline({
         latestStart = origStart;
         latestDur = Math.max(0.12, origDur + clampedDt);
       }
-      setDragPreview({ id: clip.id, start: latestStart, duration: latestDur });
+      setDragPreview({ id: clip.id, start: latestStart, duration: latestDur, targetTrackId: latestTrackId });
     };
 
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       setDragPreview(null);
-      if (Math.abs(latestStart - origStart) < 0.005 && Math.abs(latestDur - origDur) < 0.005) {
-        return;
-      }
+      const movedTime = Math.abs(latestStart - origStart) >= 0.005 || Math.abs(latestDur - origDur) >= 0.005;
+      const movedTrack = latestTrackId !== sourceTrack.id;
+      if (!movedTime && !movedTrack) return;
+
       if (mode === "move") {
-        onMoveClip(clip.id, Number(latestStart.toFixed(3)));
+        onMoveClip(clip.id, Number(latestStart.toFixed(3)), movedTrack ? latestTrackId : undefined);
       } else if (mode === "trim-left") {
         onTrimClip(clip.id, "start", Number(latestStart.toFixed(3)));
       } else {
@@ -877,13 +1176,12 @@ export const StudioTimeline = memo(function StudioTimeline({
     window.addEventListener("pointerup", onUp);
   };
 
-  // Adaptive ruler tick interval
   const tickStep = pxPerSec >= 120 ? 1 : pxPerSec >= 55 ? 2 : pxPerSec >= 28 ? 5 : 10;
   const ticks: number[] = [];
   for (let t = 0; t <= duration + 8; t += tickStep) ticks.push(t);
 
   return (
-    <div className="timeline-shell" style={{ height: "100%" }}>
+    <div className="timeline-shell" style={{ height: "100%" }} onWheel={handleWheel}>
       {/* Clean Quick-Action Timeline Toolbar */}
       <div className="timeline-toolbar">
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -891,7 +1189,7 @@ export const StudioTimeline = memo(function StudioTimeline({
             type="button"
             className="btn-ghost"
             onClick={onSplitAtPlayhead}
-            disabled={!selectedClipId}
+            disabled={!selectedClipId && seq.tracks.every((t) => t.clips.length === 0)}
             title="Split clip (S)"
             style={{ padding: "4px 8px", fontSize: 11.5 }}
           >
@@ -921,7 +1219,7 @@ export const StudioTimeline = memo(function StudioTimeline({
             className="btn-ghost"
             onClick={() => onAddTrack("video")}
             style={{ padding: "4px 7px", fontSize: 11 }}
-            title="Add Video Overlay Track (PiP)"
+            title="Add Video Overlay Track (PiP / Chroma Key)"
           >
             +V
           </button>
@@ -1056,130 +1354,144 @@ export const StudioTimeline = memo(function StudioTimeline({
             )}
 
             {/* Video & Audio Tracks */}
-            {seq.tracks.map((tr: Track) => (
-              <div
-                key={tr.id}
-                className="track-lane"
-                onClick={(e) => {
-                  if (e.target === e.currentTarget) {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    onPlayhead(Math.max(0, (e.clientX - rect.left) / pxPerSec));
-                  }
-                }}
-              >
-                {tr.clips.map((clip: Clip) => {
-                  const preview = dragPreview?.id === clip.id ? dragPreview : null;
-                  const cStart = preview ? preview.start : clip.start;
-                  const cDur = preview ? preview.duration : clip.duration;
-                  const widthPx = Math.max(22, cDur * pxPerSec);
-                  const isSel = selectedClipId === clip.id;
-                  const item = assetsById.get(clip.assetId);
-                  const frames = filmstrips[clip.assetId] ?? [];
-                  const speed = getClipSpeed(clip);
-                  const tx = getClipTransition(clip);
-                  const rev = isClipReversed(clip);
+            {seq.tracks.map((tr: Track) => {
+              const isDropTarget = dragPreview?.targetTrackId === tr.id;
+              return (
+                <div
+                  key={tr.id}
+                  ref={(el) => {
+                    if (el) laneRefs.current.set(tr.id, el);
+                    else laneRefs.current.delete(tr.id);
+                  }}
+                  className={`track-lane ${isDropTarget ? "drop-target" : ""}`}
+                  onPointerDown={(e) => {
+                    if (e.target === e.currentTarget) {
+                      onSelectClip(null);
+                      onSelectCaption(null);
+                      beginRulerScrub(e);
+                    }
+                  }}
+                >
+                  {tr.clips.map((clip: Clip) => {
+                    const preview = dragPreview?.id === clip.id ? dragPreview : null;
+                    const cStart = preview ? preview.start : clip.start;
+                    const cDur = preview ? preview.duration : clip.duration;
+                    const widthPx = Math.max(22, cDur * pxPerSec);
+                    const isSel = selectedClipId === clip.id;
+                    const item = assetsById.get(clip.assetId);
+                    const frames = filmstrips[clip.assetId] ?? [];
+                    const peaks = waveforms[clip.assetId];
+                    const speed = getClipSpeed(clip);
+                    const tx = getClipTransition(clip);
+                    const rev = isClipReversed(clip);
+                    const ck = readClipChromaKey(clip);
+                    const gainScale = Math.min(1.35, getClipVolumeGain(clip, tr));
 
-                  return (
-                    <div
-                      key={clip.id}
-                      className={`tl-clip ${tr.kind === "audio" ? "audio" : ""} ${isSel ? "selected" : ""}`}
-                      style={{
-                        left: cStart * pxPerSec,
-                        width: widthPx,
-                        opacity: tr.muted ? 0.45 : 1,
-                      }}
-                      onPointerDown={(e) => beginClipGesture(e, clip, "move")}
-                    >
-                      {/* Real extracted video frame filmstrip */}
-                      {tr.kind !== "audio" && frames.length > 0 && (
-                        <div className="tl-filmstrip">
-                          {Array.from({ length: Math.max(1, Math.min(12, Math.ceil(widthPx / 64))) }).map((_, idx) => (
-                            <img
-                              key={idx}
-                              src={frames[idx % frames.length]}
-                              alt=""
-                              draggable={false}
-                            />
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Subtle audio waveform bars on audio tracks */}
-                      {tr.kind === "audio" && (
-                        <svg
-                          preserveAspectRatio="none"
-                          viewBox="0 0 100 32"
-                          style={{
-                            position: "absolute",
-                            inset: 0,
-                            width: "100%",
-                            height: "100%",
-                            opacity: 0.45,
-                            pointerEvents: "none",
-                          }}
-                        >
-                          {Array.from({ length: 40 }).map((_, idx) => {
-                            const h = 5 + ((Math.sin(idx * 1.9 + clip.in) + 1) * 0.5) * 20;
-                            return (
-                              <rect
+                    return (
+                      <div
+                        key={clip.id}
+                        className={`tl-clip ${tr.kind === "audio" ? "audio" : ""} ${isSel ? "selected" : ""}`}
+                        style={{
+                          left: cStart * pxPerSec,
+                          width: widthPx,
+                          opacity: tr.muted ? 0.45 : 1,
+                        }}
+                        onPointerDown={(e) => beginClipGesture(e, tr, clip, "move")}
+                      >
+                        {/* Real extracted video frame filmstrip */}
+                        {tr.kind !== "audio" && frames.length > 0 && (
+                          <div className="tl-filmstrip">
+                            {Array.from({ length: Math.max(1, Math.min(12, Math.ceil(widthPx / 64))) }).map((_, idx) => (
+                              <img
                                 key={idx}
-                                x={idx * 2.5}
-                                y={(32 - h) / 2}
-                                width="1.6"
-                                height={h}
-                                rx="0.8"
-                                fill="#6ee7b7"
+                                src={frames[idx % frames.length]}
+                                alt=""
+                                draggable={false}
                               />
-                            );
-                          })}
-                        </svg>
-                      )}
+                            ))}
+                          </div>
+                        )}
 
-                      {/* Left Trim Handle */}
-                      <div
-                        className="trim-handle left"
-                        onPointerDown={(e) => beginClipGesture(e, clip, "trim-left")}
-                      >
-                        <span className="trim-grip-bar" />
-                      </div>
+                        {/* Real decoded audio waveform on both Audio tracks & Video clips */}
+                        {peaks && peaks.length > 0 && (
+                          <svg
+                            preserveAspectRatio="none"
+                            viewBox={`0 0 ${peaks.length * 2} 32`}
+                            style={{
+                              position: "absolute",
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              height: tr.kind === "audio" ? "100%" : "36%",
+                              width: "100%",
+                              opacity: tr.kind === "audio" ? 0.72 : 0.52,
+                              pointerEvents: "none",
+                            }}
+                          >
+                            {peaks.map((amp, idx) => {
+                              const h = Math.max(2, Math.min(30, amp * 26 * gainScale));
+                              return (
+                                <rect
+                                  key={idx}
+                                  x={idx * 2}
+                                  y={tr.kind === "audio" ? (32 - h) / 2 : 32 - h}
+                                  width="1.35"
+                                  height={h}
+                                  rx="0.6"
+                                  fill={tr.kind === "audio" ? "#6ee7b7" : "#93c5fd"}
+                                />
+                              );
+                            })}
+                          </svg>
+                        )}
 
-                      <span className="tl-clip-label">
-                        {item?.name ?? clip.name}
-                        {Math.abs(speed - 1) > 0.02 ? ` · ${speed.toFixed(2)}×` : ""}
-                        {rev ? " · Rev" : ""}
-                      </span>
-
-                      {/* Transition indicator pill */}
-                      {tx && (
-                        <span
-                          style={{
-                            position: "absolute",
-                            left: 16,
-                            bottom: 2,
-                            fontSize: 9,
-                            padding: "1px 4px",
-                            borderRadius: 4,
-                            background: "rgba(59,130,246,0.85)",
-                            color: "#fff",
-                            pointerEvents: "none",
-                          }}
+                        {/* Left Trim Handle */}
+                        <div
+                          className="trim-handle left"
+                          onPointerDown={(e) => beginClipGesture(e, tr, clip, "trim-left")}
                         >
-                          {tx.kind}
-                        </span>
-                      )}
+                          <span className="trim-grip-bar" />
+                        </div>
 
-                      {/* Right Trim Handle */}
-                      <div
-                        className="trim-handle right"
-                        onPointerDown={(e) => beginClipGesture(e, clip, "trim-right")}
-                      >
-                        <span className="trim-grip-bar" />
+                        <span className="tl-clip-label">
+                          {item?.name ?? clip.name}
+                          {Math.abs(speed - 1) > 0.02 ? ` · ${speed.toFixed(2)}×` : ""}
+                          {rev ? " · Rev" : ""}
+                          {ck.enabled ? " · Key" : ""}
+                        </span>
+
+                        {/* Transition indicator pill */}
+                        {tx && (
+                          <span
+                            style={{
+                              position: "absolute",
+                              left: 16,
+                              bottom: 2,
+                              fontSize: 9,
+                              padding: "1px 4px",
+                              borderRadius: 4,
+                              background: "rgba(59,130,246,0.88)",
+                              color: "#fff",
+                              pointerEvents: "none",
+                            }}
+                          >
+                            {tx.kind}
+                          </span>
+                        )}
+
+                        {/* Right Trim Handle */}
+                        <div
+                          className="trim-handle right"
+                          onPointerDown={(e) => beginClipGesture(e, tr, clip, "trim-right")}
+                        >
+                          <span className="trim-grip-bar" />
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
+                    );
+                  })}
+                </div>
+              );
+            })}
 
             {/* Playhead Needle */}
             <div className="playhead-line" style={{ left: playhead * pxPerSec }}>
@@ -1193,7 +1505,7 @@ export const StudioTimeline = memo(function StudioTimeline({
           type="button"
           className="fab-import"
           onClick={onImportMedia}
-          title="Import Video, Photo, or Music"
+          title="Import Video, Photo, Music, or Subtitles"
           aria-label="Import media"
         >
           <IconPlus size={20} />

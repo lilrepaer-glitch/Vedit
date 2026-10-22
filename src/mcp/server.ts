@@ -57,6 +57,12 @@ import {
 import { exportEdl, exportFcpXml } from "../pro/interchange.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { analyzeFrameScopes } from "../pro/scopes.js";
+import {
+  applyParametricEq,
+  applyToneCurve,
+  importSubtitlesToSequence,
+  serializeSubtitles,
+} from "../pro/studio-grade.js";
 import { VEDIT_VERSION, checkForUpdates } from "../pro/updater.js";
 import { runStudioCopilot } from "../ai/orchestrator.js";
 import { resolve as resolvePath } from "node:path";
@@ -1624,6 +1630,86 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       },
     },
     async ({ clipId, keyframes }) => wrapTool(() => ({ clip: engine().updateClip(clipId, { keyframes }) })),
+  );
+
+  // ---- F11: Studio Grade MCP Tools (Tone Curves, Chroma Key, 3-Band EQ, SRT/VTT Subtitles) ----
+  server.registerTool(
+    "color.curves",
+    {
+      description: "F11: Applies a monotone cubic tone curve LUT, preset, or shadows/midtones/highlights lift plus clarity to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        preset: z.enum(["linear", "cinema-s-curve", "matte-fade", "high-contrast", "soft-rolloff"]).optional(),
+        points: z.array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) })).optional(),
+        shadows: z.number().min(-100).max(100).optional(),
+        midtones: z.number().min(-100).max(100).optional(),
+        highlights: z.number().min(-100).max(100).optional(),
+        clarity: z.number().min(-100).max(100).optional(),
+      },
+    },
+    async ({ clipId, ...opts }) => wrapTool(() => applyToneCurve(engine(), clipId, opts)),
+  );
+
+  server.registerTool(
+    "color.chroma_key",
+    {
+      description: "F11: Applies green/blue/custom screen chroma key with spill suppression to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        color: z.string().default("#00ff00"),
+        similarity: z.number().min(0.01).max(1).default(0.32),
+        blend: z.number().min(0).max(1).default(0.1),
+        despill: z.boolean().default(true),
+      },
+    },
+    async ({ clipId, color, similarity, blend, despill }) =>
+      wrapTool(() => ({ clip: applyChromaKey(engine(), clipId, { color, similarity, blend, despill }) })),
+  );
+
+  server.registerTool(
+    "audio.eq",
+    {
+      description: "F11: Applies 3-band parametric audio EQ (120Hz low, 1.2kHz mid, 4.8kHz high) and Voice Clarity dynamics to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        preset: z.enum(["flat", "voice-podcast", "bass-boost", "crisp-vocal", "warm-cinema", "lo-fi-radio"]).optional(),
+        lowDb: z.number().min(-18).max(18).optional(),
+        midDb: z.number().min(-18).max(18).optional(),
+        highDb: z.number().min(-18).max(18).optional(),
+        voiceClarity: z.boolean().optional(),
+      },
+    },
+    async ({ clipId, ...opts }) => wrapTool(() => applyParametricEq(engine(), clipId, opts)),
+  );
+
+  server.registerTool(
+    "captions.import_subtitles",
+    {
+      description: "F11: Parses and imports SubRip (.srt) or WebVTT (.vtt) subtitles directly onto the active sequence.",
+      inputSchema: {
+        text: z.string().min(1),
+        replaceExisting: z.boolean().default(false),
+        offsetSec: z.number().default(0),
+      },
+    },
+    async ({ text, replaceExisting, offsetSec }) =>
+      wrapTool(() => importSubtitlesToSequence(engine(), text, { replaceExisting, offsetSec })),
+  );
+
+  server.registerTool(
+    "captions.export_subtitles",
+    {
+      description: "F11: Serializes active sequence captions to standard SubRip (.srt) or WebVTT (.vtt).",
+      inputSchema: {
+        format: z.enum(["srt", "vtt"]).default("srt"),
+      },
+    },
+    async ({ format }) =>
+      wrapTool(() => ({
+        format,
+        count: engine().activeSequence().captions.length,
+        text: serializeSubtitles(engine().activeSequence().captions, format),
+      })),
   );
 
   // ---- F5: MCP Resources (PLAN.md §4.2) ----

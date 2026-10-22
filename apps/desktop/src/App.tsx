@@ -10,19 +10,29 @@ import {
   type Caption,
   type Clip,
   type ExportPresetInfo,
+  type HistoryState,
   type Project,
   type ProjectSummary,
   type Track,
 } from "./api";
 import { CompositorStage, StudioTimeline } from "./components";
 import {
+  AUDIO_EQ_PRESETS_UI,
+  computeCurvePoints,
+  getCachedCurveLut,
   getClipSpeed,
   getClipTransition,
   getSequenceDuration,
   isClipReversed,
   LOOK_PRESETS,
   readClipAdjustments,
+  readClipAudioEq,
+  readClipChromaKey,
+  readClipCurves,
   readClipLook,
+  TONE_CURVE_PRESETS_UI,
+  type ToneCurvePoint,
+  type ToneCurvePresetUi,
 } from "./compositor";
 import {
   IconAdjust,
@@ -30,6 +40,7 @@ import {
   IconCheck,
   IconChevronDown,
   IconCrop,
+  IconDownload,
   IconDuplicate,
   IconExport,
   IconFilter,
@@ -37,6 +48,7 @@ import {
   IconFlipV,
   IconFreeze,
   IconKey,
+  IconKeyboard,
   IconLogo,
   IconMedia,
   IconMic,
@@ -44,10 +56,12 @@ import {
   IconRedo,
   IconReverse,
   IconRotate,
+  IconSave,
   IconScissors,
   IconSend,
   IconSparkles,
   IconSpeed,
+  IconSubtitles,
   IconText,
   IconTrash,
   IconUndo,
@@ -55,6 +69,8 @@ import {
 import { ApiSettingsModal, ExportModal } from "./StudioModals";
 
 type ToolTab = "media" | "edit" | "adjust" | "filters" | "text" | "canvas" | "audio" | "ai";
+type AdjustSubTab = "light" | "curves" | "key";
+type DesktopInspectorTab = "adjust" | "audio" | "edit" | "canvas";
 
 const ASPECT_PRESETS: Array<{ id: string; label: string; width: number; height: number }> = [
   { id: "9:16", label: "9:16", width: 1080, height: 1920 },
@@ -69,8 +85,10 @@ const TRANSITION_OPTIONS: Array<{ kind: string; label: string }> = [
   { kind: "dissolve", label: "Cross Dissolve" },
   { kind: "fade-black", label: "Fade Black" },
   { kind: "fade-white", label: "Fade White" },
-  { kind: "slide-left", label: "Slide Left" },
+  { kind: "wipe-left", label: "Wipe Left" },
   { kind: "wipe-right", label: "Wipe Right" },
+  { kind: "slide-left", label: "Slide Left" },
+  { kind: "slide-up", label: "Slide Up" },
   { kind: "zoom-in", label: "Zoom In" },
 ];
 
@@ -105,18 +123,26 @@ function getEffectParams(clip: Clip | null, type: string): Record<string, unknow
 export function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<Project | null>(null);
+  const [historyState, setHistoryState] = useState<HistoryState>({
+    canUndo: false,
+    canRedo: false,
+    undoCount: 0,
+    redoCount: 0,
+  });
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ToolTab>("media");
+  const [adjustSubTab, setAdjustSubTab] = useState<AdjustSubTab>("light");
+  const [inspectorTab, setInspectorTab] = useState<DesktopInspectorTab>("adjust");
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
 
   const [pxPerSec, setPxPerSec] = useState(64);
   const [snapEnabled, setSnapEnabled] = useState(true);
-  const [leftWidth, setLeftWidth] = useState(300);
-  const [rightWidth, setRightWidth] = useState(300);
+  const [leftWidth, setLeftWidth] = useState(296);
+  const [rightWidth, setRightWidth] = useState(304);
   const [timelineHeight, setTimelineHeight] = useState(235);
   const [isMobileLayout, setIsMobileLayout] = useState(() => window.innerWidth < 900);
 
@@ -124,6 +150,8 @@ export function App() {
   const [exportPresets, setExportPresets] = useState<ExportPresetInfo[]>([]);
   const [showApiModal, setShowApiModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [dragDropActive, setDragDropActive] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   // Voiceover recording state
@@ -138,12 +166,15 @@ export function App() {
   const [aiMessages, setAiMessages] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const subtitleInputRef = useRef<HTMLInputElement>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const commitTimersRef = useRef<Map<string, number>>(new Map());
+  const isInteractingRef = useRef(false);
 
   const flash = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 2600);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2400);
   }, []);
 
   useEffect(() => {
@@ -156,10 +187,71 @@ export function App() {
     const target = idOverride ?? project?.id;
     if (!target) return null;
     setCurrentId(target);
-    const { project: next } = await api.getProject(target);
-    setProject(next);
-    return next;
+    const res = await api.getProject(target);
+    setProject(res.project);
+    if (res.history) setHistoryState(res.history);
+    return res.project;
   }, [project?.id]);
+
+  // Schedule a single coalesced API write so 60 FPS slider/canvas drags have 0ms lag & 1 clean undo step
+  const scheduleCommit = useCallback(
+    (key: string, fn: () => Promise<unknown>, delayMs = 150) => {
+      isInteractingRef.current = true;
+      const existing = commitTimersRef.current.get(key);
+      if (existing) window.clearTimeout(existing);
+      const timer = window.setTimeout(async () => {
+        commitTimersRef.current.delete(key);
+        try {
+          await fn();
+          await refreshCurrentProject();
+        } catch {
+          await refreshCurrentProject();
+        } finally {
+          isInteractingRef.current = commitTimersRef.current.size > 0;
+        }
+      }, delayMs);
+      commitTimersRef.current.set(key, timer);
+    },
+    [refreshCurrentProject],
+  );
+
+  // Optimistic synchronous React state helper for instant 60 FPS clip updates
+  const mutateClipLocal = useCallback((clipId: string, mutator: (clip: Clip) => Clip) => {
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        sequences: prev.sequences.map((s) =>
+          s.id !== prev.activeSequenceId
+            ? s
+            : {
+                ...s,
+                tracks: s.tracks.map((tr) => ({
+                  ...tr,
+                  clips: tr.clips.map((c) => (c.id === clipId ? mutator(c) : c)),
+                })),
+              },
+        ),
+      };
+    });
+  }, []);
+
+  const mutateCaptionLocal = useCallback((captionId: string, mutator: (cap: Caption) => Caption) => {
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        sequences: prev.sequences.map((s) =>
+          s.id !== prev.activeSequenceId
+            ? s
+            : {
+                ...s,
+                captions: s.captions.map((c) => (c.id === captionId ? mutator(c) : c)),
+              },
+        ),
+      };
+    });
+  }, []);
 
   const refreshProjectsList = useCallback(async () => {
     const res = await api.listProjects();
@@ -172,12 +264,13 @@ export function App() {
     (async () => {
       try {
         const list = await refreshProjectsList();
-        const loaded =
+        const res =
           list.length > 0
-            ? (await api.getProject(list[0]!.id)).project
-            : (await api.createProject("Untitled Edit", false)).project;
-        setCurrentId(loaded.id);
-        setProject(loaded);
+            ? await api.getProject(list[0]!.id)
+            : { ...(await api.createProject("Untitled Edit", false)), history: undefined };
+        setCurrentId(res.project.id);
+        setProject(res.project);
+        if (res.history) setHistoryState(res.history);
         await refreshProjectsList();
       } catch (err) {
         flash(`Startup error: ${(err as Error).message}`);
@@ -187,14 +280,18 @@ export function App() {
     })();
   }, [refreshProjectsList, flash]);
 
-  // Subscribe to live project updates (undo/redo, export progress, AI actions, edits)
+  // Subscribe to live project updates without clobbering active 60 FPS slider gestures
   useEffect(() => {
     if (!project?.id) return;
     setCurrentId(project.id);
     const close = connectWs(() => {
+      if (isInteractingRef.current) return;
       api
         .getProject(project.id)
-        .then((res) => setProject(res.project))
+        .then((res) => {
+          setProject(res.project);
+          if (res.history) setHistoryState(res.history);
+        })
         .catch(() => undefined);
     });
     return close;
@@ -235,44 +332,94 @@ export function App() {
     return null;
   }, [selectedClip, seq, playhead]);
 
-  // ==================== CORE EDITING ACTIONS ====================
+  // ==================== CORE EDITING & SUBTITLE IMPORT ACTIONS ====================
 
   const triggerFilePicker = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
 
+  const ingestFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length || !project) return;
+      const subFiles = files.filter((f) => /\.(srt|vtt)$/i.test(f.name));
+      const mediaFiles = files.filter((f) => !/\.(srt|vtt)$/i.test(f.name));
+
+      let importedSubs = 0;
+      for (const sf of subFiles) {
+        try {
+          const text = await sf.text();
+          const res = await api.importSubtitles(text, false);
+          importedSubs += res.count;
+        } catch (err) {
+          flash(`Subtitle import failed: ${(err as Error).message}`);
+        }
+      }
+
+      if (mediaFiles.length > 0) {
+        flash(`Importing ${mediaFiles.length} file${mediaFiles.length > 1 ? "s" : ""}…`);
+      }
+      let addedCount = 0;
+      for (const file of mediaFiles) {
+        try {
+          const uploaded = await api.uploadAssetFile(file, undefined, true);
+          if (uploaded.clip) {
+            setSelectedClipId(uploaded.clip.id);
+          }
+          addedCount++;
+        } catch (err) {
+          flash(`Import failed: ${(err as Error).message}`);
+        }
+      }
+      await refreshCurrentProject();
+      if (addedCount > 0 && importedSubs > 0) {
+        flash(`Imported ${addedCount} clip(s) and ${importedSubs} subtitles`);
+      } else if (addedCount > 0) {
+        setPlayhead(0);
+        flash(`Added ${addedCount} clip${addedCount > 1 ? "s" : ""} to timeline`);
+      } else if (importedSubs > 0) {
+        flash(`Imported ${importedSubs} subtitle cues`);
+      }
+    },
+    [project, refreshCurrentProject, flash],
+  );
+
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (!files.length || !project) return;
+    await ingestFiles(files);
+  };
 
-    flash(`Importing ${files.length} file${files.length > 1 ? "s" : ""}…`);
-    let addedCount = 0;
-    for (const file of files) {
-      try {
-        const uploaded = await api.uploadAssetFile(file, undefined, true);
-        if (uploaded.clip) {
-          setSelectedClipId(uploaded.clip.id);
-        }
-        addedCount++;
-      } catch (err) {
-        flash(`Import failed: ${(err as Error).message}`);
+  const handleExportSubtitlesFile = async (format: "srt" | "vtt") => {
+    try {
+      const res = await api.exportSubtitles(format);
+      if (res.count === 0) {
+        flash("Add titles or captions first");
+        return;
       }
-    }
-    await refreshCurrentProject();
-    if (addedCount > 0) {
-      setPlayhead(0);
-      flash(`Added ${addedCount} clip${addedCount > 1 ? "s" : ""} to timeline`);
+      const blob = new Blob([res.text], { type: format === "vtt" ? "text/vtt" : "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(project?.name || "subtitles").replace(/\s+/g, "_")}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      flash(`Exported ${res.count} cues as .${format.toUpperCase()}`);
+    } catch (err) {
+      flash(`Subtitle export error: ${(err as Error).message}`);
     }
   };
 
   const addAssetToTimeline = async (item: Asset, asOverlay = false) => {
     if (!project || !seq) return;
     const wantKind = item.kind === "audio" ? "audio" : "video";
-    const matchingTracks = seq.tracks.filter((t) => t.kind === wantKind);
+    const matchingTracks = seq.tracks.filter((t) =>
+      wantKind === "audio" ? t.kind === "audio" : t.kind !== "audio",
+    );
     let targetTrack: Track | undefined = asOverlay ? matchingTracks[1] : matchingTracks[0];
     if (!targetTrack) {
-      const createdTrack = await api.addTrack(wantKind, asOverlay ? "V2 · Overlay" : undefined);
+      const createdTrack = await api.addTrack(wantKind, asOverlay ? "V2 Overlay" : undefined);
       targetTrack = createdTrack.track;
     }
     const insertAt = asOverlay
@@ -288,12 +435,12 @@ export function App() {
     });
     if (asOverlay) {
       await api.updateClip(clip.id, {
-        transform: { ...clip.transform, scaleX: 0.42, scaleY: 0.42, x: 260, y: 220 },
+        transform: { ...clip.transform, scaleX: 0.45, scaleY: 0.45, x: 240, y: 200 },
       });
     }
     setSelectedClipId(clip.id);
     await refreshCurrentProject();
-    flash(asOverlay ? `Added ${item.name} as PiP overlay` : `Added ${item.name}`);
+    flash(asOverlay ? `Added ${item.name} on ${targetTrack.name}` : `Added ${item.name}`);
   };
 
   const handleSplitAtPlayhead = useCallback(async () => {
@@ -333,6 +480,16 @@ export function App() {
     }
   }, [project, selectedCaptionId, selectedClipId, refreshCurrentProject, flash]);
 
+  const handleSaveProject = useCallback(async () => {
+    if (!project) return;
+    try {
+      await api.saveProjectDisk();
+      flash(`Saved "${project.name}"`);
+    } catch (err) {
+      flash(`Save failed: ${(err as Error).message}`);
+    }
+  }, [project, flash]);
+
   const handleAspectChange = async (width: number, height: number) => {
     if (!project) return;
     await api.updateSequence({ width, height });
@@ -346,18 +503,159 @@ export function App() {
     await refreshCurrentProject();
   };
 
-  const updateSelectedEffect = async (type: string, patch: Record<string, unknown>) => {
-    const clip = ensureTargetClip();
-    if (!clip || !project) {
-      flash("Import or select a clip first");
-      return;
-    }
-    const existing = getEffectParams(clip, type);
-    await api.setClipEffect(clip.id, type, { ...existing, ...patch });
-    await refreshCurrentProject();
-  };
+  // Instant 0ms optimistic effect update + debounced single-undo API commit
+  const updateSelectedEffect = useCallback(
+    (type: string, patch: Record<string, unknown>, immediate = false) => {
+      const clip = ensureTargetClip();
+      if (!clip || !project) {
+        flash("Import or select a clip first");
+        return;
+      }
+      const existing = getEffectParams(clip, type);
+      const merged = { ...existing, ...patch };
+      mutateClipLocal(clip.id, (c) => ({
+        ...c,
+        effects: [
+          ...c.effects.filter((e) => e.type !== type),
+          { id: `fx-${type}`, type, params: merged },
+        ],
+      }));
+      scheduleCommit(
+        `fx:${clip.id}:${type}`,
+        () => api.setClipEffect(clip.id, type, merged),
+        immediate ? 10 : 150,
+      );
+    },
+    [ensureTargetClip, project, flash, mutateClipLocal, scheduleCommit],
+  );
 
-  // Voiceover Microphone Recorder (works natively on Android WebView + Desktop)
+  // Instant 0ms Curves update + single API commit to `/curves`
+  const updateSelectedCurves = useCallback(
+    (
+      opts: {
+        preset?: ToneCurvePresetUi["id"];
+        shadows?: number;
+        midtones?: number;
+        highlights?: number;
+        clarity?: number;
+        points?: ToneCurvePoint[];
+      },
+      immediate = false,
+    ) => {
+      const clip = ensureTargetClip();
+      if (!clip || !project) {
+        flash("Import or select a clip first");
+        return;
+      }
+      const cur = readClipCurves(clip);
+      const preset = opts.preset ?? (cur.preset === "custom" ? undefined : cur.preset);
+      const shadows = opts.shadows ?? cur.shadows;
+      const midtones = opts.midtones ?? cur.midtones;
+      const highlights = opts.highlights ?? cur.highlights;
+      const clarity = opts.clarity ?? cur.clarity;
+      const points =
+        opts.points ??
+        computeCurvePoints(shadows, midtones, highlights, preset ?? "linear");
+
+      mutateClipLocal(clip.id, (c) => ({
+        ...c,
+        effects: [
+          ...c.effects.filter((e) => e.type !== "curves"),
+          {
+            id: "fx-curves",
+            type: "curves",
+            params: { preset: preset ?? "custom", shadows, midtones, highlights, clarity, points },
+          },
+        ],
+      }));
+      scheduleCommit(
+        `curves:${clip.id}`,
+        () => api.applyCurves(clip.id, { preset, shadows, midtones, highlights, clarity, points }),
+        immediate ? 10 : 150,
+      );
+    },
+    [ensureTargetClip, project, flash, mutateClipLocal, scheduleCommit],
+  );
+
+  // Instant 0ms Chroma Key update + single API commit to `/chroma-key`
+  const updateSelectedChromaKey = useCallback(
+    (
+      patch: { enabled?: boolean; color?: string; similarity?: number; blend?: number; despill?: boolean },
+      immediate = false,
+    ) => {
+      const clip = ensureTargetClip();
+      if (!clip || !project) {
+        flash("Import or select a clip first");
+        return;
+      }
+      const cur = readClipChromaKey(clip);
+      if (patch.enabled === false) {
+        const existingFx = clip.effects.find((e) => e.type === "chroma-key" || e.type === "chromakey");
+        mutateClipLocal(clip.id, (c) => ({
+          ...c,
+          effects: c.effects.filter((e) => e.type !== "chroma-key" && e.type !== "chromakey"),
+        }));
+        if (existingFx) {
+          scheduleCommit(`ck:${clip.id}`, () => api.removeEffect(clip.id, existingFx.id), 10);
+        }
+        return;
+      }
+      const color = patch.color ?? cur.color;
+      const similarity = patch.similarity ?? cur.similarity;
+      const blend = patch.blend ?? cur.blend;
+      const despill = patch.despill ?? cur.despill;
+      mutateClipLocal(clip.id, (c) => ({
+        ...c,
+        effects: [
+          ...c.effects.filter((e) => e.type !== "chroma-key" && e.type !== "chromakey"),
+          { id: "fx-ck", type: "chroma-key", params: { color, similarity, blend, despill } },
+        ],
+      }));
+      scheduleCommit(
+        `ck:${clip.id}`,
+        () => api.chromaKey(clip.id, color, similarity, blend, despill),
+        immediate ? 10 : 150,
+      );
+    },
+    [ensureTargetClip, project, flash, mutateClipLocal, scheduleCommit],
+  );
+
+  // Instant 0ms 3-Band Audio EQ + Voice Clarity update
+  const updateSelectedEq = useCallback(
+    (
+      opts: { preset?: string; lowDb?: number; midDb?: number; highDb?: number; voiceClarity?: boolean },
+      immediate = false,
+    ) => {
+      const clip = ensureTargetClip();
+      if (!clip || !project) {
+        flash("Import or select a clip first");
+        return;
+      }
+      const cur = readClipAudioEq(clip);
+      const presetObj = AUDIO_EQ_PRESETS_UI.find((p) => p.id === opts.preset);
+      const lowDb = opts.lowDb ?? (presetObj ? presetObj.lowDb : cur.lowDb);
+      const midDb = opts.midDb ?? (presetObj ? presetObj.midDb : cur.midDb);
+      const highDb = opts.highDb ?? (presetObj ? presetObj.highDb : cur.highDb);
+      const voiceClarity = opts.voiceClarity ?? (presetObj ? presetObj.voiceClarity : cur.voiceClarity);
+      const preset = opts.preset ?? "custom";
+
+      mutateClipLocal(clip.id, (c) => ({
+        ...c,
+        effects: [
+          ...c.effects.filter((e) => e.type !== "eq"),
+          { id: "fx-eq", type: "eq", params: { preset, lowDb, midDb, highDb, voiceClarity } },
+        ],
+      }));
+      scheduleCommit(
+        `eq:${clip.id}`,
+        () => api.applyEq(clip.id, { preset, lowDb, midDb, highDb, voiceClarity }),
+        immediate ? 10 : 150,
+      );
+    },
+    [ensureTargetClip, project, flash, mutateClipLocal, scheduleCommit],
+  );
+
+  // Voiceover Microphone Recorder
   const toggleVoiceoverRecording = async () => {
     if (recordingVo && mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
@@ -416,27 +714,59 @@ export function App() {
     }
   };
 
-  // Desktop keyboard shortcuts
+  // Full Pro NLE Keyboard Shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.code === "Space") {
+
+      if (e.code === "Space" || e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPlaying((p) => !p);
-      } else if (e.key === "s" || e.key === "S") {
-        if (!e.ctrlKey && !e.metaKey) void handleSplitAtPlayhead();
+      } else if (e.key.toLowerCase() === "l" && !e.ctrlKey && !e.metaKey) {
+        setPlaying(true);
+      } else if (e.key.toLowerCase() === "j" && !e.ctrlKey && !e.metaKey) {
+        setPlaying(false);
+        setPlayhead((t) => Math.max(0, t - 0.5));
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setPlaying(false);
+        const step = e.shiftKey ? 1 : 1 / Math.max(24, seq?.fps || 30);
+        setPlayhead((t) => Math.max(0, t - step));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setPlaying(false);
+        const dur = getSequenceDuration(seq);
+        const step = e.shiftKey ? 1 : 1 / Math.max(24, seq?.fps || 30);
+        setPlayhead((t) => Math.min(dur, t + step));
+      } else if (e.key === "Home") {
+        setPlayhead(0);
+      } else if (e.key === "End") {
+        setPlayhead(getSequenceDuration(seq));
+      } else if ((e.key === "s" || e.key === "S") && !e.ctrlKey && !e.metaKey) {
+        void handleSplitAtPlayhead();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void handleSaveProject();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        setShowExportModal(true);
       } else if (e.key === "Delete" || e.key === "Backspace") {
         void handleDeleteSelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) void api.redo().then(() => refreshCurrentProject());
         else void api.undo().then(() => refreshCurrentProject());
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        void api.redo().then(() => refreshCurrentProject());
+      } else if (e.key === "?" || (e.shiftKey && e.key === "/")) {
+        setShowShortcuts((s) => !s);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleSplitAtPlayhead, handleDeleteSelected, refreshCurrentProject]);
+  }, [seq, handleSplitAtPlayhead, handleDeleteSelected, handleSaveProject, refreshCurrentProject]);
 
   // Resizable desktop splitters
   const startResize = (axis: "left" | "right" | "timeline", e: React.PointerEvent) => {
@@ -447,7 +777,7 @@ export function App() {
     const origTl = timelineHeight;
     const onMove = (ev: PointerEvent) => {
       if (axis === "left") setLeftWidth(Math.max(230, Math.min(440, origLeft + (ev.clientX - startX))));
-      else if (axis === "right") setRightWidth(Math.max(240, Math.min(420, origRight - (ev.clientX - startX))));
+      else if (axis === "right") setRightWidth(Math.max(250, Math.min(430, origRight - (ev.clientX - startX))));
       else setTimelineHeight(Math.max(150, Math.min(420, origTl - (ev.clientY - startY))));
     };
     const onUp = () => {
@@ -474,11 +804,58 @@ export function App() {
     `${seqW}×${seqH}`;
 
   const colorAdj = selectedClip ? readClipAdjustments(selectedClip) : null;
+  const curvesInfo = selectedClip ? readClipCurves(selectedClip) : null;
+  const chromaInfo = selectedClip ? readClipChromaKey(selectedClip) : null;
+  const eqInfo = selectedClip ? readClipAudioEq(selectedClip) : null;
   const activeLookId = selectedClip ? readClipLook(selectedClip).id : "none";
   const cropParams = getEffectParams(selectedClip, "crop");
   const volFx = getEffectParams(selectedClip, "volume");
   const fadeFx = getEffectParams(selectedClip, "fade");
   const clipSpeed = selectedClip ? getClipSpeed(selectedClip) : 1;
+
+  // Interactive SVG Tone Curve Pad pointer drag handler
+  const handleCurvePadPointer = (e: React.PointerEvent<SVGSVGElement>) => {
+    const clip = ensureTargetClip();
+    if (!clip) return;
+    const svg = e.currentTarget;
+    svg.setPointerCapture(e.pointerId);
+    const curPts = readClipCurves(clip).points.map((p) => ({ ...p }));
+    const rect = svg.getBoundingClientRect();
+    const rx = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+    // Pick nearest control knot
+    let knotIdx = 0;
+    let bestD = Infinity;
+    curPts.forEach((p, idx) => {
+      const d = Math.abs(p.x - rx);
+      if (d < bestD) {
+        bestD = d;
+        knotIdx = idx;
+      }
+    });
+
+    const updatePoint = (clientX: number, clientY: number, commit: boolean) => {
+      const r = svg.getBoundingClientRect();
+      const nx = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+      const ny = Math.max(0, Math.min(1, 1 - (clientY - r.top) / Math.max(1, r.height)));
+      const minX = knotIdx === 0 ? 0 : curPts[knotIdx - 1]!.x + 0.04;
+      const maxX = knotIdx === curPts.length - 1 ? 1 : curPts[knotIdx + 1]!.x - 0.04;
+      curPts[knotIdx] = {
+        x: knotIdx === 0 ? 0 : knotIdx === curPts.length - 1 ? 1 : Number(Math.max(minX, Math.min(maxX, nx)).toFixed(3)),
+        y: Number(ny.toFixed(3)),
+      };
+      updateSelectedCurves({ points: curPts.slice() }, commit);
+    };
+
+    updatePoint(e.clientX, e.clientY, false);
+    const onMove = (ev: PointerEvent) => updatePoint(ev.clientX, ev.clientY, false);
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      updatePoint(ev.clientX, ev.clientY, true);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   // ==================== SHARED TOOL PANEL CONTENT ====================
   const renderToolContent = (tab: ToolTab) => {
@@ -502,8 +879,8 @@ export function App() {
             </div>
 
             {project.assets.length === 0 ? (
-              <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
-                Import videos, photos, or music from your device gallery to start editing.
+              <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+                Import videos, photos, audio, or <span className="mono">.srt</span> subtitles from your device or drag files straight onto the window.
               </div>
             ) : (
               <div className="asset-grid">
@@ -531,7 +908,7 @@ export function App() {
                             type="button"
                             style={{ padding: "2px 6px", fontSize: 10.5 }}
                             onClick={() => void addAssetToTimeline(item, true)}
-                            title="Add as Picture-in-Picture overlay"
+                            title="Add as Picture-in-Picture / Chroma Key overlay"
                           >
                             +PiP
                           </button>
@@ -604,7 +981,15 @@ export function App() {
             </div>
 
             <div className="slider-row">
-              <div className="slider-head">
+              <div
+                className="slider-head"
+                onDoubleClick={async () => {
+                  const c = ensureTargetClip();
+                  if (!c) return;
+                  await api.setClipSpeed(c.id, 1);
+                  await refreshCurrentProject();
+                }}
+              >
                 <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <IconSpeed size={14} /> Playback Speed
                 </span>
@@ -616,11 +1001,21 @@ export function App() {
                 max={4}
                 step={0.05}
                 value={clipSpeed}
-                onChange={async (e) => {
+                onChange={(e) => {
                   const c = ensureTargetClip();
                   if (!c) return;
-                  await api.setClipSpeed(c.id, Number(e.target.value));
-                  await refreshCurrentProject();
+                  const nextRate = Number(e.target.value);
+                  const prevRate = getClipSpeed(c);
+                  const nextDur = Math.max(0.15, Number(((c.duration * prevRate) / nextRate).toFixed(3)));
+                  mutateClipLocal(c.id, (prev) => ({
+                    ...prev,
+                    duration: nextDur,
+                    effects: [
+                      ...prev.effects.filter((fx) => fx.type !== "speed"),
+                      { id: "fx-speed", type: "speed", params: { rate: nextRate } },
+                    ],
+                  }));
+                  scheduleCommit(`speed:${c.id}`, () => api.setClipSpeed(c.id, nextRate), 160);
                 }}
               />
               <div className="pill-strip">
@@ -696,68 +1091,312 @@ export function App() {
           </>
         );
 
-      case "adjust":
+      case "adjust": {
+        const lut = curvesInfo ? getCachedCurveLut(curvesInfo.points) : null;
+        const polyPoints = lut
+          ? Array.from({ length: 65 }, (_, idx) => {
+              const i = Math.min(255, idx * 4);
+              const x = (i / 255) * 160;
+              const y = 100 - (lut[i]! / 255) * 100;
+              return `${x.toFixed(1)},${y.toFixed(1)}`;
+            }).join(" ")
+          : "0,100 160,0";
+
         return (
           <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span className="section-label" style={{ margin: 0 }}>Color &amp; Light</span>
+            <div className="seg-control">
               <button
                 type="button"
-                className="btn-ghost"
-                style={{ padding: "3px 8px", fontSize: 11 }}
-                onClick={() =>
-                  void updateSelectedEffect("adjust", {
-                    exposure: 0,
-                    brightness: 0,
-                    contrast: 0,
-                    saturation: 0,
-                    temperature: 0,
-                    tint: 0,
-                    vignette: 0,
-                    fade: 0,
-                    blur: 0,
-                  })
-                }
+                className={`seg-btn ${adjustSubTab === "light" ? "active" : ""}`}
+                onClick={() => setAdjustSubTab("light")}
               >
-                Reset All
+                Light
+              </button>
+              <button
+                type="button"
+                className={`seg-btn ${adjustSubTab === "curves" ? "active" : ""}`}
+                onClick={() => setAdjustSubTab("curves")}
+              >
+                Curves
+              </button>
+              <button
+                type="button"
+                className={`seg-btn ${adjustSubTab === "key" ? "active" : ""}`}
+                onClick={() => setAdjustSubTab("key")}
+              >
+                Chroma Key
               </button>
             </div>
-            {(
-              [
-                { key: "exposure", label: "Exposure", min: -100, max: 100 },
-                { key: "contrast", label: "Contrast", min: -100, max: 100 },
-                { key: "saturation", label: "Saturation", min: -100, max: 100 },
-                { key: "temperature", label: "Temperature", min: -100, max: 100 },
-                { key: "tint", label: "Tint", min: -100, max: 100 },
-                { key: "vignette", label: "Vignette", min: 0, max: 100 },
-              ] as const
-            ).map(({ key, label, min, max }) => {
-              const val = Number(colorAdj?.[key] ?? 0);
-              return (
-                <div key={key} className="slider-row">
+
+            {adjustSubTab === "light" && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="section-label" style={{ margin: 0 }}>Color &amp; Light</span>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    style={{ padding: "3px 8px", fontSize: 11 }}
+                    onClick={() =>
+                      updateSelectedEffect(
+                        "adjust",
+                        {
+                          exposure: 0,
+                          brightness: 0,
+                          contrast: 0,
+                          saturation: 0,
+                          temperature: 0,
+                          tint: 0,
+                          vignette: 0,
+                          fade: 0,
+                          blur: 0,
+                        },
+                        true,
+                      )
+                    }
+                  >
+                    Reset
+                  </button>
+                </div>
+                {(
+                  [
+                    { key: "exposure", label: "Exposure", min: -100, max: 100 },
+                    { key: "contrast", label: "Contrast", min: -100, max: 100 },
+                    { key: "saturation", label: "Saturation", min: -100, max: 100 },
+                    { key: "temperature", label: "Temperature", min: -100, max: 100 },
+                    { key: "tint", label: "Tint", min: -100, max: 100 },
+                    { key: "vignette", label: "Vignette", min: 0, max: 100 },
+                    { key: "fade", label: "Matte Fade", min: 0, max: 100 },
+                    { key: "blur", label: "Optical Blur", min: 0, max: 20 },
+                  ] as const
+                ).map(({ key, label, min, max }) => {
+                  const val = Number(colorAdj?.[key] ?? 0);
+                  return (
+                    <div key={key} className="slider-row">
+                      <div
+                        className="slider-head"
+                        onDoubleClick={() => updateSelectedEffect("adjust", { [key]: 0 }, true)}
+                        title="Double-click to reset"
+                      >
+                        <span>{label}</span>
+                        <span className="mono">{val > 0 ? `+${val}` : val}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={min}
+                        max={max}
+                        step={1}
+                        value={val}
+                        onChange={(e) => updateSelectedEffect("adjust", { [key]: Number(e.target.value) })}
+                      />
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
+            {adjustSubTab === "curves" && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="section-label" style={{ margin: 0 }}>Tone Curve &amp; Clarity</span>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    style={{ padding: "3px 8px", fontSize: 11 }}
+                    onClick={() =>
+                      updateSelectedCurves(
+                        { preset: "linear", shadows: 0, midtones: 0, highlights: 0, clarity: 0, points: TONE_CURVE_PRESETS_UI[0]!.points },
+                        true,
+                      )
+                    }
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <svg
+                  viewBox="0 0 160 100"
+                  className="curve-pad"
+                  onPointerDown={handleCurvePadPointer}
+                  aria-label="Interactive Tone Curve"
+                >
+                  {[40, 80, 120].map((gx) => (
+                    <line key={gx} x1={gx} y1={0} x2={gx} y2={100} stroke="rgba(255,255,255,0.07)" strokeWidth="0.7" />
+                  ))}
+                  {[25, 50, 75].map((gy) => (
+                    <line key={gy} x1={0} y1={gy} x2={160} y2={gy} stroke="rgba(255,255,255,0.07)" strokeWidth="0.7" />
+                  ))}
+                  <line x1={0} y1={100} x2={160} y2={0} stroke="rgba(255,255,255,0.18)" strokeDasharray="3 3" strokeWidth="0.8" />
+                  <polyline fill="none" stroke="#fafafa" strokeWidth="1.8" points={polyPoints} />
+                  {(curvesInfo?.points ?? TONE_CURVE_PRESETS_UI[0]!.points).map((pt, idx) => (
+                    <circle
+                      key={idx}
+                      cx={pt.x * 160}
+                      cy={100 - pt.y * 100}
+                      r={3.2}
+                      fill="#3b82f6"
+                      stroke="#fafafa"
+                      strokeWidth="1.1"
+                    />
+                  ))}
+                </svg>
+
+                <div className="pill-strip">
+                  {TONE_CURVE_PRESETS_UI.map((pr) => (
+                    <button
+                      key={pr.id}
+                      type="button"
+                      className={`chip-btn ${curvesInfo?.preset === pr.id ? "active" : ""}`}
+                      onClick={() =>
+                        updateSelectedCurves(
+                          { preset: pr.id, shadows: 0, midtones: 0, highlights: 0, points: pr.points },
+                          true,
+                        )
+                      }
+                    >
+                      {pr.label}
+                    </button>
+                  ))}
+                </div>
+
+                {(
+                  [
+                    { key: "shadows", label: "Shadows", val: curvesInfo?.shadows ?? 0 },
+                    { key: "midtones", label: "Midtones", val: curvesInfo?.midtones ?? 0 },
+                    { key: "highlights", label: "Highlights", val: curvesInfo?.highlights ?? 0 },
+                    { key: "clarity", label: "Clarity", val: curvesInfo?.clarity ?? 0 },
+                  ] as const
+                ).map(({ key, label, val }) => (
+                  <div key={key} className="slider-row">
+                    <div
+                      className="slider-head"
+                      onDoubleClick={() => updateSelectedCurves({ [key]: 0 }, true)}
+                    >
+                      <span>{label}</span>
+                      <span className="mono">{val > 0 ? `+${val}` : val}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-100}
+                      max={100}
+                      value={val}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (key === "clarity") {
+                          updateSelectedCurves({ clarity: v, points: curvesInfo?.points });
+                        } else {
+                          const nextS = key === "shadows" ? v : (curvesInfo?.shadows ?? 0);
+                          const nextM = key === "midtones" ? v : (curvesInfo?.midtones ?? 0);
+                          const nextH = key === "highlights" ? v : (curvesInfo?.highlights ?? 0);
+                          updateSelectedCurves({
+                            shadows: nextS,
+                            midtones: nextM,
+                            highlights: nextH,
+                            points: computeCurvePoints(nextS, nextM, nextH, "linear"),
+                          });
+                        }
+                      }}
+                    />
+                  </div>
+                ))}
+              </>
+            )}
+
+            {adjustSubTab === "key" && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span className="section-label" style={{ margin: 0 }}>Green / Blue Screen Keyer</span>
+                  {chromaInfo?.enabled && (
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      style={{ padding: "3px 9px", fontSize: 11 }}
+                      onClick={() => updateSelectedChromaKey({ enabled: false }, true)}
+                    >
+                      Disable Key
+                    </button>
+                  )}
+                </div>
+
+                <div className="pill-strip">
+                  <button
+                    type="button"
+                    className={`chip-btn ${chromaInfo?.enabled && chromaInfo.color.toLowerCase() === "#00ff00" ? "active" : ""}`}
+                    onClick={() => updateSelectedChromaKey({ enabled: true, color: "#00ff00" }, true)}
+                  >
+                    Green Screen
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip-btn ${chromaInfo?.enabled && chromaInfo.color.toLowerCase() === "#0055ff" ? "active" : ""}`}
+                    onClick={() => updateSelectedChromaKey({ enabled: true, color: "#0055ff" }, true)}
+                  >
+                    Blue Screen
+                  </button>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                    <span>Custom</span>
+                    <input
+                      type="color"
+                      value={chromaInfo?.color || "#00ff00"}
+                      onChange={(e) => updateSelectedChromaKey({ enabled: true, color: e.target.value }, true)}
+                      style={{ width: 32, height: 28, padding: 2 }}
+                    />
+                  </label>
+                </div>
+
+                <div className="slider-row">
                   <div className="slider-head">
-                    <span>{label}</span>
-                    <span className="mono">{val > 0 ? `+${val}` : val}</span>
+                    <span>Similarity</span>
+                    <span className="mono">{Math.round((chromaInfo?.similarity ?? 0.3) * 100)}%</span>
                   </div>
                   <input
                     type="range"
-                    min={min}
-                    max={max}
-                    step={1}
-                    value={val}
-                    onChange={(e) => void updateSelectedEffect("adjust", { [key]: Number(e.target.value) })}
+                    min={4}
+                    max={90}
+                    value={Math.round((chromaInfo?.similarity ?? 0.3) * 100)}
+                    onChange={(e) =>
+                      updateSelectedChromaKey({ enabled: true, similarity: Number(e.target.value) / 100 })
+                    }
                   />
                 </div>
-              );
-            })}
+
+                <div className="slider-row">
+                  <div className="slider-head">
+                    <span>Edge Smoothness</span>
+                    <span className="mono">{Math.round((chromaInfo?.blend ?? 0.1) * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={60}
+                    value={Math.round((chromaInfo?.blend ?? 0.1) * 100)}
+                    onChange={(e) =>
+                      updateSelectedChromaKey({ enabled: true, blend: Number(e.target.value) / 100 })
+                    }
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  className={chromaInfo?.despill !== false ? "btn-accent" : ""}
+                  onClick={() =>
+                    updateSelectedChromaKey({ enabled: true, despill: !(chromaInfo?.despill !== false) }, true)
+                  }
+                >
+                  Spill Suppression: {chromaInfo?.despill !== false ? "On" : "Off"}
+                </button>
+              </>
+            )}
           </>
         );
+      }
 
       case "filters": {
         const previewThumb = project.assets[0]
           ? withToken(`/api/v1/projects/${project.id}/assets/${project.assets[0].id}/thumbnail`)
           : "";
-        const curTxKind = selectedClip ? getClipTransition(selectedClip)?.kind ?? "none" : "none";
+        const curTx = selectedClip ? getClipTransition(selectedClip) : null;
+        const curTxKind = curTx?.kind ?? "none";
+        const curTxDur = curTx?.duration ?? 0.5;
         return (
           <>
             <div className="section-label">Cinema Filter Looks</div>
@@ -767,15 +1406,7 @@ export function App() {
                   key={look.id}
                   type="button"
                   className={`look-card ${activeLookId === look.id ? "active" : ""}`}
-                  onClick={async () => {
-                    const c = ensureTargetClip();
-                    if (!c) {
-                      flash("Import a video or photo first");
-                      return;
-                    }
-                    await api.setClipEffect(c.id, "lut3d", { lutId: look.id, intensity: 100 });
-                    await refreshCurrentProject();
-                  }}
+                  onClick={() => updateSelectedEffect("lut3d", { lutId: look.id, intensity: 100 }, true)}
                 >
                   {previewThumb ? (
                     <img
@@ -799,14 +1430,8 @@ export function App() {
                   key={tr.kind}
                   type="button"
                   className={`chip-btn ${curTxKind === tr.kind ? "active" : ""}`}
-                  onClick={async () => {
-                    const c = ensureTargetClip();
-                    if (!c) return;
-                    await api.setClipEffect(c.id, "transition", {
-                      kind: tr.kind,
-                      duration: Math.min(0.6, Math.max(0.2, c.duration * 0.35)),
-                    });
-                    await refreshCurrentProject();
+                  onClick={() => {
+                    updateSelectedEffect("transition", { kind: tr.kind, duration: curTxDur }, true);
                     flash(`Transition: ${tr.label}`);
                   }}
                 >
@@ -814,6 +1439,25 @@ export function App() {
                 </button>
               ))}
             </div>
+
+            {curTxKind !== "none" && (
+              <div className="slider-row">
+                <div className="slider-head">
+                  <span>Transition Duration</span>
+                  <span className="mono">{curTxDur.toFixed(2)}s</span>
+                </div>
+                <input
+                  type="range"
+                  min={0.2}
+                  max={2}
+                  step={0.05}
+                  value={curTxDur}
+                  onChange={(e) =>
+                    updateSelectedEffect("transition", { kind: curTxKind, duration: Number(e.target.value) })
+                  }
+                />
+              </div>
+            )}
           </>
         );
       }
@@ -849,10 +1493,10 @@ export function App() {
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <input
                   value={selectedCaption.text}
-                  onChange={async (e) => {
+                  onChange={(e) => {
                     const val = e.target.value;
-                    await api.updateCaption(selectedCaption.id, { text: val });
-                    await refreshCurrentProject();
+                    mutateCaptionLocal(selectedCaption.id, (c) => ({ ...c, text: val }));
+                    scheduleCommit(`cap:${selectedCaption.id}`, () => api.updateCaption(selectedCaption.id, { text: val }), 180);
                   }}
                   placeholder="Enter title or subtitle…"
                 />
@@ -868,11 +1512,15 @@ export function App() {
                       min={22}
                       max={110}
                       value={Number(capStyle.fontSize ?? 52)}
-                      onChange={async (e) => {
-                        await api.updateCaption(selectedCaption.id, {
-                          style: { ...capStyle, fontSize: Number(e.target.value) },
-                        });
-                        await refreshCurrentProject();
+                      onChange={(e) => {
+                        const fontSize = Number(e.target.value);
+                        const nextStyle = { ...capStyle, fontSize };
+                        mutateCaptionLocal(selectedCaption.id, (c) => ({ ...c, style: nextStyle }));
+                        scheduleCommit(
+                          `cap-style:${selectedCaption.id}`,
+                          () => api.updateCaption(selectedCaption.id, { style: nextStyle }),
+                          150,
+                        );
                       }}
                     />
                   </div>
@@ -883,11 +1531,14 @@ export function App() {
                       <input
                         type="color"
                         value={String(capStyle.color || "#ffffff")}
-                        onChange={async (e) => {
-                          await api.updateCaption(selectedCaption.id, {
-                            style: { ...capStyle, color: e.target.value },
-                          });
-                          await refreshCurrentProject();
+                        onChange={(e) => {
+                          const nextStyle = { ...capStyle, color: e.target.value };
+                          mutateCaptionLocal(selectedCaption.id, (c) => ({ ...c, style: nextStyle }));
+                          scheduleCommit(
+                            `cap-color:${selectedCaption.id}`,
+                            () => api.updateCaption(selectedCaption.id, { style: nextStyle }),
+                            120,
+                          );
                         }}
                         style={{ width: 34, height: 30, padding: 2 }}
                       />
@@ -927,16 +1578,27 @@ export function App() {
                     </button>
                   ))}
                 </div>
-
-                <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                  Tip: Drag text directly on the video preview to position it anywhere.
-                </span>
               </div>
             ) : (
               <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                Tap a preset above to add a title at the playhead, or tap any text block on the preview / timeline.
+                Add a title above, click any text block on the preview to drag it directly, or import subtitles below.
               </div>
             )}
+
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+              <span className="section-label" style={{ margin: 0 }}>Subtitles (.SRT / .VTT)</span>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button type="button" onClick={() => subtitleInputRef.current?.click()}>
+                  <IconSubtitles size={14} /> Import .SRT / .VTT
+                </button>
+                <button type="button" onClick={() => void handleExportSubtitlesFile("srt")}>
+                  <IconDownload size={13} /> Export .SRT
+                </button>
+                <button type="button" onClick={() => void handleExportSubtitlesFile("vtt")}>
+                  <IconDownload size={13} /> Export .VTT
+                </button>
+              </div>
+            </div>
           </>
         );
       }
@@ -1036,7 +1698,15 @@ export function App() {
             </div>
 
             <div className="slider-row">
-              <div className="slider-head">
+              <div
+                className="slider-head"
+                onDoubleClick={async () => {
+                  const c = ensureTargetClip();
+                  if (!c) return;
+                  await api.updateClip(c.id, { transform: { ...c.transform, scaleX: 1, scaleY: 1 } });
+                  await refreshCurrentProject();
+                }}
+              >
                 <span>Zoom / Scale</span>
                 <span className="mono">{curScalePct}%</span>
               </div>
@@ -1045,26 +1715,29 @@ export function App() {
                 min={25}
                 max={250}
                 value={curScalePct}
-                onChange={async (e) => {
+                onChange={(e) => {
                   const c = ensureTargetClip();
                   if (!c) return;
                   const s = Number(e.target.value) / 100;
                   const signX = (c.transform.scaleX || 1) < 0 ? -1 : 1;
                   const signY = (c.transform.scaleY || 1) < 0 ? -1 : 1;
-                  await api.updateClip(c.id, {
-                    transform: { ...c.transform, scaleX: s * signX, scaleY: s * signY },
-                  });
-                  await refreshCurrentProject();
+                  const nextTransform = { ...c.transform, scaleX: s * signX, scaleY: s * signY };
+                  mutateClipLocal(c.id, (prev) => ({ ...prev, transform: nextTransform }));
+                  scheduleCommit(`scale:${c.id}`, () => api.updateClip(c.id, { transform: nextTransform }), 150);
                 }}
               />
             </div>
 
             <div className="form-grid-2">
               {(["left", "right", "top", "bottom"] as const).map((edge) => {
-                const v = Math.round(Number(cropParams[edge] ?? 0) * 100);
+                const rawEdge = Number(cropParams[edge] ?? 0);
+                const v = Math.round(Math.abs(rawEdge) > 0.5 ? rawEdge : rawEdge * 100);
                 return (
                   <div key={edge} className="slider-row">
-                    <div className="slider-head">
+                    <div
+                      className="slider-head"
+                      onDoubleClick={() => updateSelectedEffect("crop", { [edge]: 0 }, true)}
+                    >
                       <span style={{ textTransform: "capitalize" }}>Crop {edge}</span>
                       <span className="mono">{v}%</span>
                     </div>
@@ -1074,7 +1747,7 @@ export function App() {
                       max={45}
                       value={v}
                       onChange={(e) =>
-                        void updateSelectedEffect("crop", { [edge]: Number(e.target.value) / 100 })
+                        updateSelectedEffect("crop", { [edge]: Number(e.target.value) / 100 })
                       }
                     />
                   </div>
@@ -1098,18 +1771,21 @@ export function App() {
                 onClick={toggleVoiceoverRecording}
               >
                 <IconMic size={14} />
-                {recordingVo ? `Stop Recording (${voSeconds}s)` : "Record Voiceover"}
+                {recordingVo ? `Stop (${voSeconds}s)` : "Record Voiceover"}
               </button>
               <button
                 type="button"
-                onClick={() => void updateSelectedEffect("volume", { gain: volPct <= 1 ? 1 : 0 })}
+                onClick={() => updateSelectedEffect("volume", { gain: volPct <= 1 ? 1 : 0 }, true)}
               >
                 {volPct <= 1 ? "Unmute Clip" : "Mute Clip"}
               </button>
             </div>
 
             <div className="slider-row">
-              <div className="slider-head">
+              <div
+                className="slider-head"
+                onDoubleClick={() => updateSelectedEffect("volume", { gain: 1 }, true)}
+              >
                 <span>Clip Volume</span>
                 <span className="mono">{volPct}%</span>
               </div>
@@ -1118,7 +1794,7 @@ export function App() {
                 min={0}
                 max={200}
                 value={volPct}
-                onChange={(e) => void updateSelectedEffect("volume", { gain: Number(e.target.value) / 100 })}
+                onChange={(e) => updateSelectedEffect("volume", { gain: Number(e.target.value) / 100 })}
               />
             </div>
 
@@ -1134,7 +1810,7 @@ export function App() {
                   max={3}
                   step={0.1}
                   value={fadeIn}
-                  onChange={(e) => void updateSelectedEffect("fade", { fadeIn: Number(e.target.value) })}
+                  onChange={(e) => updateSelectedEffect("fade", { fadeIn: Number(e.target.value) })}
                 />
               </div>
               <div className="slider-row">
@@ -1148,9 +1824,73 @@ export function App() {
                   max={3}
                   step={0.1}
                   value={fadeOut}
-                  onChange={(e) => void updateSelectedEffect("fade", { fadeOut: Number(e.target.value) })}
+                  onChange={(e) => updateSelectedEffect("fade", { fadeOut: Number(e.target.value) })}
                 />
               </div>
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span className="section-label" style={{ margin: 0 }}>3-Band EQ &amp; Voice Clarity</span>
+                <button
+                  type="button"
+                  className={eqInfo?.voiceClarity ? "btn-accent" : ""}
+                  style={{ padding: "3px 9px", fontSize: 11 }}
+                  onClick={() => updateSelectedEq({ voiceClarity: !eqInfo?.voiceClarity }, true)}
+                >
+                  Voice Clarity: {eqInfo?.voiceClarity ? "On" : "Off"}
+                </button>
+              </div>
+
+              <div className="pill-strip">
+                {AUDIO_EQ_PRESETS_UI.map((pr) => (
+                  <button
+                    key={pr.id}
+                    type="button"
+                    className={`chip-btn ${eqInfo?.preset === pr.id ? "active" : ""}`}
+                    onClick={() =>
+                      updateSelectedEq(
+                        {
+                          preset: pr.id,
+                          lowDb: pr.lowDb,
+                          midDb: pr.midDb,
+                          highDb: pr.highDb,
+                          voiceClarity: pr.voiceClarity,
+                        },
+                        true,
+                      )
+                    }
+                  >
+                    {pr.label}
+                  </button>
+                ))}
+              </div>
+
+              {(
+                [
+                  { key: "lowDb", label: "Bass (120 Hz)", val: eqInfo?.lowDb ?? 0 },
+                  { key: "midDb", label: "Mid Presence (1.2 kHz)", val: eqInfo?.midDb ?? 0 },
+                  { key: "highDb", label: "Treble Air (4.8 kHz)", val: eqInfo?.highDb ?? 0 },
+                ] as const
+              ).map(({ key, label, val }) => (
+                <div key={key} className="slider-row">
+                  <div
+                    className="slider-head"
+                    onDoubleClick={() => updateSelectedEq({ [key]: 0 }, true)}
+                  >
+                    <span>{label}</span>
+                    <span className="mono">{val > 0 ? `+${val}` : val} dB</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-15}
+                    max={15}
+                    step={0.5}
+                    value={val}
+                    onChange={(e) => updateSelectedEq({ [key]: Number(e.target.value) })}
+                  />
+                </div>
+              ))}
             </div>
           </>
         );
@@ -1173,7 +1913,7 @@ export function App() {
             >
               <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12 }}>
                 <span className={`status-dot ${apiSettings?.hasApiKey ? "online" : ""}`} />
-                <span>{apiSettings?.hasApiKey ? apiSettings.model : "No API key set"}</span>
+                <span>{apiSettings?.hasApiKey ? apiSettings.model : "Offline Studio Mode"}</span>
               </div>
               <button type="button" onClick={() => setShowApiModal(true)} style={{ padding: "4px 9px", fontSize: 11.5 }}>
                 <IconKey size={13} /> {apiSettings?.hasApiKey ? "Change API" : "Connect API"}
@@ -1183,8 +1923,8 @@ export function App() {
             <div className="pill-strip">
               {[
                 { label: "9:16 Reels", prompt: "Convert project to 9:16 vertical aspect ratio" },
-                { label: "Cinema Color", prompt: "Apply cinematic Teal & Orange look with gentle contrast" },
-                { label: "Smooth Dissolves", prompt: "Add smooth cross-dissolve transitions between clips" },
+                { label: "Cinema Grade", prompt: "Apply Kodak film LUT look" },
+                { label: "Silver Mono", prompt: "Apply black and white mono film look" },
                 { label: "Add Title", prompt: "Title: NEW EDIT" },
               ].map((q) => (
                 <button key={q.label} type="button" className="chip-btn" onClick={() => void sendAiPrompt(q.prompt)}>
@@ -1244,16 +1984,83 @@ export function App() {
     { id: "ai", label: "AI", icon: <IconSparkles size={17} /> },
   ];
 
+  const handleStageClipMove = useCallback(
+    (clipId: string, x: number, y: number, commit = false) => {
+      mutateClipLocal(clipId, (prev) => ({
+        ...prev,
+        transform: { ...prev.transform, x, y },
+      }));
+      if (commit) {
+        const found = seq.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+        const base = found ? { ...found.transform, x, y } : { x, y, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
+        scheduleCommit(`pos:${clipId}`, () => api.updateClip(clipId, { transform: base }), 20);
+      }
+    },
+    [mutateClipLocal, scheduleCommit, seq.tracks],
+  );
+
+  const handleStageCaptionMove = useCallback(
+    (capId: string, x: number, y: number, commit = false) => {
+      mutateCaptionLocal(capId, (prev) => ({
+        ...prev,
+        style: { ...(prev.style ?? {}), x, y },
+      }));
+      if (commit) {
+        const cap = seq.captions.find((c) => c.id === capId);
+        scheduleCommit(
+          `cap-pos:${capId}`,
+          () => api.updateCaption(capId, { style: { ...(cap?.style ?? {}), x, y } }),
+          20,
+        );
+      }
+    },
+    [mutateCaptionLocal, scheduleCommit, seq.captions],
+  );
+
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragOver={(e) => {
+        if (e.dataTransfer?.types?.includes("Files")) {
+          e.preventDefault();
+          setDragDropActive(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragDropActive(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragDropActive(false);
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (files.length > 0) void ingestFiles(files);
+      }}
+    >
       <input
         ref={fileInputRef}
         type="file"
         multiple
-        accept="video/*,image/*,audio/*"
+        accept="video/*,image/*,audio/*,.srt,.vtt"
         style={{ display: "none" }}
         onChange={handleFilesSelected}
       />
+      <input
+        ref={subtitleInputRef}
+        type="file"
+        accept=".srt,.vtt,text/plain,text/vtt"
+        style={{ display: "none" }}
+        onChange={handleFilesSelected}
+      />
+
+      {dragDropActive && (
+        <div className="drop-overlay">
+          <IconPlus size={28} style={{ color: "#60a5fa" }} />
+          <div style={{ fontSize: 15, fontWeight: 600 }}>Drop files into Vedit Studio</div>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+            Videos, Photos, Music, or .SRT / .VTT Subtitles
+          </div>
+        </div>
+      )}
 
       {/* ==================== CLEAN TOP STUDIO HEADER ==================== */}
       <header className="topbar">
@@ -1279,8 +2086,9 @@ export function App() {
                 flash("Created blank project");
               } else {
                 setCurrentId(val);
-                const { project: loaded } = await api.getProject(val);
-                setProject(loaded);
+                const res = await api.getProject(val);
+                setProject(res.project);
+                if (res.history) setHistoryState(res.history);
                 setSelectedClipId(null);
                 setSelectedCaptionId(null);
                 setPlayhead(0);
@@ -1314,6 +2122,7 @@ export function App() {
           <button
             type="button"
             className="icon-btn"
+            disabled={!historyState.canUndo}
             onClick={() => void api.undo().then(() => refreshCurrentProject())}
             title="Undo (Ctrl+Z)"
           >
@@ -1322,11 +2131,33 @@ export function App() {
           <button
             type="button"
             className="icon-btn"
+            disabled={!historyState.canRedo}
             onClick={() => void api.redo().then(() => refreshCurrentProject())}
             title="Redo (Ctrl+Shift+Z)"
           >
             <IconRedo size={15} />
           </button>
+
+          {!isMobileLayout && (
+            <>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={handleSaveProject}
+                title="Save Project (Ctrl+S)"
+              >
+                <IconSave size={15} />
+              </button>
+              <button
+                type="button"
+                className={`icon-btn ${showShortcuts ? "active" : ""}`}
+                onClick={() => setShowShortcuts((s) => !s)}
+                title="Keyboard Shortcuts (?)"
+              >
+                <IconKeyboard size={15} />
+              </button>
+            </>
+          )}
 
           <button
             type="button"
@@ -1359,10 +2190,12 @@ export function App() {
               playhead={playhead}
               playing={playing}
               muted={muted}
+              selectedClipId={selectedClipId}
               selectedCaptionId={selectedCaptionId}
               onPlayhead={setPlayhead}
               onPlaying={setPlaying}
               onToggleMute={() => setMuted((m) => !m)}
+              onSelectClip={setSelectedClipId}
               onSelectCaption={(id) => {
                 setSelectedCaptionId(id);
                 if (id) {
@@ -1370,11 +2203,8 @@ export function App() {
                   setMobileSheetOpen(true);
                 }
               }}
-              onMoveCaptionPosition={async (capId, x, y) => {
-                const cap = seq.captions.find((c) => c.id === capId);
-                await api.updateCaption(capId, { style: { ...(cap?.style ?? {}), x, y } });
-                await refreshCurrentProject();
-              }}
+              onMoveClipPosition={handleStageClipMove}
+              onMoveCaptionPosition={handleStageCaptionMove}
               onImportRequest={triggerFilePicker}
               onQuickSplit={handleSplitAtPlayhead}
             />
@@ -1396,8 +2226,8 @@ export function App() {
               }}
               onZoomChange={setPxPerSec}
               onToggleSnap={() => setSnapEnabled((s) => !s)}
-              onMoveClip={async (clipId, start) => {
-                await api.moveClip(clipId, start);
+              onMoveClip={async (clipId, start, trackId) => {
+                await api.moveClip(clipId, start, trackId);
                 await refreshCurrentProject();
               }}
               onTrimClip={async (clipId, edge, time) => {
@@ -1496,16 +2326,15 @@ export function App() {
               playhead={playhead}
               playing={playing}
               muted={muted}
+              selectedClipId={selectedClipId}
               selectedCaptionId={selectedCaptionId}
               onPlayhead={setPlayhead}
               onPlaying={setPlaying}
               onToggleMute={() => setMuted((m) => !m)}
+              onSelectClip={setSelectedClipId}
               onSelectCaption={setSelectedCaptionId}
-              onMoveCaptionPosition={async (capId, x, y) => {
-                const cap = seq.captions.find((c) => c.id === capId);
-                await api.updateCaption(capId, { style: { ...(cap?.style ?? {}), x, y } });
-                await refreshCurrentProject();
-              }}
+              onMoveClipPosition={handleStageClipMove}
+              onMoveCaptionPosition={handleStageCaptionMove}
               onImportRequest={triggerFilePicker}
               onQuickSplit={handleSplitAtPlayhead}
             />
@@ -1513,22 +2342,37 @@ export function App() {
             <div className="splitter-v" onPointerDown={(e) => startResize("right", e)} />
 
             <aside className="side-panel" style={{ width: rightWidth }}>
-              <div className="panel-header">
-                <span>{selectedCaption ? "Text Inspector" : selectedClip ? "Clip Inspector" : "Sequence Inspector"}</span>
+              <div className="panel-header" style={{ gap: 8 }}>
+                <span>{selectedCaption ? "Text Inspector" : selectedClip ? "Clip Inspector" : "Sequence"}</span>
+                {selectedClip && !selectedCaption && (
+                  <div className="seg-control" style={{ flex: 1, maxWidth: 196 }}>
+                    {(
+                      [
+                        { id: "adjust", label: "Color" },
+                        { id: "audio", label: "Audio" },
+                        { id: "edit", label: "Clip" },
+                        { id: "canvas", label: "Crop" },
+                      ] as const
+                    ).map((it) => (
+                      <button
+                        key={it.id}
+                        type="button"
+                        className={`seg-btn ${inspectorTab === it.id ? "active" : ""}`}
+                        style={{ height: 24, padding: "0 6px", fontSize: 11 }}
+                        onClick={() => setInspectorTab(it.id)}
+                      >
+                        {it.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="panel-scroll">
-                {selectedCaption ? (
-                  renderToolContent("text")
-                ) : selectedClip ? (
-                  <>
-                    {renderToolContent("adjust")}
-                    <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
-                      {renderToolContent("edit")}
-                    </div>
-                  </>
-                ) : (
-                  renderToolContent("canvas")
-                )}
+                {selectedCaption
+                  ? renderToolContent("text")
+                  : selectedClip
+                    ? renderToolContent(inspectorTab)
+                    : renderToolContent("canvas")}
               </div>
             </aside>
           </div>
@@ -1548,8 +2392,8 @@ export function App() {
               onSelectCaption={setSelectedCaptionId}
               onZoomChange={setPxPerSec}
               onToggleSnap={() => setSnapEnabled((s) => !s)}
-              onMoveClip={async (clipId, start) => {
-                await api.moveClip(clipId, start);
+              onMoveClip={async (clipId, start, trackId) => {
+                await api.moveClip(clipId, start, trackId);
                 await refreshCurrentProject();
               }}
               onTrimClip={async (clipId, edge, time) => {
@@ -1576,6 +2420,37 @@ export function App() {
         </>
       )}
 
+      {showShortcuts && (
+        <div className="modal-backdrop" onClick={() => setShowShortcuts(false)}>
+          <div className="modal-card" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Studio Keyboard Shortcuts</h2>
+              <button type="button" className="btn-ghost" onClick={() => setShowShortcuts(false)}>
+                Done
+              </button>
+            </div>
+            <div className="modal-body" style={{ gap: 9 }}>
+              {[
+                ["Space / K", "Play / Pause"],
+                ["J / L", "Step Back / Play Forward"],
+                ["← / →", "Step 1 Frame (Shift = 1s)"],
+                ["S", "Split Clip at Playhead"],
+                ["Delete / Backspace", "Delete Selected Clip or Title"],
+                ["Ctrl + Z / Ctrl + Y", "Undo / Redo"],
+                ["Ctrl + S", "Save Project"],
+                ["Ctrl + E", "Export Video (.MP4)"],
+                ["Double-Click Slider", "Reset Parameter to Default"],
+              ].map(([keys, desc]) => (
+                <div key={keys} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
+                  <span style={{ color: "var(--text-secondary)" }}>{desc}</span>
+                  <span className="kbd-badge mono">{keys}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showApiModal && (
         <ApiSettingsModal
           initial={apiSettings}
@@ -1593,6 +2468,7 @@ export function App() {
           exportPresets={exportPresets}
           onClose={() => setShowExportModal(false)}
           onFlash={flash}
+          onProjectRefresh={refreshCurrentProject}
         />
       )}
 

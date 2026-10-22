@@ -1010,12 +1010,13 @@ input[type="range"]::-webkit-slider-thumb {
   left: 50%;
   transform: translateX(-50%);
   z-index: 200;
-  background: rgba(24, 24, 28, 0.96);
+  background: rgba(20, 20, 24, 0.96);
+  backdrop-filter: blur(12px);
   color: #fafafa;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
-  padding: 8px 16px;
-  font-size: 12.5px;
+  padding: 7px 15px;
+  font-size: 12px;
   font-weight: 500;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
   pointer-events: none;
@@ -1023,4 +1024,102 @@ input[type="range"]::-webkit-slider-thumb {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ==================== ULTRA-CLEAN SEGMENTED TABS, CURVE PAD & DROPZONE ==================== */
+.seg-control {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.seg-btn {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.seg-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: transparent;
+}
+
+.seg-btn.active {
+  background: var(--panel-2);
+  color: #fafafa;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.curve-pad {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  max-height: 150px;
+  border-radius: 10px;
+  background: #0b0b0e;
+  border: 1px solid var(--border-strong);
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.drop-overlay {
+  position: fixed;
+  inset: 10px;
+  z-index: 250;
+  border-radius: 14px;
+  border: 2px dashed var(--accent);
+  background: rgba(9, 9, 11, 0.86);
+  backdrop-filter: blur(8px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.kbd-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+
+.track-lane.drop-target {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
 }

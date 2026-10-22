@@ -35,6 +35,17 @@ import {
 import { exportEdl, exportFcpXml } from "../pro/interchange.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { analyzeFrameScopes } from "../pro/scopes.js";
+import {
+  AUDIO_EQ_PRESETS,
+  TONE_CURVE_PRESETS,
+  applyParametricEq,
+  applyToneCurve,
+  importSubtitlesToSequence,
+  serializeSubtitles,
+  type AudioEqPresetId,
+  type SubtitleFormat,
+  type ToneCurvePresetId,
+} from "../pro/studio-grade.js";
 import { VEDIT_VERSION, checkForUpdates, downloadAndInstallUpdate } from "../pro/updater.js";
 import {
   fetchRemoteModels,
@@ -703,7 +714,15 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   });
 
   app.get("/api/v1/projects/:id", wrap((_req, res, engine) => {
-    res.json({ project: engine.project });
+    res.json({
+      project: engine.project,
+      history: {
+        canUndo: engine.undoLabels.length > 0,
+        canRedo: engine.redoLabels.length > 0,
+        undoCount: engine.undoLabels.length,
+        redoCount: engine.redoLabels.length,
+      },
+    });
   }, registry));
 
   app.get("/api/v1/projects/:id/timeline", wrap((_req, res, engine) => {
@@ -1292,7 +1311,7 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   }, registry));
 
   // F1: stažení render výstupu
-  app.get("/api/v1/jobs/:jobId/output", (req, res, next) => {
+  const sendJobOutput = (req: Request, res: Response, next: NextFunction) => {
     try {
       const jobId = String(req.params.jobId);
       const engine = registry.findByJob(jobId);
@@ -1305,7 +1324,9 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
     } catch (err) {
       next(err);
     }
-  });
+  };
+  app.get("/api/v1/jobs/:jobId/output", sendJobOutput);
+  app.get("/api/v1/projects/:id/jobs/:jobId/output", sendJobOutput);
 
   app.get("/api/v1/projects/:id/jobs", wrap((_req, res, engine) => {
     res.json({ jobs: engine.project.jobs });
@@ -1937,6 +1958,102 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       badRequest(res, (err as Error).message);
     }
   }, registry));
+
+  // ---- F11: Studio Grade (Tone Curves, 3-Band Audio EQ + Voice Clarity, SRT/VTT Subtitles, Client MP4 Fallback) ----
+  app.get("/api/v1/studio-grade/presets", (_req, res) => {
+    res.json({
+      curves: Object.values(TONE_CURVE_PRESETS),
+      eq: Object.values(AUDIO_EQ_PRESETS),
+    });
+  });
+
+  app.post("/api/v1/projects/:id/clips/:clipId/curves", wrap((req, res, engine) => {
+    try {
+      const result = applyToneCurve(engine, String(req.params.clipId), {
+        preset: typeof req.body?.preset === "string" ? (req.body.preset as ToneCurvePresetId) : undefined,
+        points: Array.isArray(req.body?.points) ? req.body.points : undefined,
+        shadows: req.body?.shadows != null ? Number(req.body.shadows) : undefined,
+        midtones: req.body?.midtones != null ? Number(req.body.midtones) : undefined,
+        highlights: req.body?.highlights != null ? Number(req.body.highlights) : undefined,
+        clarity: req.body?.clarity != null ? Number(req.body.clarity) : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/eq", wrap(async (req, res, engine) => {
+    try {
+      const renderDir = resolvePath(dataDir, "renders");
+      const result = await applyParametricEq(engine, String(req.params.clipId), {
+        preset: typeof req.body?.preset === "string" ? (req.body.preset as AudioEqPresetId) : undefined,
+        lowDb: req.body?.lowDb != null ? Number(req.body.lowDb) : undefined,
+        midDb: req.body?.midDb != null ? Number(req.body.midDb) : undefined,
+        highDb: req.body?.highDb != null ? Number(req.body.highDb) : undefined,
+        voiceClarity: req.body?.voiceClarity != null ? Boolean(req.body.voiceClarity) : undefined,
+        renderFile: Boolean(req.body?.renderToFile || req.body?.renderFile),
+        outDir: renderDir,
+      });
+      res.json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/captions/import", wrap((req, res, engine) => {
+    const text = String(req.body?.text ?? req.body?.content ?? "");
+    if (!text.trim()) return badRequest(res, "Subtitle content (`text`) is required");
+    try {
+      const result = importSubtitlesToSequence(engine, text, {
+        replaceExisting: Boolean(req.body?.replaceExisting),
+        offsetSec: req.body?.offsetSec != null ? Number(req.body.offsetSec) : 0,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.get("/api/v1/projects/:id/captions/export", wrap((req, res, engine) => {
+    const format: SubtitleFormat = req.query.format === "vtt" ? "vtt" : "srt";
+    const text = serializeSubtitles(engine.activeSequence().captions, format);
+    if (req.query.raw === "1") {
+      res.type(format === "vtt" ? "text/vtt" : "text/plain").send(text);
+      return;
+    }
+    res.json({ format, text, count: engine.activeSequence().captions.length });
+  }, registry));
+
+  app.post(
+    "/api/v1/projects/:id/export/client-mp4",
+    express.raw({ type: () => true, limit: "2gb" }),
+    wrap(async (req, res, engine) => {
+      try {
+        const renderDir = resolvePath(dataDir, "renders");
+        await mkdir(renderDir, { recursive: true });
+        const rawName = String(req.query.filename ?? `${engine.project.name || "export"}.mp4`)
+          .replace(/[^a-zA-Z0-9._-]+/g, "_")
+          .replace(/^\.+/, "");
+        const safeName = rawName.toLowerCase().endsWith(".mp4") ? rawName : `${rawName || "export"}.mp4`;
+        const outPath = join(renderDir, `${Date.now()}-${safeName}`);
+        const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+        if (buf.byteLength < 16) {
+          return badRequest(res, "Empty client MP4 payload");
+        }
+        await writeFile(outPath, buf);
+        const job = engine.createJob("render", { clientMux: true, filename: safeName });
+        engine.updateJob(job.id, {
+          status: "done",
+          progress: 1,
+          output: { outPath, sizeBytes: buf.byteLength, encoder: "webcodecs-mp4-muxer" },
+        });
+        res.status(201).json({ job: engine.getJob(job.id), outPath, sizeBytes: buf.byteLength });
+      } catch (err) {
+        badRequest(res, (err as Error).message);
+      }
+    }, registry),
+  );
 
   // Serve built Desktop UI bundle directly on same-origin `http://127.0.0.1:47000/`
   // so Windows WebView2 avoids every cross-origin / Mixed Content / Private Network Access restriction!

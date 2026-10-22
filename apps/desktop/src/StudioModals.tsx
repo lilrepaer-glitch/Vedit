@@ -1,13 +1,15 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import {
+  activeSequence,
   api,
   withToken,
   type ApiSettingsResponse,
   type ExportPresetInfo,
   type Project,
 } from "./api";
+import { exportSequenceToMp4Blob } from "./compositor";
 import { detectPresetByKey, MOBILE_API_PRESETS } from "./mobileRuntime";
-import { IconCheck, IconClose, IconExport, IconRefresh, IconShare } from "./Icons";
+import { IconCheck, IconClose, IconDownload, IconExport, IconRefresh, IconShare } from "./Icons";
 
 // ---------- Clean Universal API Settings Modal (OpenAI, Gemini, Claude, OpenRouter, Groq, DeepSeek, Custom) ----------
 
@@ -74,7 +76,7 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
       if (auto.suggestedModels[0]) setModel(auto.suggestedModels[0]);
       setStatusMsg({
         ok: true,
-        text: `Auto-detected ${auto.label} key (${auto.baseUrl})`,
+        text: `Auto-detected ${auto.label} (${auto.baseUrl})`,
       });
     }
   };
@@ -110,7 +112,6 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
     setTesting(true);
     setStatusMsg(null);
     try {
-      // Save first so runtime config immediately holds the clean key & URL
       const saved = await api.saveApiSettings({
         providerPreset: preset,
         baseUrl,
@@ -312,47 +313,126 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
   );
 });
 
-// ---------- Clean Real Hardware Video Export Modal ----------
+// ---------- Clean Real Hardware Video Export Modal (FFmpeg + Automatic Zero-Dependency WebCodecs `.mp4` Fallback) ----------
 
 export const ExportModal = memo(function ExportModal({
   project,
   exportPresets,
   onClose,
   onFlash,
+  onProjectRefresh,
 }: {
   project: Project;
   exportPresets: ExportPresetInfo[];
   onClose: () => void;
   onFlash: (msg: string) => void;
+  onProjectRefresh?: () => Promise<unknown>;
 }) {
   const presets = exportPresets.length
     ? exportPresets
     : [
         { id: "youtube-1080p", label: "1080p Full HD · 30fps (MP4 H.264)", platform: "Universal", format: "mp4" as const, codec: "h264" as const },
-        { id: "reels-vertical-1080p", label: "1080×1920 Vertical 9:16 · 60fps", platform: "Reels / TikTok", format: "mp4" as const, codec: "h264" as const },
-        { id: "social-720p-fast", label: "720p Fast Share · 30fps", platform: "Mobile", format: "mp4" as const, codec: "h264" as const },
+        { id: "reels-vertical-1080p", label: "1080×1920 Vertical 9:16 · 60fps", platform: "Reels / Shorts", format: "mp4" as const, codec: "h264" as const },
+        { id: "social-720p-fast", label: "720p Fast Share · 30fps", platform: "Fast Mobile", format: "mp4" as const, codec: "h264" as const },
         { id: "cinema-24fps", label: "1080p Cinema · 24fps", platform: "Cinema", format: "mp4" as const, codec: "h264" as const },
       ];
 
   const [preset, setPreset] = useState(presets[0]!.id);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [clientEncoding, setClientEncoding] = useState(false);
+  const [clientPct, setClientPct] = useState(0);
+  const [fallbackTriggeredFor, setFallbackTriggeredFor] = useState<string | null>(null);
 
   const activeJob = useMemo(
-    () => (activeJobId ? project.jobs.find((j) => j.id === activeJobId) : project.jobs[project.jobs.length - 1]),
+    () => (activeJobId ? project.jobs.find((j) => j.id === activeJobId) : undefined),
     [project.jobs, activeJobId],
   );
 
-  const isRunning = activeJob?.status === "queued" || activeJob?.status === "running";
+  // Automatic WebCodecs H.264 + AAC `.mp4` engine fallback on Windows PCs without external `ffmpeg.exe`
+  const runClientHardwareFallback = async () => {
+    setClientEncoding(true);
+    setClientPct(4);
+    try {
+      const seq = activeSequence(project);
+      let width = seq.width || 1920;
+      let height = seq.height || 1080;
+      let fps = seq.fps || 30;
+      let bitrate = 8_500_000;
+      if (preset === "reels-vertical-1080p") {
+        width = 1080;
+        height = 1920;
+        fps = 60;
+        bitrate = 10_000_000;
+      } else if (preset === "social-720p-fast") {
+        const portrait = height > width;
+        width = portrait ? 720 : 1280;
+        height = portrait ? 1280 : 720;
+        bitrate = 5_000_000;
+      } else if (preset === "cinema-24fps") {
+        fps = 24;
+        bitrate = 12_000_000;
+      }
+
+      const encoded = await exportSequenceToMp4Blob({
+        project,
+        sequence: seq,
+        resolveUrl: (assetId) => withToken(`/api/v1/projects/${project.id}/assets/${assetId}/file`),
+        width,
+        height,
+        fps,
+        bitrate,
+        onProgress: (p) => setClientPct(p),
+      });
+
+      const safeName = `${(project.name || "Vedit_Export").replace(/[^a-zA-Z0-9._-]+/g, "_")}.mp4`;
+      const saved = await api.saveClientMp4(encoded.blob, safeName);
+      setActiveJobId(saved.job.id);
+      await onProjectRefresh?.();
+      onFlash("Video exported cleanly to MP4");
+    } catch (err) {
+      onFlash(`Export error: ${(err as Error).message}`);
+    } finally {
+      setClientEncoding(false);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      activeJob &&
+      activeJob.status === "failed" &&
+      fallbackTriggeredFor !== activeJob.id &&
+      !clientEncoding
+    ) {
+      setFallbackTriggeredFor(activeJob.id);
+      void runClientHardwareFallback();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJob?.id, activeJob?.status]);
+
+  const rawProgress = clientEncoding
+    ? clientPct
+    : activeJob
+      ? activeJob.progress <= 1 && activeJob.status !== "queued"
+        ? Math.round(activeJob.progress * 100)
+        : Math.round(activeJob.progress ?? 0)
+      : 0;
+
+  const isRunning = clientEncoding || activeJob?.status === "queued" || activeJob?.status === "running";
 
   const startExport = async () => {
     try {
       const res = await api.exportRender(preset, "auto");
       setActiveJobId(res.jobId);
       onFlash("Rendering video…");
-    } catch (err) {
-      onFlash(`Export error: ${(err as Error).message}`);
+    } catch {
+      await runClientHardwareFallback();
     }
   };
+
+  const outputUrl =
+    activeJob?.status === "done"
+      ? withToken(`/api/v1/projects/${project.id}/jobs/${activeJob.id}/output`)
+      : null;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -361,7 +441,7 @@ export const ExportModal = memo(function ExportModal({
           <div>
             <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Export Video</h2>
             <div style={{ marginTop: 3, fontSize: 12, color: "var(--text-secondary)" }}>
-              Hardware H.264 + AAC MP4 with color grading, transitions, titles &amp; mixed audio
+              Hardware H.264 + AAC MP4 · Color grading, curves, chroma key, transitions &amp; EQ
             </div>
           </div>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
@@ -370,14 +450,14 @@ export const ExportModal = memo(function ExportModal({
         </div>
 
         <div className="modal-body">
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
             <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>Quality &amp; Format</span>
             {presets.map((p) => (
               <div
                 key={p.id}
                 onClick={() => setPreset(p.id)}
                 style={{
-                  padding: "10px 12px",
+                  padding: "9px 12px",
                   borderRadius: 9,
                   cursor: "pointer",
                   background: preset === p.id ? "var(--accent-soft)" : "var(--panel-2)",
@@ -388,8 +468,8 @@ export const ExportModal = memo(function ExportModal({
                 }}
               >
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>{p.label}</div>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                  <div style={{ fontWeight: 600, fontSize: 12.5 }}>{p.label}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 1 }}>
                     {p.platform} · {p.format.toUpperCase()}
                   </div>
                 </div>
@@ -398,7 +478,7 @@ export const ExportModal = memo(function ExportModal({
             ))}
           </div>
 
-          {activeJob && (
+          {(activeJob || clientEncoding) && (
             <div
               style={{
                 padding: 12,
@@ -412,55 +492,81 @@ export const ExportModal = memo(function ExportModal({
             >
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                 <span style={{ fontWeight: 600 }}>
-                  {activeJob.status === "done"
-                    ? "Export complete"
-                    : activeJob.status === "failed"
-                      ? `Failed: ${activeJob.error ?? "Unknown error"}`
-                      : "Encoding frames & audio…"}
+                  {clientEncoding
+                    ? "Encoding hardware H.264 + AAC frames…"
+                    : activeJob?.status === "done"
+                      ? "Export complete"
+                      : activeJob?.status === "failed"
+                        ? `Failed: ${activeJob.error ?? "Unknown error"}`
+                        : "Encoding video & audio…"}
                 </span>
-                <span className="mono">{activeJob.progress ?? 0}%</span>
+                <span className="mono">{Math.min(100, rawProgress)}%</span>
               </div>
               <div style={{ height: 6, borderRadius: 999, background: "var(--panel-2)", overflow: "hidden" }}>
                 <div
                   style={{
                     height: "100%",
-                    width: `${Math.max(2, activeJob.progress ?? 0)}%`,
-                    background: activeJob.status === "done" ? "var(--success)" : "var(--accent)",
-                    transition: "width 0.2s ease",
+                    width: `${Math.max(3, Math.min(100, rawProgress))}%`,
+                    background: activeJob?.status === "done" && !clientEncoding ? "var(--success)" : "var(--accent)",
+                    transition: "width 0.18s ease",
                   }}
                 />
               </div>
-              {activeJob.status === "done" && (
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 11.5, color: "var(--success)" }}>
-                    {String((activeJob.output as { path?: string } | undefined)?.path || "Saved to Gallery / Downloads")}
-                  </span>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <a
-                      href={withToken(`/api/v1/projects/${project.id}/jobs/${activeJob.id}/output`)}
-                      download={`Vedit_Export.mp4`}
-                      style={{
-                        textDecoration: "none",
-                        padding: "6px 11px",
-                        borderRadius: 7,
-                        background: "var(--panel-2)",
-                        border: "1px solid var(--border-strong)",
-                        color: "var(--text)",
-                        fontSize: 12,
-                        fontWeight: 500,
-                      }}
-                    >
-                      Save File
-                    </a>
-                    <button
-                      type="button"
-                      className="btn-accent"
-                      onClick={() => void api.shareExport()}
-                    >
-                      <IconShare size={14} /> Share
-                    </button>
+
+              {outputUrl && !clientEncoding && (
+                <>
+                  <video
+                    src={outputUrl}
+                    controls
+                    playsInline
+                    style={{
+                      width: "100%",
+                      maxHeight: 200,
+                      borderRadius: 8,
+                      background: "#000",
+                      marginTop: 4,
+                    }}
+                  />
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11.5, color: "var(--success)" }}>
+                      {String(
+                        (activeJob?.output as { outPath?: string; path?: string } | undefined)?.outPath ||
+                          (activeJob?.output as { path?: string } | undefined)?.path ||
+                          "MP4 ready",
+                      )}
+                    </span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <a
+                        href={outputUrl}
+                        download={`${(project.name || "Vedit_Export").replace(/\s+/g, "_")}.mp4`}
+                        style={{
+                          textDecoration: "none",
+                          padding: "6px 11px",
+                          borderRadius: 7,
+                          background: "var(--panel-2)",
+                          border: "1px solid var(--border-strong)",
+                          color: "var(--text)",
+                          fontSize: 12,
+                          fontWeight: 500,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                        }}
+                      >
+                        <IconDownload size={13} /> Download MP4
+                      </a>
+                      {Boolean(window.VeditAndroid?.shareLastExport) && (
+                        <button
+                          type="button"
+                          className="btn-accent"
+                          onClick={() => void api.shareExport()}
+                        >
+                          <IconShare size={14} /> Share
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
+                </>
               )}
             </div>
           )}
@@ -472,7 +578,7 @@ export const ExportModal = memo(function ExportModal({
           </button>
           <button type="button" className="btn-primary" onClick={startExport} disabled={isRunning}>
             <IconExport size={14} />
-            {isRunning ? `Rendering (${activeJob?.progress ?? 0}%)…` : "Export MP4"}
+            {isRunning ? `Rendering (${Math.min(100, rawProgress)}%)…` : "Export MP4"}
           </button>
         </div>
       </div>
