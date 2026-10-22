@@ -9,7 +9,7 @@ import {
   type Project,
 } from "./api";
 
-// ---------- CapCut-Clean API Key, Base URL & Model Configuration Modal ----------
+// ---------- Vedit Studio API Key, Base URL & Model Configuration Modal ----------
 
 export const ApiSettingsModal = memo(function ApiSettingsModal({
   initial,
@@ -365,7 +365,7 @@ export const ApiSettingsModal = memo(function ApiSettingsModal({
   );
 });
 
-// ---------- CapCut Export & Render Drawer Modal ----------
+// ---------- Vedit Studio Export & Render Drawer Modal ----------
 
 export const ExportModal = memo(function ExportModal({
   project,
@@ -510,7 +510,7 @@ export const ExportModal = memo(function ExportModal({
   );
 });
 
-// ---------- CapCut Searchable Effects, LUTs, Transitions & Quick-Actions Browser ----------
+// ---------- Vedit Studio Searchable Effects, LUTs, Transitions & Quick-Actions Browser ----------
 
 export interface CatalogItem {
   id: string;
@@ -525,7 +525,7 @@ export interface CatalogItem {
   run: () => void;
 }
 
-export const CapCutCatalogBrowser = memo(function CapCutCatalogBrowser({
+export const StudioCatalogBrowser = memo(function StudioCatalogBrowser({
   title,
   query,
   items,
@@ -580,17 +580,17 @@ export const CapCutCatalogBrowser = memo(function CapCutCatalogBrowser({
         </div>
       )}
 
-      <div className="capcut-card-grid">
+      <div className="studio-card-grid">
         {filtered.map((item) => (
           <button
             key={item.id}
             type="button"
-            className="capcut-card"
+            className="studio-card"
             onClick={item.run}
             title={`${item.title} — ${item.subtitle}`}
           >
             <div
-              className="capcut-card-thumb"
+              className="studio-card-thumb"
               style={{
                 background: item.gradient,
               }}
@@ -600,7 +600,7 @@ export const CapCutCatalogBrowser = memo(function CapCutCatalogBrowser({
                   src={item.thumbUrl}
                   alt=""
                   loading="lazy"
-                  className="capcut-card-img"
+                  className="studio-card-img"
                   style={{ filter: item.previewFilter }}
                 />
               )}
@@ -633,11 +633,11 @@ export const CapCutCatalogBrowser = memo(function CapCutCatalogBrowser({
                   }}
                 />
               )}
-              <span className="capcut-card-badge">{item.badge}</span>
-              <span className="capcut-card-plus">+</span>
+              <span className="studio-card-badge">{item.badge}</span>
+              <span className="studio-card-plus">+</span>
             </div>
-            <div className="capcut-card-title">{item.title}</div>
-            <div className="capcut-card-sub">{item.subtitle}</div>
+            <div className="studio-card-title">{item.title}</div>
+            <div className="studio-card-sub">{item.subtitle}</div>
           </button>
         ))}
       </div>
@@ -763,7 +763,7 @@ export const ShowcaseModal = memo(function ShowcaseModal({
                 {[
                   {
                     src: "/showcase/shot-01-editor.jpg",
-                    title: "CapCut 4-Zone Multi-Track Editor",
+                    title: "Vedit Studio 4-Zone Multi-Track Editor",
                     sub: "60 FPS timeline, filmstrips, waveforms & curves",
                   },
                   {
@@ -833,7 +833,7 @@ export const ShowcaseModal = memo(function ShowcaseModal({
                     style={{ width: "100%", height: "100%", objectFit: "cover", filter: c.filter, display: "block" }}
                   />
                   <span
-                    className="capcut-card-badge"
+                    className="studio-card-badge"
                     style={{ position: "absolute", top: 8, left: 8 }}
                   >
                     {c.badge}

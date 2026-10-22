@@ -9,7 +9,7 @@ import { startServer } from "../src/server/index.js";
 import { ffmpegPath, run } from "../src/core/media.js";
 import { compareSemver } from "../src/pro/updater.js";
 
-describe("Windows Desktop CapCut UI, Custom API/Model/BaseURL & NSIS Self-Updater (v0.6.0)", () => {
+describe("Windows Desktop Vedit Studio UI, Custom API/Model/BaseURL & NSIS Self-Updater (v0.6.2)", () => {
   it("persists custom API key, Base URL & Model, fetches /models, tests chat completion, drives LLM Copilot & toggles native fullscreen", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "vedit-api-cfg-"));
     // Spin up local mock OpenAI-compatible server (`/v1/models` + `/v1/chat/completions`)

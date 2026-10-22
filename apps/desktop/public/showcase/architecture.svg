@@ -27,8 +27,8 @@
   <circle cx="190" cy="60" r="140" fill="#00e5ff" opacity="0.05"/>
   <circle cx="980" cy="280" r="170" fill="#3b82f6" opacity="0.06"/>
 
-  <text x="42" y="48" fill="#00e5ff" font-family="Segoe UI, Inter, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="2">VEDIT STUDIO v0.6.1 ARCHITECTURE</text>
-  <text x="42" y="76" fill="#f1f5f9" font-family="Segoe UI, Inter, system-ui, sans-serif" font-size="23" font-weight="800">CapCut-Clean Desktop NLE  ×  Custom LLM Copilot  ×  Hardware FFmpeg Engine</text>
+  <text x="42" y="48" fill="#00e5ff" font-family="Segoe UI, Inter, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="2">VEDIT STUDIO v0.6.2 ARCHITECTURE</text>
+  <text x="42" y="76" fill="#f1f5f9" font-family="Segoe UI, Inter, system-ui, sans-serif" font-size="23" font-weight="800">Vedit Studio Desktop NLE  ×  Custom LLM Copilot  ×  Hardware FFmpeg Engine</text>
 
   <!-- Connector arrows -->
   <line x1="258" y1="196" x2="298" y2="196" stroke="url(#cyanGlow)" stroke-width="3" stroke-dasharray="5 4"/>

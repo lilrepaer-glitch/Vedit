@@ -51,7 +51,7 @@ textarea {
   color: var(--muted);
 }
 
-/* ---- CapCut Top Bar (Single Crisp Row, Zero Wrapping Clutter) ---- */
+/* ---- Vedit Studio Top Bar (Single Crisp Row, Zero Wrapping Clutter) ---- */
 .toolbar {
   height: 44px;
   min-height: 44px;
@@ -217,7 +217,7 @@ textarea:focus {
   border-color: var(--accent);
 }
 
-/* ---- CapCut 4-Zone Resizable Studio Workspace ---- */
+/* ---- Vedit Studio 4-Zone Resizable Studio Workspace ---- */
 .workspace-upper {
   display: flex;
   flex: 1;
@@ -227,7 +227,7 @@ textarea:focus {
   gap: 0;
 }
 
-.capcut-rail {
+.studio-rail {
   width: 66px;
   flex: none;
   background: var(--rail);
@@ -368,7 +368,7 @@ textarea:focus {
   width: 96px;
 }
 
-/* ---- Panels & CapCut Preset Cards ---- */
+/* ---- Panels & Vedit Studio Preset Cards ---- */
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -409,13 +409,13 @@ textarea:focus {
   font-size: 11.5px;
 }
 
-.capcut-card-grid {
+.studio-card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
   gap: 8px;
 }
 
-.capcut-card {
+.studio-card {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -428,12 +428,12 @@ textarea:focus {
   white-space: normal;
 }
 
-.capcut-card:hover {
+.studio-card:hover {
   border-color: var(--accent);
   transform: translateY(-1px);
 }
 
-.capcut-card-thumb {
+.studio-card-thumb {
   height: 68px;
   border-radius: 6px;
   position: relative;
@@ -444,7 +444,7 @@ textarea:focus {
   padding: 5px 6px;
 }
 
-.capcut-card-img {
+.studio-card-img {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -454,11 +454,11 @@ textarea:focus {
   transition: transform 0.22s ease;
 }
 
-.capcut-card:hover .capcut-card-img {
+.studio-card:hover .studio-card-img {
   transform: scale(1.08);
 }
 
-.capcut-card-badge {
+.studio-card-badge {
   position: relative;
   z-index: 2;
   font-size: 9.5px;
@@ -471,7 +471,7 @@ textarea:focus {
   text-transform: uppercase;
 }
 
-.capcut-card-plus {
+.studio-card-plus {
   position: relative;
   z-index: 2;
   width: 21px;
@@ -498,7 +498,7 @@ textarea:focus {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
-.capcut-card-title {
+.studio-card-title {
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text);
@@ -507,7 +507,7 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.capcut-card-sub {
+.studio-card-sub {
   font-size: 10.5px;
   color: var(--muted);
   overflow: hidden;
@@ -745,7 +745,7 @@ textarea:focus {
   overflow: auto;
 }
 
-/* ---- Multi-Track CapCut Timeline (60 FPS GPU Playhead) ---- */
+/* ---- Multi-Track Vedit Studio Timeline (60 FPS GPU Playhead) ---- */
 .timeline-panel {
   display: flex;
   flex-direction: column;
