@@ -340,6 +340,13 @@ async function main() {
     fs.mkdirSync(d, { recursive: true });
   }
 
+  for (const bin of [tools.aapt2, tools.zipalign]) {
+    try {
+      fs.chmodSync(bin, 0o755);
+    } catch {
+      /* ignore if read-only fs */
+    }
+  }
   console.log("▶ [3/6] Compiling Android resources & binary AndroidManifest.xml with Google aapt2…");
   execFileSync(tools.aapt2, ["compile", "--dir", RES_DIR, "-o", compiledResZip], { stdio: "inherit" });
   execFileSync(

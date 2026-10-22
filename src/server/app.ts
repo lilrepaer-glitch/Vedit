@@ -551,7 +551,19 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
   const dataDir = opts.dataDir ?? resolvePath(process.cwd(), ".vedit");
   void initApiSettings(dataDir).catch(() => undefined);
   const app = express();
-  app.use(express.json({ limit: "10mb" }));
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Range");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges");
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+  app.use(express.json({ limit: "25mb" }));
 
   // CORS + Chromium Private Network Access — desktop Tauri WebView2 (`http(s)://tauri.localhost` or same-origin `http://127.0.0.1:47000`)
   app.use((req, res, next) => {
@@ -716,6 +728,67 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
     // F1: skutečný probe, pokud soubor existuje
     if (kind !== "generated") await probeIntoAsset(engine, asset.id, asset.path);
     res.status(201).json({ asset: engine.findAsset(asset.id) });
+  }, registry));
+
+  // F1 + v0.8.0: Direct HTTP 206 Partial Content Range streaming for instant 60 FPS GPU video/audio playback
+  app.get("/api/v1/projects/:id/assets/:assetId/file", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.params.assetId));
+    const st = await stat(asset.path);
+    const total = st.size;
+    const ext = extname(asset.path).toLowerCase();
+    const mimeMap: Record<string, string> = {
+      ".mp4": "video/mp4",
+      ".m4v": "video/mp4",
+      ".mov": "video/quicktime",
+      ".webm": "video/webm",
+      ".mkv": "video/x-matroska",
+      ".mp3": "audio/mpeg",
+      ".wav": "audio/wav",
+      ".m4a": "audio/mp4",
+      ".aac": "audio/aac",
+      ".ogg": "audio/ogg",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+    };
+    const contentType = mimeMap[ext] ?? "application/octet-stream";
+    res.setHeader("Accept-Ranges", "bytes");
+    const range = req.headers.range;
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range);
+      const start = m?.[1] ? parseInt(m[1], 10) : 0;
+      const end = m?.[2] ? Math.min(total - 1, parseInt(m[2], 10)) : total - 1;
+      if (start >= total || start > end) {
+        res.status(416).setHeader("Content-Range", `bytes */${total}`).end();
+        return;
+      }
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+      res.setHeader("Content-Length", String(end - start + 1));
+      res.type(contentType);
+      createReadStream(asset.path, { start, end }).pipe(res);
+      return;
+    }
+    res.setHeader("Content-Length", String(total));
+    res.type(contentType);
+    createReadStream(asset.path).pipe(res);
+  }, registry));
+
+  app.get("/api/v1/projects/:id/assets/:assetId/thumbnail", wrap(async (req, res, engine) => {
+    const asset = engine.findAsset(String(req.params.assetId));
+    if (asset.kind === "image" && (await fileExists(asset.path))) {
+      createReadStream(asset.path).pipe(res.type(extname(asset.path) || "image/jpeg"));
+      return;
+    }
+    try {
+      const jpeg = await extractFrame(asset.path, Math.min(0.5, (asset.duration ?? 0) * 0.25), { width: 320 });
+      res.type("image/jpeg").send(jpeg);
+    } catch {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180"><rect width="320" height="180" fill="#18181b"/><text x="160" y="95" fill="#a1a1aa" font-family="sans-serif" font-size="14" text-anchor="middle">${asset.name.replace(/[<>&"]/g, "")}</text></svg>`;
+      res.type("image/svg+xml").send(svg);
+    }
   }, registry));
 
   // F1: média — reálné snímky, waveform, proxy
@@ -918,16 +991,38 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
 
   app.post("/api/v1/projects/:id/clips/:clipId/effects", wrap((req, res, engine) => {
     try {
+      const clipId = String(req.params.clipId);
+      const effectType = String(req.body?.type ?? "effect");
+      const trackId = req.body?.trackId ? String(req.body.trackId) : undefined;
+      if (req.body?.replace) {
+        for (const tr of engine.activeSequence().tracks) {
+          const foundClip = tr.clips.find((c) => c.id === clipId);
+          if (foundClip) {
+            foundClip.effects = foundClip.effects.filter((prev) => prev.type !== effectType);
+          }
+        }
+      }
       const effect = engine.addEffect(
-        String(req.params.clipId),
-        String(req.body?.type ?? "effect"),
+        clipId,
+        effectType,
         req.body?.params ?? {},
-        req.body?.trackId ? String(req.body.trackId) : undefined,
+        trackId,
       );
       res.status(201).json({ effect });
     } catch (err) {
       badRequest(res, (err as Error).message);
     }
+  }, registry));
+
+  app.patch("/api/v1/projects/:id/sequence", wrap((req, res, engine) => {
+    const seq = engine.activeSequence();
+    const { width, height, fps, name, background } = req.body ?? {};
+    if (width != null) seq.width = Math.max(16, Math.round(Number(width) / 2) * 2);
+    if (height != null) seq.height = Math.max(16, Math.round(Number(height) / 2) * 2);
+    if (fps != null) seq.fps = Math.max(1, Math.min(120, Number(fps)));
+    if (typeof name === "string" && name.trim()) seq.name = name.trim();
+    if (typeof background === "string") (seq as unknown as Record<string, unknown>).background = background;
+    res.json({ sequence: seq });
   }, registry));
 
   // captions

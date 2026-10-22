@@ -120,7 +120,7 @@ describe("F8 — Cinema 3D .cube LUTs, 2-Pass VidStab, PiP/Split Layouts, GIF Pa
     const auth = <T extends request.Test>(t: T) => t.set("Authorization", "Bearer dev");
 
     const health = await request(app).get("/api/v1/health").expect(200);
-    expect(health.body.version).toBe("0.7.0");
+    expect(health.body.version).toBe("0.8.0");
 
     const created = await auth(request(app).post("/api/v1/projects").send({ name: "F8 Studio", sample: false })).expect(201);
     const pid = created.body.project.id as string;

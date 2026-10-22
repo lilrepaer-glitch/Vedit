@@ -8,9 +8,15 @@ export interface Clip {
   duration: number;
   in: number;
   out: number;
+  speed?: number;
+  gainDb?: number;
+  fadeIn?: number;
+  fadeOut?: number;
+  reversed?: boolean;
+  transitionIn?: { kind: string; duration: number } | null;
   transform: { x: number; y: number; scaleX: number; scaleY: number; rotation: number; opacity: number };
   keyframes: Array<{ time: number; property: string; value: number | string; easing?: string }>;
-  effects: Array<{ id: string; type: string; params: Record<string, unknown> }>;
+  effects: Array<{ id: string; type: string; enabled?: boolean; params: Record<string, unknown> }>;
 }
 
 export interface Track {
@@ -52,6 +58,7 @@ export interface Caption {
   text: string;
   start: number;
   end: number;
+  style?: Record<string, unknown>;
 }
 
 export interface ReviewComment {
@@ -98,24 +105,48 @@ export interface ExportPresetInfo {
   codec: "h264" | "h265" | "prores" | "vp9" | "gif";
 }
 
+export interface Sequence {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
+  background?: string;
+  tracks: Track[];
+  captions: Caption[];
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+}
+
 export interface Project {
   id: string;
   name: string;
   assets: Asset[];
-  sequences: Array<{
-    id: string;
-    name: string;
-    width: number;
-    height: number;
-    fps: number;
-    tracks: Track[];
-    captions: Caption[];
-  }>;
+  sequences: Sequence[];
   activeSequenceId: string;
   jobs: Array<{ id: string; type: string; status: string; progress: number; error?: string; output?: Record<string, unknown> }>;
   comments?: ReviewComment[];
   markers?: TimelineMarker[];
   snapshots?: SnapshotInfo[];
+  history?: { undoDepth: number; redoDepth: number };
+}
+
+export function activeSequence(project: Project): Sequence {
+  return (
+    project.sequences.find((s) => s.id === project.activeSequenceId) ??
+    project.sequences[0] ?? {
+      id: "seq-default",
+      name: "Main Sequence",
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      tracks: [],
+      captions: [],
+    }
+  );
 }
 
 export interface GenProviderInfo {
@@ -323,6 +354,18 @@ const rawApi = {
     }),
   addClip: (input: { trackId: string; assetId: string; start: number; duration?: number; in?: number; out?: number }) =>
     req<{ clip: Clip }>("POST", `/projects/${currentId}/clips`, input),
+  moveClip: (clipId: string, start: number, trackId?: string, fromTrackId?: string) =>
+    req<{ clip: Clip }>("POST", `/projects/${currentId}/clips/${clipId}/move`, {
+      start,
+      ...(trackId ? { trackId } : {}),
+      ...(fromTrackId ? { fromTrackId } : {}),
+    }),
+  trimClip: (clipId: string, edge: "start" | "end", time: number, trackId?: string) =>
+    req<{ clip: Clip }>("POST", `/projects/${currentId}/clips/${clipId}/trim`, {
+      edge,
+      time,
+      ...(trackId ? { trackId } : {}),
+    }),
   splitClip: (clipId: string, at: number) =>
     req<{ left: Clip; right: Clip }>("POST", `/projects/${currentId}/clips/${clipId}/split`, { at }),
   deleteClip: (clipId: string, ripple = false) =>
@@ -331,8 +374,23 @@ const rawApi = {
     req<{ clip: Clip }>("PATCH", `/projects/${currentId}/clips/${clipId}`, patch),
   applyPreset: (clipId: string, preset: string) =>
     req<{ clip: Clip }>("POST", `/projects/${currentId}/clips/${clipId}/animation`, { preset }),
-  addCaption: (input: { text: string; start: number; end: number }) =>
+  addCaption: (input: { text: string; start: number; end: number; style?: Record<string, unknown> }) =>
     req<{ caption: Caption }>("POST", `/projects/${currentId}/captions`, input),
+  updateCaption: (captionId: string, patch: { text?: string; start?: number; end?: number; style?: Record<string, unknown> }) =>
+    req<{ caption: Caption }>(`PATCH`, `/projects/${currentId}/captions/${captionId}`, patch),
+  deleteCaption: (captionId: string) =>
+    req<{ ok: boolean }>(`DELETE`, `/projects/${currentId}/captions/${captionId}`),
+  updateSequence: (patch: { width?: number; height?: number; fps?: number; name?: string; background?: string }) =>
+    req<{ sequence: Sequence }>(`PATCH`, `/projects/${currentId}/sequence`, patch),
+  setClipEffect: (clipId: string, type: string, params: Record<string, unknown>) =>
+    req<{ effect: { id: string } }>(`POST`, `/projects/${currentId}/clips/${clipId}/effects`, {
+      type,
+      params,
+      replace: true,
+    }),
+  addKeyframes: (clipId: string, keyframes: Array<{ time: number; property: string; value: number; easing?: string }>) =>
+    req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/keyframes`, { keyframes }),
+  shareExport: () => Promise.resolve({ shared: Boolean(window.VeditAndroid?.shareLastExport?.()) }),
   undo: () => req<{ ok: boolean }>("POST", `/projects/${currentId}/undo`),
   redo: () => req<{ ok: boolean }>("POST", `/projects/${currentId}/redo`),
   genProviders: () => req<{ providers: GenProviderInfo[]; cameraMoves: CameraMoveInfo[] }>("GET", "/gen/providers"),

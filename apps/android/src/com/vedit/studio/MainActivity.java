@@ -1,10 +1,13 @@
 package com.vedit.studio;
 
+import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -18,6 +21,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -28,44 +32,75 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
 
+/**
+ * Native Android shell for Vedit Studio (v0.8.0).
+ *
+ * Provides:
+ *  - Local zero-latency HTTPS asset serving (`https://appassets.vedit.studio/*`)
+ *  - CORS-free native HTTP/HTTPS API bridge (`VeditAndroid.httpRequest`) so every AI API
+ *    provider (OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Groq, NVIDIA, local LAN)
+ *    works reliably on real phones with zero WebView CORS preflight errors
+ *  - Multi-file native Android Gallery / Document picker (Videos, Audio, Photos)
+ *  - Microphone & Camera WebRTC permission bridge for in-app Voiceover recording
+ *  - Direct MediaStore export into Android Gallery (`Movies/Vedit/`) + native Share Sheet
+ */
 public class MainActivity extends Activity {
-    private static final int FILE_CHOOSER_REQ = 7001;
-    private static final String APP_HOST = "appassets.vedit.studio";
+    private static final String VIRTUAL_HOST = "appassets.vedit.studio";
+    private static final int FILE_CHOOSER_REQ = 4101;
+    private static final int RUNTIME_PERM_REQ = 4102;
 
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
+    private PermissionRequest pendingWebPermission;
     private boolean immersiveFullscreen = false;
+    private Uri lastExportedUri = null;
+    private String lastExportedMime = "video/mp4";
 
+    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
 
         Window win = getWindow();
-        win.setStatusBarColor(Color.parseColor("#0B0D11"));
-        win.setNavigationBarColor(Color.parseColor("#0B0D11"));
-        win.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        win.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        win.setStatusBarColor(Color.parseColor("#09090B"));
+        win.setNavigationBarColor(Color.parseColor("#09090B"));
 
         webView = new WebView(this);
-        webView.setBackgroundColor(Color.parseColor("#0B0D11"));
+        webView.setBackgroundColor(Color.parseColor("#09090B"));
 
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setDatabaseEnabled(true);
-        s.setMediaPlaybackRequiresUserGesture(false);
-        s.setAllowFileAccess(true);
-        s.setAllowContentAccess(true);
-        s.setLoadWithOverviewMode(true);
-        s.setUseWideViewPort(true);
-        s.setUserAgentString(s.getUserAgentString() + " VedStudioAPK/0.7.0");
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setSupportZoom(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        settings.setUserAgentString(settings.getUserAgentString() + " VedStudioAPK/0.8.0");
 
         webView.addJavascriptInterface(new AndroidBridge(), "VeditAndroid");
 
@@ -73,70 +108,129 @@ public class MainActivity extends Activity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
-                if (uri != null && APP_HOST.equalsIgnoreCase(uri.getHost())) {
-                    String path = uri.getPath();
-                    if (path == null || path.isEmpty() || "/".equals(path)) {
-                        path = "/index.html";
+                if (uri != null && VIRTUAL_HOST.equalsIgnoreCase(uri.getHost())) {
+                    String rawPath = uri.getPath();
+                    if (rawPath == null || rawPath.isEmpty() || "/".equals(rawPath)) {
+                        rawPath = "/index.html";
                     }
-                    String assetPath = "public" + path;
+                    String assetPath = "public" + rawPath;
                     try {
                         InputStream stream = getAssets().open(assetPath);
-                        Map<String, String> headers = new HashMap<String, String>();
+                        String mime = guessMimeType(rawPath);
+                        Map<String, String> headers = new HashMap<>();
                         headers.put("Access-Control-Allow-Origin", "*");
                         headers.put("Cache-Control", "no-cache");
-                        return new WebResourceResponse(guessMime(assetPath), "UTF-8", 200, "OK", headers, stream);
-                    } catch (Exception ignored) {
-                        // Fall through if not a static asset
+                        return new WebResourceResponse(mime, "UTF-8", 200, "OK", headers, stream);
+                    } catch (IOException ignored) {
+                        Map<String, String> headers = new HashMap<>();
+                        headers.put("Access-Control-Allow-Origin", "*");
+                        return new WebResourceResponse(
+                            "text/plain",
+                            "UTF-8",
+                            404,
+                            "Not Found",
+                            headers,
+                            new ByteArrayInputStream("Not Found".getBytes(StandardCharsets.UTF_8))
+                        );
                     }
                 }
                 return super.shouldInterceptRequest(view, request);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri == null) return false;
+                if (VIRTUAL_HOST.equalsIgnoreCase(uri.getHost())) {
+                    return false;
+                }
+                try {
+                    Intent external = new Intent(Intent.ACTION_VIEW, uri);
+                    startActivity(external);
+                } catch (Exception ignored) {
+                }
+                return true;
             }
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (Build.VERSION.SDK_INT >= 23
+                            && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            pendingWebPermission = request;
+                            requestPermissions(
+                                new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA},
+                                RUNTIME_PERM_REQ
+                            );
+                        } else {
+                            request.grant(request.getResources());
+                        }
+                    }
+                });
+            }
+
+            @Override
             public boolean onShowFileChooser(
-                WebView webView,
-                ValueCallback<Uri[]> callback,
+                WebView view,
+                ValueCallback<Uri[]> filePathCb,
                 FileChooserParams fileChooserParams
             ) {
                 if (filePathCallback != null) {
                     filePathCallback.onReceiveValue(null);
                 }
-                filePathCallback = callback;
+                filePathCallback = filePathCb;
 
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("*/*");
-                intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"video/*", "audio/*", "image/*"});
                 intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+                String[] acceptTypes = fileChooserParams != null ? fileChooserParams.getAcceptTypes() : null;
+                if (acceptTypes != null && acceptTypes.length == 1
+                    && acceptTypes[0] != null && !acceptTypes[0].isEmpty() && !acceptTypes[0].contains(",")) {
+                    intent.setType(acceptTypes[0]);
+                } else {
+                    intent.setType("*/*");
+                    intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"video/*", "audio/*", "image/*"});
+                }
+
                 try {
-                    startActivityForResult(Intent.createChooser(intent, "Select Video, Audio or Photo"), FILE_CHOOSER_REQ);
+                    startActivityForResult(Intent.createChooser(intent, "Select media"), FILE_CHOOSER_REQ);
                     return true;
                 } catch (Exception e) {
                     filePathCallback = null;
                     return false;
                 }
             }
-
-            @Override
-            public void onPermissionRequest(final PermissionRequest request) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        request.grant(request.getResources());
-                    }
-                });
-            }
         });
 
         setContentView(webView);
-        webView.loadUrl("https://" + APP_HOST + "/index.html");
+        webView.loadUrl("https://" + VIRTUAL_HOST + "/index.html");
     }
 
-    private String guessMime(String path) {
-        String lower = path.toLowerCase();
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == RUNTIME_PERM_REQ && pendingWebPermission != null) {
+            final PermissionRequest req = pendingWebPermission;
+            pendingWebPermission = null;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        req.grant(req.getResources());
+                    } catch (Exception ignored) {
+                    }
+                }
+            });
+        }
+    }
+
+    private String guessMimeType(String path) {
+        String lower = path.toLowerCase(Locale.US);
         if (lower.endsWith(".html")) return "text/html";
         if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "text/javascript";
         if (lower.endsWith(".css")) return "text/css";
@@ -149,6 +243,12 @@ public class MainActivity extends Activity {
         if (lower.endsWith(".webm")) return "video/webm";
         if (lower.endsWith(".mp3")) return "audio/mpeg";
         if (lower.endsWith(".wav")) return "audio/wav";
+        if (lower.endsWith(".woff2")) return "font/woff2";
+        String ext = MimeTypeMap.getFileExtensionFromUrl(lower);
+        if (ext != null) {
+            String detected = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+            if (detected != null) return detected;
+        }
         return "application/octet-stream";
     }
 
@@ -226,6 +326,17 @@ public class MainActivity extends Activity {
         super.onBackPressed();
     }
 
+    private static byte[] readAllBytes(InputStream is) throws IOException {
+        if (is == null) return new byte[0];
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int n;
+        while ((n = is.read(chunk)) != -1) {
+            buffer.write(chunk, 0, n);
+        }
+        return buffer.toByteArray();
+    }
+
     public class AndroidBridge {
         @JavascriptInterface
         public boolean isAndroid() {
@@ -233,82 +344,210 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public String getVersion() {
+            return "0.8.0";
+        }
+
+        /**
+         * Native HTTP/HTTPS request executed directly by Android's network stack.
+         * Completely bypasses WebView browser CORS / OPTIONS preflight blocks so any
+         * OpenAI, Anthropic, Google Gemini, OpenRouter, DeepSeek, Groq, NVIDIA, or custom
+         * API endpoint works natively on mobile devices.
+         */
+        @JavascriptInterface
+        public String httpRequest(String method, String urlString, String headersJson, String body) {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(urlString);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(true);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(45000);
+                conn.setRequestMethod(method != null && !method.isEmpty() ? method.toUpperCase(Locale.US) : "GET");
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("User-Agent", "VeditStudio/0.8.0 (Android)");
+
+                if (headersJson != null && !headersJson.isEmpty()) {
+                    JSONObject headersObj = new JSONObject(headersJson);
+                    Iterator<String> keys = headersObj.keys();
+                    while (keys.hasNext()) {
+                        String key = keys.next();
+                        String value = headersObj.optString(key, "");
+                        if (!value.isEmpty()) {
+                            conn.setRequestProperty(key, value);
+                        }
+                    }
+                }
+
+                if (body != null && !body.isEmpty()
+                    && !"GET".equalsIgnoreCase(conn.getRequestMethod())
+                    && !"HEAD".equalsIgnoreCase(conn.getRequestMethod())) {
+                    conn.setDoOutput(true);
+                    byte[] payload = body.getBytes(StandardCharsets.UTF_8);
+                    conn.setFixedLengthStreamingMode(payload.length);
+                    OutputStream os = conn.getOutputStream();
+                    os.write(payload);
+                    os.flush();
+                    os.close();
+                }
+
+                int status = conn.getResponseCode();
+                InputStream respStream = (status >= 200 && status < 400)
+                    ? conn.getInputStream()
+                    : conn.getErrorStream();
+                byte[] respBytes = readAllBytes(respStream);
+                if (respStream != null) respStream.close();
+
+                JSONObject result = new JSONObject();
+                result.put("ok", status >= 200 && status < 300);
+                result.put("status", status);
+                result.put("statusText", conn.getResponseMessage() != null ? conn.getResponseMessage() : "");
+                result.put("body", new String(respBytes, StandardCharsets.UTF_8));
+                return result.toString();
+            } catch (Exception e) {
+                try {
+                    JSONObject err = new JSONObject();
+                    err.put("ok", false);
+                    err.put("status", 0);
+                    err.put("statusText", e.getClass().getSimpleName());
+                    err.put("body", "");
+                    err.put("error", e.getMessage() != null ? e.getMessage() : e.toString());
+                    return err.toString();
+                } catch (Exception ignored) {
+                    return "{\"ok\":false,\"status\":0,\"error\":\"Network error\"}";
+                }
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }
+
+        @JavascriptInterface
         public boolean toggleFullscreen(String mode) {
-            boolean target;
-            if ("on".equalsIgnoreCase(mode)) target = true;
-            else if ("off".equalsIgnoreCase(mode)) target = false;
-            else if ("state".equalsIgnoreCase(mode)) return immersiveFullscreen;
-            else target = !immersiveFullscreen;
-            applyImmersiveMode(target);
-            return target;
+            boolean next;
+            if ("state".equalsIgnoreCase(mode)) {
+                return immersiveFullscreen;
+            } else if ("on".equalsIgnoreCase(mode)) {
+                next = true;
+            } else if ("off".equalsIgnoreCase(mode)) {
+                next = false;
+            } else {
+                next = !immersiveFullscreen;
+            }
+            applyImmersiveMode(next);
+            return next;
+        }
+
+        @JavascriptInterface
+        public void openExternalUrl(final String url) {
+            if (url == null || url.isEmpty()) return;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                        startActivity(intent);
+                    } catch (Exception ignored) {
+                    }
+                }
+            });
         }
 
         @JavascriptInterface
         public String saveExportBase64(String fileName, String mimeType, String base64Data) {
             try {
-                byte[] bytes = Base64.decode(base64Data, Base64.DEFAULT);
-                Uri savedUri = null;
+                byte[] raw = Base64.decode(base64Data, Base64.DEFAULT);
+                String safeMime = (mimeType == null || mimeType.isEmpty()) ? "video/mp4" : mimeType;
+                boolean isVideo = safeMime.startsWith("video/");
+                boolean isImage = safeMime.startsWith("image/");
+
                 if (Build.VERSION.SDK_INT >= 29) {
                     ContentResolver resolver = getContentResolver();
                     ContentValues values = new ContentValues();
-                    values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-                    values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
-                    values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Vedit");
-                    savedUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-                    if (savedUri != null) {
-                        OutputStream os = resolver.openOutputStream(savedUri);
-                        if (os != null) {
-                            os.write(bytes);
-                            os.flush();
-                            os.close();
-                        }
+                    values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+                    values.put(MediaStore.MediaColumns.MIME_TYPE, safeMime);
+
+                    Uri collection;
+                    String displayFolder;
+                    if (isVideo) {
+                        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/Vedit");
+                        collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+                        displayFolder = "Gallery (Movies/Vedit/" + fileName + ")";
+                    } else if (isImage) {
+                        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Vedit");
+                        collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                        displayFolder = "Gallery (Pictures/Vedit/" + fileName + ")";
+                    } else {
+                        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Vedit");
+                        collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                        displayFolder = "Downloads/Vedit/" + fileName;
                     }
-                } else {
-                    File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Vedit");
-                    if (!dir.exists()) dir.mkdirs();
-                    File out = new File(dir, fileName);
-                    FileOutputStream fos = new FileOutputStream(out);
-                    fos.write(bytes);
-                    fos.flush();
-                    fos.close();
+
+                    Uri target = resolver.insert(collection, values);
+                    if (target != null) {
+                        OutputStream out = resolver.openOutputStream(target);
+                        if (out != null) {
+                            out.write(raw);
+                            out.flush();
+                            out.close();
+                        }
+                        lastExportedUri = target;
+                        lastExportedMime = safeMime;
+                        notifyToast("Saved to " + displayFolder);
+                        return displayFolder;
+                    }
                 }
 
-                final String msg = "Saved to Downloads/Vedit/" + fileName;
-                final Uri shareUri = savedUri;
-                final String shareMime = mimeType;
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
-                        if (shareUri != null) {
-                            Intent share = new Intent(Intent.ACTION_SEND);
-                            share.setType(shareMime);
-                            share.putExtra(Intent.EXTRA_STREAM, shareUri);
-                            share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                            startActivity(Intent.createChooser(share, "Share Exported Video"));
-                        }
-                    }
-                });
-                return "Downloads/Vedit/" + fileName;
-            } catch (final Exception e) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(MainActivity.this, "Save failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                    }
-                });
-                return fileName;
+                File pubDir = new File(
+                    Environment.getExternalStoragePublicDirectory(
+                        isVideo ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_DOWNLOADS
+                    ),
+                    "Vedit"
+                );
+                if (!pubDir.exists()) pubDir.mkdirs();
+                File outFile = new File(pubDir, fileName);
+                FileOutputStream fos = new FileOutputStream(outFile);
+                fos.write(raw);
+                fos.flush();
+                fos.close();
+                lastExportedUri = Uri.fromFile(outFile);
+                lastExportedMime = safeMime;
+                notifyToast("Saved to " + outFile.getAbsolutePath());
+                return outFile.getAbsolutePath();
+            } catch (Exception e) {
+                return "Save error: " + e.getMessage();
             }
         }
 
         @JavascriptInterface
-        public void openExternalUrl(String url) {
-            try {
-                Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(view);
-            } catch (Exception ignored) {
-            }
+        public boolean shareLastExport() {
+            if (lastExportedUri == null) return false;
+            final Uri target = lastExportedUri;
+            final String mime = lastExportedMime;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Intent share = new Intent(Intent.ACTION_SEND);
+                        share.setType(mime);
+                        share.putExtra(Intent.EXTRA_STREAM, target);
+                        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(share, "Share video"));
+                    } catch (Exception ignored) {
+                    }
+                }
+            });
+            return true;
+        }
+
+        private void notifyToast(final String message) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                }
+            });
         }
     }
 }
