@@ -4,7 +4,7 @@
 
 # Vedit Studio (`v0.6.1`)
 
-**CapCut-Clean Desktop NLE Video Editor for Windows PC • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU FFmpeg Render • Built-In MCP Server**
+**Clean Desktop NLE Video Editor for Windows PC • Bring-Your-Own AI Model & Base URL • Cinema 3D `.cube` LUTs & Split-Wipe Scopes • Hardware GPU FFmpeg Render • Built-In MCP Server**
 
 [![Latest Release](https://img.shields.io/github/v/release/lilrepaer-glitch/Vedit?color=00c8d7&label=Download%20Windows%20Installer&logo=windows)](https://github.com/lilrepaer-glitch/Vedit/releases/latest)
 [![Tests](https://img.shields.io/badge/Vitest-91%2F91%20Passing-22c55e?logo=vitest)](./test)
