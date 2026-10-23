@@ -38,6 +38,7 @@ import {
 declare global {
   interface Window {
     __veditResolveHttp?: (requestId: string, base64Response: string) => void;
+    __veditHttpProgress?: (requestId: string, totalChars: number) => void;
     VeditAndroid?: {
       isAndroid?: () => boolean;
       getVersion?: () => string;
@@ -49,6 +50,7 @@ declare global {
         headersJson: string,
         body: string,
       ) => void;
+      abortHttpRequest?: (requestId: string) => void;
       toggleFullscreen?: (mode: string) => boolean;
       saveExportBase64?: (fileName: string, mimeType: string, base64Data: string) => string;
       shareLastExport?: () => boolean;
@@ -63,7 +65,7 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "1.0.0";
+const APK_VERSION = "1.0.1";
 const STORAGE_KEY_PROJECT = "vedit.apk.project.v3";
 const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
 const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
@@ -290,11 +292,60 @@ export function normalizeMobileBaseUrl(raw?: string): string {
 
 const pendingNativeHttp = new Map<
   string,
-  { resolve: (rawJson: string) => void; timer: ReturnType<typeof setTimeout> }
+  {
+    resolve: (rawJson: string) => void;
+    timer: ReturnType<typeof setTimeout>;
+    resetIdleTimer: () => void;
+  }
 >();
+const activeFetchControllers = new Set<AbortController>();
+const aiProgressListeners = new Set<(chars: number) => void>();
+
+export function subscribeAiStreamProgress(cb: (chars: number) => void): () => void {
+  aiProgressListeners.add(cb);
+  return () => {
+    aiProgressListeners.delete(cb);
+  };
+}
+
+function notifyAiStreamProgress(chars: number): void {
+  for (const cb of aiProgressListeners) {
+    try {
+      cb(chars);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function abortActiveMobileHttp(): void {
+  for (const [reqId, entry] of pendingNativeHttp.entries()) {
+    clearTimeout(entry.timer);
+    pendingNativeHttp.delete(reqId);
+    try {
+      window.VeditAndroid?.abortHttpRequest?.(reqId);
+    } catch {
+      /* ignore */
+    }
+    entry.resolve('{"ok":false,"status":0,"error":"Cancelled"}');
+  }
+  for (const ctrl of activeFetchControllers) {
+    try {
+      ctrl.abort();
+    } catch {
+      /* ignore */
+    }
+  }
+  activeFetchControllers.clear();
+}
 
 function installNativeHttpBridgeHook(): void {
   if (typeof window === "undefined") return;
+  window.__veditHttpProgress = (requestId: string, totalChars: number) => {
+    const entry = pendingNativeHttp.get(requestId);
+    if (entry) entry.resetIdleTimer();
+    notifyAiStreamProgress(Number(totalChars) || 0);
+  };
   window.__veditResolveHttp = (requestId: string, base64Response: string) => {
     const entry = pendingNativeHttp.get(requestId);
     if (!entry) return;
@@ -314,10 +365,10 @@ installNativeHttpBridgeHook();
 
 /**
  * CORS-free universal non-blocking HTTP client:
- * - Prefers `window.VeditAndroid.httpRequestAsync` on Android thread pool so long reasoning calls
- *   never block the UI thread or collide across rapid consecutive prompts.
+ * - Prefers `window.VeditAndroid.httpRequestAsync` on Android thread pool with SSE live progress
+ *   and sliding idle timeout so long multi-step AI responses never time out while actively streaming.
  * - Supports synchronous `window.VeditAndroid.httpRequest` seamlessly for backwards compatibility.
- * - Falls back to browser `fetch` outside Android APK.
+ * - Falls back to browser `fetch` (including streaming SSE decode) outside Android APK.
  */
 async function nativeHttp(
   method: string,
@@ -329,16 +380,30 @@ async function nativeHttp(
   if (typeof window !== "undefined" && window.VeditAndroid?.httpRequestAsync) {
     installNativeHttpBridgeHook();
     const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const IDLE_TIMEOUT_MS = 185000;
     const rawResp = await new Promise<string>((resolve) => {
-      const timer = setTimeout(() => {
+      const fireTimeout = () => {
         pendingNativeHttp.delete(reqId);
-        resolve('{"ok":false,"status":0,"error":"Request timed out after 80s"}');
-      }, 80000);
-      pendingNativeHttp.set(reqId, { resolve, timer });
+        try {
+          window.VeditAndroid?.abortHttpRequest?.(reqId);
+        } catch {
+          /* ignore */
+        }
+        resolve('{"ok":false,"status":0,"error":"AI server neodpověděl v časovém limitu — zkus kratší dotaz nebo rychlejší model."}');
+      };
+      const entry = {
+        resolve,
+        timer: setTimeout(fireTimeout, IDLE_TIMEOUT_MS),
+        resetIdleTimer: () => {
+          clearTimeout(entry.timer);
+          entry.timer = setTimeout(fireTimeout, IDLE_TIMEOUT_MS);
+        },
+      };
+      pendingNativeHttp.set(reqId, entry);
       try {
         window.VeditAndroid!.httpRequestAsync!(reqId, method, url, JSON.stringify(headers), serializedBody);
       } catch (e) {
-        clearTimeout(timer);
+        clearTimeout(entry.timer);
         pendingNativeHttp.delete(reqId);
         resolve(JSON.stringify({ ok: false, status: 0, error: (e as Error).message }));
       }
@@ -383,13 +448,68 @@ async function nativeHttp(
     };
   }
 
-  const res = await fetch(url, {
-    method,
-    headers,
-    ...(serializedBody && method !== "GET" && method !== "HEAD" ? { body: serializedBody } : {}),
-  });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, statusText: res.statusText, text };
+  const ctrl = new AbortController();
+  activeFetchControllers.add(ctrl);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      signal: ctrl.signal,
+      ...(serializedBody && method !== "GET" && method !== "HEAD" ? { body: serializedBody } : {}),
+    });
+    const ctype = res.headers?.get?.("content-type") || "";
+    if (res.ok && ctype.toLowerCase().includes("text/event-stream") && res.body) {
+      const reader = res.body.getReader();
+      const dec = new TextDecoder("utf-8");
+      let buf = "";
+      let content = "";
+      let reasoning = "";
+      let model = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const l of lines) {
+          const t = l.trim();
+          if (!t.startsWith("data:")) continue;
+          const p = t.slice(5).trim();
+          if (!p || p === "[DONE]") continue;
+          try {
+            const ev = JSON.parse(p) as {
+              model?: string;
+              delta?: { text?: string };
+              choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>;
+            };
+            if (!model && ev.model) model = ev.model;
+            if (ev.delta?.text) content += ev.delta.text;
+            const d = ev.choices?.[0]?.delta;
+            if (d?.content) content += d.content;
+            if (d?.reasoning_content) reasoning += d.reasoning_content;
+            else if (d?.reasoning) reasoning += d.reasoning;
+            notifyAiStreamProgress(content.length + reasoning.length);
+          } catch {
+            /* ignore partial line */
+          }
+        }
+      }
+      return {
+        ok: true,
+        status: res.status,
+        statusText: res.statusText,
+        text: JSON.stringify({
+          streamed: true,
+          model,
+          choices: [{ index: 0, message: { role: "assistant", content: content || reasoning } }],
+        }),
+      };
+    }
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, statusText: res.statusText, text };
+  } finally {
+    activeFetchControllers.delete(ctrl);
+  }
 }
 
 function parseErrorMessage(rawText: string, status: number, statusText: string): string {
@@ -489,7 +609,35 @@ function sanitizeMobileMessages(
 }
 
 function extractMobileAssistantText(rawJsonText: string): { text: string; model?: string } {
-  const data = JSON.parse(rawJsonText) as {
+  const trimmed = rawJsonText.trim();
+  if (trimmed.startsWith("data:") || /\ndata:\s*\{/.test(trimmed)) {
+    let content = "";
+    let reasoning = "";
+    let model: string | undefined;
+    for (const line of trimmed.split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      const p = t.slice(5).trim();
+      if (!p || p === "[DONE]") continue;
+      try {
+        const ev = JSON.parse(p) as {
+          model?: string;
+          delta?: { text?: string };
+          choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>;
+        };
+        if (!model && ev.model) model = ev.model;
+        if (ev.delta?.text) content += ev.delta.text;
+        const d = ev.choices?.[0]?.delta;
+        if (d?.content) content += d.content;
+        if (d?.reasoning_content) reasoning += d.reasoning_content;
+        else if (d?.reasoning) reasoning += d.reasoning;
+      } catch {
+        /* ignore partial frame */
+      }
+    }
+    return { text: (content || reasoning).trim(), model };
+  }
+  const data = JSON.parse(trimmed) as {
     model?: string;
     content?: unknown;
     choices?: Array<{
@@ -643,12 +791,13 @@ const waitMobileMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function runMobileLlmChat(
   rawMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-  opts: { baseUrl?: string; apiKey?: string; model?: string; maxTokens?: number } = {},
+  opts: { baseUrl?: string; apiKey?: string; model?: string; maxTokens?: number; stream?: boolean } = {},
 ): Promise<{ content: string; model: string; baseUrl: string; latencyMs: number }> {
   const cur = readLocalApi();
   const { key, baseUrl, fallbacks } = resolveMobileEndpointAndModel(opts, cur);
   const messages = sanitizeMobileMessages(rawMessages);
-  const maxTokens = opts.maxTokens ?? 1800;
+  const maxTokens = opts.maxTokens ?? 4096;
+  const useStream = opts.stream !== false;
 
   const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|192\.168\.|10\.|172\.)/i.test(baseUrl);
   if (!key && !isLocal) {
@@ -684,6 +833,7 @@ async function runMobileLlmChat(
             {
               model: candidateModel,
               max_tokens: maxTokens,
+              ...(useStream ? { stream: true } : {}),
               ...(sys ? { system: sys } : {}),
               messages: turns.length ? turns : [{ role: "user", content: "OK" }],
             },
@@ -710,23 +860,28 @@ async function runMobileLlmChat(
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };
-        if (/openrouter\.ai/i.test(baseUrl)) {
+        const isOpenRouter = /openrouter\.ai/i.test(baseUrl);
+        const isGemini = /generativelanguage\.googleapis\.com/i.test(baseUrl);
+        if (isOpenRouter) {
           headers["HTTP-Referer"] = "https://vedit.studio";
           headers["X-Title"] = "Vedit Studio";
         }
         if (key) headers.Authorization = `Bearer ${key}`;
 
         const reasoning = /^(o1|o3|o4|gpt-5|deepseek-reasoner|qwq)/i.test(candidateModel);
-        let resp = await nativeHttp(
-          "POST",
-          `${baseUrl}/chat/completions`,
-          headers,
-          reasoning
-            ? { model: candidateModel, messages, max_completion_tokens: maxTokens }
-            : { model: candidateModel, messages, temperature: cur.temperature ?? 0.2, max_tokens: maxTokens },
-        );
+        const fastBody: Record<string, unknown> = reasoning
+          ? { model: candidateModel, messages, max_completion_tokens: maxTokens }
+          : { model: candidateModel, messages, temperature: cur.temperature ?? 0.2, max_tokens: maxTokens };
+        if (useStream) fastBody.stream = true;
+        if (isOpenRouter) fastBody.reasoning = { effort: "low" };
+        else if (isGemini || reasoning) fastBody.reasoning_effort = "low";
 
-        if (resp.status === 400 && !reasoning && /max_tokens|max_completion_tokens|temperature|unsupported/i.test(resp.text)) {
+        let resp = await nativeHttp("POST", `${baseUrl}/chat/completions`, headers, fastBody);
+
+        if (
+          resp.status === 400 &&
+          /max_tokens|max_completion_tokens|temperature|reasoning|thinking|stream|unknown|unsupported/i.test(resp.text)
+        ) {
           resp = await nativeHttp("POST", `${baseUrl}/chat/completions`, headers, {
             model: candidateModel,
             messages,
@@ -759,7 +914,10 @@ async function runMobileLlmChat(
         };
       } catch (err) {
         lastErr = err instanceof Error ? err : new Error(String(err));
-        const netErr = /network|socket|eof|reset|timeout|fetch/i.test(lastErr.message);
+        if (lastErr.message === "Cancelled" || /aborted/i.test(lastErr.message)) {
+          throw new Error("Cancelled");
+        }
+        const netErr = /network|socket|eof|reset|fetch/i.test(lastErr.message);
         if (netErr && attempt + 1 < attempts) {
           await waitMobileMs(500 * (attempt + 1));
           continue;
@@ -2033,14 +2191,16 @@ export const mobileApi = {
           {
             role: "system",
             content:
-              `You are Vedit Studio AI Video Editor Agent. Inspect timeline state: ${timelineContext}. ` +
-              `Return ONLY a single valid JSON object (no markdown fences): ` +
-              `{"reply":"concise helpful response in the user's language","actions":[]}. ` +
-              `Supported action ops in \`actions\` (include ONLY requested operations; \`[]\` for questions): ` +
+              `Vedit Studio AI Editor. Timeline: ${timelineContext}. ` +
+              `Keep internal thinking brief and output ONLY compact JSON immediately (no markdown): ` +
+              `{"reply":"short reply in user's language","actions":[]}. ` +
+              `Ops (use macro ops like auto_shorts & batch_captions for long/complex requests instead of dozens of tiny steps!): ` +
+              `{"op":"auto_shorts","segmentDuration":3,"maxClips":8,"transitions":true}, ` +
+              `{"op":"batch_captions","items":[{"text":"...","start":0,"end":2.5}]}, ` +
               `{"op":"aspect","ratio":"9:16|16:9|1:1|4:5|21:9"}, ` +
               `{"op":"background","value":"blur|#000000"}, ` +
               `{"op":"lut","lutId":"kodak-2383|teal-orange-blockbuster|fuji-eterna|warm-golden|cool-noir|bleach-bypass|silver-mono|cyberpunk-neon"}, ` +
-              `{"op":"adjust","exposure":0,"brightness":0,"contrast":15,"saturation":12,"temperature":8,"tint":0,"fade":0,"vignette":15,"blur":0}, ` +
+              `{"op":"adjust","exposure":0,"brightness":0,"contrast":15,"saturation":12,"temperature":8,"vignette":15,"fade":0,"blur":0}, ` +
               `{"op":"curves","preset":"linear|cinema-s-curve|matte-fade|high-contrast|soft-rolloff","clarity":12}, ` +
               `{"op":"chroma_key","color":"#00ff00","similarity":0.32,"blend":0.1,"despill":true}, ` +
               `{"op":"eq","preset":"flat|voice-podcast|bass-boost|de-mud|crisp-vocal|warm-cinema"}, ` +
@@ -2049,6 +2209,7 @@ export const mobileApi = {
               `{"op":"speed_ramp","preset":"montage-in|hero-slowmo|bullet|jump-cut|smooth-out","intensity":1}, ` +
               `{"op":"mask","shape":"none|circle|rectangle|split-h|split-v|linear","scale":0.78,"feather":14,"invert":false}, ` +
               `{"op":"blend","mode":"normal|screen|multiply|overlay|lighten|soft-light|color-dodge"}, ` +
+              `{"op":"keyframes","preset":"zoom-in|zoom-out|pan-right|pop-in"}, ` +
               `{"op":"marker","label":"Drop","time":1.2}, ` +
               `{"op":"transition","kind":"dissolve|fade-black|fade-white|wipe-left|wipe-right|slide-left|slide-up|zoom-in","duration":0.5}, ` +
               `{"op":"fade","fadeIn":0.5,"fadeOut":0.5}, ` +
@@ -2063,7 +2224,7 @@ export const mobileApi = {
           ...historyMsgs,
           { role: "user", content: prompt },
         ],
-        { maxTokens: 1800 },
+        { maxTokens: 4096 },
       );
 
       const parsed = parseMobileAiJsonSafe<{
@@ -2208,13 +2369,99 @@ export const mobileApi = {
             } else if (op === "transition") {
               const kind = String(act.kind || act.value || "dissolve");
               const duration = Math.max(0.1, Math.min(3, Number(act.duration ?? 0.5)));
-              for (const c of allClips) {
+              const liveClips = seq.tracks.filter((t) => t.kind !== "audio").flatMap((t) => t.clips);
+              for (const c of liveClips) {
                 c.effects = [
                   ...c.effects.filter((e) => e.type !== "transition"),
                   { id: uid("fx"), type: "transition", params: { kind, duration } },
                 ];
               }
               steps.push({ step: "Transition", detail: `${kind} (${duration}s)` });
+            } else if (op === "auto_shorts" && target) {
+              const segDur = Math.max(0.8, Math.min(15, Number(act.segmentDuration ?? act.duration ?? 3)));
+              const maxClips = Math.max(2, Math.min(24, Number(act.maxClips ?? 10)));
+              const baseClip = target;
+              const vTrack = seq.tracks.find((t) => t.clips.some((c) => c.id === baseClip.id)) ?? seq.tracks[0];
+              if (vTrack && baseClip.duration > segDur + 0.25) {
+                const count = Math.min(maxClips, Math.max(2, Math.floor(baseClip.duration / segDur)));
+                const stride = baseClip.duration / count;
+                const pieces: Clip[] = [];
+                let cursor = baseClip.start;
+                for (let i = 0; i < count; i++) {
+                  const pieceDur = Number(Math.min(segDur, stride).toFixed(3));
+                  pieces.push({
+                    ...clone(baseClip),
+                    id: i === 0 ? baseClip.id : uid("clip"),
+                    start: Number(cursor.toFixed(3)),
+                    in: Number((baseClip.in + i * stride).toFixed(3)),
+                    out: Number((baseClip.in + i * stride + pieceDur).toFixed(3)),
+                    duration: pieceDur,
+                    effects:
+                      act.transitions !== false
+                        ? [
+                            ...baseClip.effects.filter((e) => e.type !== "transition"),
+                            { id: uid("fx"), type: "transition", params: { kind: "dissolve", duration: 0.3 } },
+                          ]
+                        : clone(baseClip.effects),
+                  });
+                  cursor += pieceDur;
+                }
+                vTrack.clips = [...vTrack.clips.filter((c) => c.id !== baseClip.id), ...pieces].sort(
+                  (a, b) => a.start - b.start,
+                );
+                steps.push({ step: "Auto Shorts", detail: `${pieces.length} short clips (${segDur}s each)` });
+              }
+            } else if (op === "batch_captions" && Array.isArray(act.items)) {
+              let addedCount = 0;
+              for (const item of act.items as Array<Record<string, unknown>>) {
+                const text = String(item?.text ?? "").trim();
+                if (!text) continue;
+                const start = Math.max(0, Number(item.start ?? addedCount * 2.5));
+                const end = item.end != null ? Math.max(start + 0.3, Number(item.end)) : start + 2.5;
+                seq.captions.push({ id: uid("cap"), text, start, end });
+                addedCount++;
+              }
+              if (addedCount > 0) {
+                steps.push({ step: "Captions", detail: `Added ${addedCount} timed captions` });
+              }
+            } else if (op === "keyframes" && target) {
+              const preset = String(act.preset || act.value || "zoom-in");
+              const d = Math.max(0.3, target.duration);
+              if (preset === "zoom-out") {
+                target.keyframes = [
+                  { time: 0, property: "scaleX", value: 1.22, easing: "ease-in-out" },
+                  { time: d, property: "scaleX", value: 1, easing: "ease-in-out" },
+                  { time: 0, property: "scaleY", value: 1.22, easing: "ease-in-out" },
+                  { time: d, property: "scaleY", value: 1, easing: "ease-in-out" },
+                ];
+              } else if (preset === "pan-right") {
+                target.keyframes = [
+                  { time: 0, property: "scaleX", value: 1.14, easing: "ease-in-out" },
+                  { time: d, property: "scaleX", value: 1.14, easing: "ease-in-out" },
+                  { time: 0, property: "scaleY", value: 1.14, easing: "ease-in-out" },
+                  { time: d, property: "scaleY", value: 1.14, easing: "ease-in-out" },
+                  { time: 0, property: "x", value: -90, easing: "ease-in-out" },
+                  { time: d, property: "x", value: 90, easing: "ease-in-out" },
+                ];
+              } else if (preset === "pop-in") {
+                const endT = Math.min(0.45, d);
+                target.keyframes = [
+                  { time: 0, property: "scaleX", value: 0.82, easing: "ease-out" },
+                  { time: endT, property: "scaleX", value: 1, easing: "ease-out" },
+                  { time: 0, property: "scaleY", value: 0.82, easing: "ease-out" },
+                  { time: endT, property: "scaleY", value: 1, easing: "ease-out" },
+                  { time: 0, property: "opacity", value: 0, easing: "ease-out" },
+                  { time: endT, property: "opacity", value: 1, easing: "ease-out" },
+                ];
+              } else {
+                target.keyframes = [
+                  { time: 0, property: "scaleX", value: 1, easing: "ease-in-out" },
+                  { time: d, property: "scaleX", value: 1.22, easing: "ease-in-out" },
+                  { time: 0, property: "scaleY", value: 1, easing: "ease-in-out" },
+                  { time: d, property: "scaleY", value: 1.22, easing: "ease-in-out" },
+                ];
+              }
+              steps.push({ step: "Motion", detail: preset });
             } else if (op === "fade" && target) {
               const fadeIn = Number(act.fadeIn ?? act.value ?? 0.5);
               const fadeOut = Number(act.fadeOut ?? act.value ?? 0.5);
@@ -2272,24 +2519,33 @@ export const mobileApi = {
               target.effects = [];
               target.transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
               steps.push({ step: "Reset", detail: target.name });
-            } else if (op === "split" && target) {
-              const rawAt = Number(act.at ?? context?.playhead ?? target.start + target.duration / 2);
-              const at =
-                rawAt > target.start + 0.1 && rawAt < target.start + target.duration - 0.1
-                  ? rawAt
-                  : target.start + target.duration / 2;
-              if (target.duration > 0.25) {
-                const leftDur = Number((at - target.start).toFixed(3));
+            } else if (op === "split") {
+              const rawAt = Number(act.at ?? context?.playhead ?? (target ? target.start + target.duration / 2 : 0));
+              const liveClips = seq.tracks
+                .filter((t) => t.kind !== "audio")
+                .flatMap((t) => t.clips)
+                .sort((a, b) => a.start - b.start);
+              const splitTarget =
+                liveClips.find((c) => rawAt > c.start + 0.08 && rawAt < c.start + c.duration - 0.08) ?? target;
+              if (splitTarget && splitTarget.duration > 0.25) {
+                const at =
+                  rawAt > splitTarget.start + 0.08 && rawAt < splitTarget.start + splitTarget.duration - 0.08
+                    ? rawAt
+                    : splitTarget.start + splitTarget.duration / 2;
+                const ownerTrack =
+                  seq.tracks.find((t) => t.clips.some((c) => c.id === splitTarget.id)) ?? seq.tracks[0];
+                const leftDur = Number((at - splitTarget.start).toFixed(3));
                 const right: Clip = {
-                  ...clone(target),
+                  ...clone(splitTarget),
                   id: uid("clip"),
                   start: at,
-                  duration: Number((target.duration - leftDur).toFixed(3)),
-                  in: target.in + leftDur,
+                  duration: Number((splitTarget.duration - leftDur).toFixed(3)),
+                  in: splitTarget.in + leftDur,
                 };
-                target.duration = leftDur;
-                target.out = target.in + leftDur;
-                seq.tracks[0]!.clips.push(right);
+                splitTarget.duration = leftDur;
+                splitTarget.out = splitTarget.in + leftDur;
+                ownerTrack?.clips.push(right);
+                ownerTrack?.clips.sort((a, b) => a.start - b.start);
                 steps.push({ step: "Split", detail: `Split at ${at.toFixed(2)}s` });
               }
             } else if (op === "trim" && target) {

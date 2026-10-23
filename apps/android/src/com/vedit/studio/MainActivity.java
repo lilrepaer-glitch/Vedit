@@ -32,22 +32,27 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -349,29 +354,140 @@ public class MainActivity extends Activity {
         return buffer.toByteArray();
     }
 
+    private interface StreamProgressCallback {
+        void onChunk(int totalChars);
+    }
+
+    private static final ConcurrentHashMap<String, HttpURLConnection> activeConnections = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Boolean> abortedRequests = new ConcurrentHashMap<>();
+
+    private static String readSseStreamAsJson(
+        InputStream stream,
+        StreamProgressCallback progressCb
+    ) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8), 8192);
+        StringBuilder contentBuilder = new StringBuilder();
+        StringBuilder reasoningBuilder = new StringBuilder();
+        StringBuilder rawFallback = new StringBuilder();
+        String detectedModel = "";
+        boolean sawSseData = false;
+        long lastProgressMs = 0L;
+
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (rawFallback.length() < 262144) {
+                rawFallback.append(line).append('\n');
+            }
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            String payload = trimmed.substring(5).trim();
+            if (payload.isEmpty() || "[DONE]".equals(payload)) {
+                sawSseData = true;
+                continue;
+            }
+            sawSseData = true;
+            try {
+                JSONObject ev = new JSONObject(payload);
+                if (detectedModel.isEmpty() && ev.has("model")) {
+                    detectedModel = ev.optString("model", "");
+                }
+                // Anthropic streaming event (`content_block_delta`)
+                JSONObject topDelta = ev.optJSONObject("delta");
+                if (topDelta != null && topDelta.has("text")) {
+                    contentBuilder.append(topDelta.optString("text", ""));
+                }
+                // OpenAI / OpenRouter / Gemini / Groq / DeepSeek streaming chunk
+                JSONArray choices = ev.optJSONArray("choices");
+                if (choices != null && choices.length() > 0) {
+                    JSONObject c0 = choices.optJSONObject(0);
+                    if (c0 != null) {
+                        JSONObject delta = c0.optJSONObject("delta");
+                        if (delta != null) {
+                            String piece = delta.optString("content", "");
+                            if (!piece.isEmpty() && !"null".equals(piece)) {
+                                contentBuilder.append(piece);
+                            }
+                            String rPiece = delta.optString("reasoning_content", "");
+                            if (rPiece.isEmpty() || "null".equals(rPiece)) {
+                                rPiece = delta.optString("reasoning", "");
+                            }
+                            if (!rPiece.isEmpty() && !"null".equals(rPiece)) {
+                                reasoningBuilder.append(rPiece);
+                            }
+                        } else if (c0.has("text")) {
+                            contentBuilder.append(c0.optString("text", ""));
+                        }
+                    }
+                }
+                long nowMs = System.currentTimeMillis();
+                if (progressCb != null && nowMs - lastProgressMs >= 200L) {
+                    lastProgressMs = nowMs;
+                    progressCb.onChunk(contentBuilder.length() + reasoningBuilder.length());
+                }
+            } catch (Exception ignored) {
+                // Ignore non-JSON keepalive comments or partial metadata frames
+            }
+        }
+
+        if (!sawSseData) {
+            return rawFallback.toString();
+        }
+        try {
+            JSONObject msgObj = new JSONObject();
+            msgObj.put("role", "assistant");
+            msgObj.put("content", contentBuilder.length() > 0 ? contentBuilder.toString() : reasoningBuilder.toString());
+            JSONObject choiceObj = new JSONObject();
+            choiceObj.put("index", 0);
+            choiceObj.put("message", msgObj);
+            JSONArray choicesArr = new JSONArray();
+            choicesArr.put(choiceObj);
+            JSONObject assembled = new JSONObject();
+            assembled.put("streamed", true);
+            if (!detectedModel.isEmpty()) {
+                assembled.put("model", detectedModel);
+            }
+            assembled.put("choices", choicesArr);
+            return assembled.toString();
+        } catch (Exception e) {
+            return rawFallback.toString();
+        }
+    }
+
     /**
-     * Executes a native HTTP/HTTPS call with automatic stale pooled-socket retry.
-     * Note: Avoids `setFixedLengthStreamingMode` so OkHttp's internal connection pool
-     * cleanly buffers small API JSON bodies and retries transparent idle TLS closes.
+     * Executes a native HTTP/HTTPS call with live SSE token streaming, instant cancellation,
+     * and automatic stale pooled-socket retry.
      */
-    private static String performNativeHttp(String method, String urlString, String headersJson, String body) {
+    private static String performNativeHttp(
+        String requestId,
+        String method,
+        String urlString,
+        String headersJson,
+        String body,
+        StreamProgressCallback progressCb
+    ) {
         Exception lastError = null;
         for (int attempt = 0; attempt < 3; attempt++) {
+            if (requestId != null && Boolean.TRUE.equals(abortedRequests.get(requestId))) {
+                break;
+            }
             HttpURLConnection conn = null;
             try {
                 URL url = new URL(urlString);
                 conn = (HttpURLConnection) url.openConnection();
+                if (requestId != null && !requestId.isEmpty()) {
+                    activeConnections.put(requestId, conn);
+                }
                 conn.setInstanceFollowRedirects(true);
                 conn.setUseCaches(false);
                 conn.setConnectTimeout(15000);
-                conn.setReadTimeout(75000);
+                // 95s per-chunk read timeout (with SSE streaming, active generation never times out!)
+                conn.setReadTimeout(95000);
                 String safeMethod = (method != null && !method.isEmpty()) ? method.toUpperCase(Locale.US) : "GET";
                 conn.setRequestMethod(safeMethod);
-                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("Accept", "application/json, text/event-stream");
                 conn.setRequestProperty("Accept-Encoding", "identity");
-                conn.setRequestProperty("User-Agent", "VeditStudio/1.0.0 (Android)");
+                conn.setRequestProperty("User-Agent", "VeditStudio/1.0.1 (Android)");
                 if (attempt > 0) {
-                    // Force a brand-new TCP/TLS connection if a previous pooled keep-alive socket reset
                     conn.setRequestProperty("Connection", "close");
                 }
 
@@ -403,8 +519,20 @@ public class MainActivity extends Activity {
                 InputStream respStream = (status >= 200 && status < 400)
                     ? conn.getInputStream()
                     : conn.getErrorStream();
-                byte[] respBytes = readAllBytes(respStream);
-                if (respStream != null) respStream.close();
+                String contentType = conn.getContentType();
+                boolean isEventStream = status >= 200 && status < 300
+                    && ((contentType != null && contentType.toLowerCase(Locale.US).contains("text/event-stream"))
+                        || (body != null && body.contains("\"stream\":true")));
+
+                String responseBody;
+                if (isEventStream && respStream != null) {
+                    responseBody = readSseStreamAsJson(respStream, progressCb);
+                    respStream.close();
+                } else {
+                    byte[] respBytes = readAllBytes(respStream);
+                    if (respStream != null) respStream.close();
+                    responseBody = new String(respBytes, StandardCharsets.UTF_8);
+                }
 
                 if ((status == 502 || status == 503 || status == 504 || status == 520 || status == 522 || status == 524)
                     && attempt < 2) {
@@ -419,10 +547,17 @@ public class MainActivity extends Activity {
                 result.put("ok", status >= 200 && status < 300);
                 result.put("status", status);
                 result.put("statusText", conn.getResponseMessage() != null ? conn.getResponseMessage() : "");
-                result.put("body", new String(respBytes, StandardCharsets.UTF_8));
+                result.put("body", responseBody);
                 return result.toString();
+            } catch (SocketTimeoutException timeoutEx) {
+                // Never repeat slow multi-minute retries on a read timeout
+                lastError = timeoutEx;
+                break;
             } catch (IOException ioEx) {
                 lastError = ioEx;
+                if (requestId != null && Boolean.TRUE.equals(abortedRequests.get(requestId))) {
+                    break;
+                }
                 if (attempt < 2) {
                     try {
                         Thread.sleep(350L * (attempt + 1));
@@ -434,6 +569,9 @@ public class MainActivity extends Activity {
                 lastError = e;
                 break;
             } finally {
+                if (requestId != null) {
+                    activeConnections.remove(requestId);
+                }
                 if (conn != null) {
                     try {
                         conn.disconnect();
@@ -443,15 +581,18 @@ public class MainActivity extends Activity {
             }
         }
 
+        boolean wasAborted = requestId != null && Boolean.TRUE.equals(abortedRequests.remove(requestId));
         try {
             JSONObject err = new JSONObject();
             err.put("ok", false);
             err.put("status", 0);
-            err.put("statusText", lastError != null ? lastError.getClass().getSimpleName() : "IOException");
+            err.put("statusText", wasAborted ? "Aborted" : (lastError != null ? lastError.getClass().getSimpleName() : "IOException"));
             err.put("body", "");
-            err.put("error", lastError != null && lastError.getMessage() != null
-                ? lastError.getMessage()
-                : (lastError != null ? lastError.toString() : "Network request failed"));
+            err.put("error", wasAborted
+                ? "Cancelled"
+                : (lastError != null && lastError.getMessage() != null
+                    ? lastError.getMessage()
+                    : (lastError != null ? lastError.toString() : "Network request failed")));
             return err.toString();
         } catch (Exception ignored) {
             return "{\"ok\":false,\"status\":0,\"error\":\"Network error\"}";
@@ -466,12 +607,25 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public String getVersion() {
-            return "1.0.0";
+            return "1.0.1";
         }
 
         @JavascriptInterface
         public String httpRequest(String method, String urlString, String headersJson, String body) {
-            return performNativeHttp(method, urlString, headersJson, body);
+            return performNativeHttp(null, method, urlString, headersJson, body, null);
+        }
+
+        @JavascriptInterface
+        public void abortHttpRequest(String requestId) {
+            if (requestId == null || requestId.isEmpty()) return;
+            abortedRequests.put(requestId, Boolean.TRUE);
+            HttpURLConnection active = activeConnections.remove(requestId);
+            if (active != null) {
+                try {
+                    active.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
         }
 
         @JavascriptInterface
@@ -485,7 +639,30 @@ public class MainActivity extends Activity {
             networkPool.execute(new Runnable() {
                 @Override
                 public void run() {
-                    final String responseJson = performNativeHttp(method, urlString, headersJson, body);
+                    final String responseJson = performNativeHttp(
+                        requestId,
+                        method,
+                        urlString,
+                        headersJson,
+                        body,
+                        new StreamProgressCallback() {
+                            @Override
+                            public void onChunk(final int totalChars) {
+                                runOnUiThread(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        if (webView != null) {
+                                            webView.evaluateJavascript(
+                                                "window.__veditHttpProgress && window.__veditHttpProgress("
+                                                    + JSONObject.quote(requestId) + "," + totalChars + ");",
+                                                null
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    );
                     final String b64 = Base64.encodeToString(
                         responseJson.getBytes(StandardCharsets.UTF_8),
                         Base64.NO_WRAP

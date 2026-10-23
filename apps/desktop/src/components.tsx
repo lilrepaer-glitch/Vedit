@@ -1220,50 +1220,45 @@ export const StudioTimeline = memo(function StudioTimeline({
     <div className="timeline-shell" style={{ height: "100%" }} onWheel={handleWheel}>
       {/* Clean Quick-Action Timeline Toolbar */}
       <div className="timeline-toolbar">
-        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <button
             type="button"
-            className="btn-ghost"
+            className="btn-ghost tl-btn"
             onClick={onSplitAtPlayhead}
             disabled={!selectedClipId && seq.tracks.every((t) => t.clips.length === 0)}
             title="Split clip (S)"
-            style={{ padding: "4px 8px", fontSize: 11.5 }}
           >
-            <IconScissors size={14} /> Split
+            <IconScissors size={15} /> Split
           </button>
           <button
             type="button"
-            className="btn-ghost"
+            className="btn-ghost tl-btn"
             onClick={onDeleteSelected}
             disabled={!selectedClipId && !selectedCaptionId}
             title="Delete selected (Del)"
-            style={{ padding: "4px 8px", fontSize: 11.5 }}
           >
-            <IconTrash size={14} /> Delete
+            <IconTrash size={15} /> Delete
           </button>
           <button
             type="button"
-            className={`icon-btn ${snapEnabled ? "active" : ""}`}
+            className={`icon-btn tl-icon-btn ${snapEnabled ? "active" : ""}`}
             onClick={onToggleSnap}
             title="Magnetic Snap"
-            style={{ width: 28, height: 28 }}
           >
-            <IconMagnet size={14} />
+            <IconMagnet size={15} />
           </button>
           <button
             type="button"
-            className="btn-ghost"
+            className="btn-ghost tl-btn"
             onClick={() => onAddTrack("video")}
-            style={{ padding: "4px 7px", fontSize: 11 }}
             title="Add Video Overlay Track (PiP / Chroma Key)"
           >
             +V
           </button>
           <button
             type="button"
-            className="btn-ghost"
+            className="btn-ghost tl-btn"
             onClick={() => onAddTrack("audio")}
-            style={{ padding: "4px 7px", fontSize: 11 }}
             title="Add Audio Track"
           >
             +A
@@ -1271,9 +1266,8 @@ export const StudioTimeline = memo(function StudioTimeline({
           {onAddMarker && (
             <button
               type="button"
-              className="btn-ghost"
+              className="btn-ghost tl-btn"
               onClick={onAddMarker}
-              style={{ padding: "4px 7px", fontSize: 11 }}
               title="Add Timeline Marker at Playhead (M)"
             >
               +M
@@ -1284,12 +1278,11 @@ export const StudioTimeline = memo(function StudioTimeline({
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <button
             type="button"
-            className="icon-btn"
-            style={{ width: 28, height: 28 }}
+            className="icon-btn tl-icon-btn"
             onClick={() => onZoomChange(Math.max(18, Math.round(pxPerSec * 0.78)))}
             aria-label="Zoom out timeline"
           >
-            <IconZoomOut size={14} />
+            <IconZoomOut size={15} />
           </button>
           <input
             type="range"
@@ -1297,17 +1290,16 @@ export const StudioTimeline = memo(function StudioTimeline({
             max={260}
             value={pxPerSec}
             onChange={(e) => onZoomChange(Number(e.target.value))}
-            style={{ width: 72 }}
+            style={{ width: 82 }}
             aria-label="Timeline zoom"
           />
           <button
             type="button"
-            className="icon-btn"
-            style={{ width: 28, height: 28 }}
+            className="icon-btn tl-icon-btn"
             onClick={() => onZoomChange(Math.min(260, Math.round(pxPerSec * 1.25)))}
             aria-label="Zoom in timeline"
           >
-            <IconZoomIn size={14} />
+            <IconZoomIn size={15} />
           </button>
         </div>
       </div>

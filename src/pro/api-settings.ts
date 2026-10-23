@@ -306,7 +306,38 @@ export function sanitizeChatMessages(messages: ChatMessage[]): ChatMessage[] {
   return systems.length > 0 ? [{ role: "system", content: systems.join("\n\n") }, ...convo] : convo;
 }
 
-/** Extracts text safely whether `message.content` is a string, content-part array, or reasoning response. */
+function parseRawSseOrJsonText(rawText: string): { text: string; model?: string } {
+  const trimmed = rawText.trim();
+  if (trimmed.startsWith("data:") || /\ndata:\s*\{/.test(trimmed)) {
+    let content = "";
+    let reasoning = "";
+    let model: string | undefined;
+    for (const line of trimmed.split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      const p = t.slice(5).trim();
+      if (!p || p === "[DONE]") continue;
+      try {
+        const ev = JSON.parse(p) as {
+          model?: string;
+          delta?: { text?: string };
+          choices?: Array<{ delta?: { content?: string; reasoning_content?: string; reasoning?: string } }>;
+        };
+        if (!model && ev.model) model = ev.model;
+        if (ev.delta?.text) content += ev.delta.text;
+        const d = ev.choices?.[0]?.delta;
+        if (d?.content) content += d.content;
+        if (d?.reasoning_content) reasoning += d.reasoning_content;
+        else if (d?.reasoning) reasoning += d.reasoning;
+      } catch {
+        /* ignore partial SSE frame */
+      }
+    }
+    return { text: (content || reasoning).trim(), model };
+  }
+  const data = JSON.parse(trimmed) as { model?: string };
+  return { text: extractAssistantContent(data), model: data.model };
+}
 export function extractAssistantContent(payload: unknown): string {
   if (!payload || typeof payload !== "object") return "";
   const root = payload as {
@@ -675,11 +706,12 @@ export async function callChatCompletion(
     temperature?: number;
     maxTokens?: number;
     timeoutMs?: number;
+    fastReasoning?: boolean;
   } = {},
 ): Promise<{ content: string; model: string; latencyMs: number }> {
   const { apiKey: rawKey, baseUrl, fallbacks } = resolveEndpointAndModel(opts, runtimeConfig);
   const messages = sanitizeChatMessages(rawMessages);
-  const maxTokens = opts.maxTokens ?? 1800;
+  const maxTokens = opts.maxTokens ?? 4096;
 
   const started = Date.now();
   let lastError: Error | null = null;
@@ -690,7 +722,8 @@ export async function callChatCompletion(
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 45000);
+      const perChunkTimeout = opts.timeoutMs ?? 180000;
+      let timer = setTimeout(() => controller.abort(), perChunkTimeout);
       try {
         if (isAnthropicEndpoint(baseUrl, rawKey)) {
           const systemText = messages
@@ -744,26 +777,47 @@ export async function callChatCompletion(
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };
-        if (/openrouter\.ai/i.test(baseUrl)) {
+        const isOpenRouter = /openrouter\.ai/i.test(baseUrl);
+        const isGemini = /generativelanguage\.googleapis\.com/i.test(baseUrl);
+        if (isOpenRouter) {
           headers["HTTP-Referer"] = "https://vedit.studio";
           headers["X-Title"] = "Vedit Studio";
         }
         if (rawKey) headers.Authorization = `Bearer ${rawKey}`;
 
         const isReasoningModel = /^(o1|o3|o4|gpt-5|deepseek-reasoner|qwq)/i.test(candidateModel);
-        const buildPayload = (compatMode: boolean) =>
-          compatMode || isReasoningModel
+        const wantLowReasoning = opts.fastReasoning !== false;
+        const buildPayload = (compatMode: boolean) => {
+          if (compatMode) {
+            return {
+              model: candidateModel,
+              messages,
+              max_completion_tokens: maxTokens,
+            };
+          }
+          const base: Record<string, unknown> = isReasoningModel
             ? {
                 model: candidateModel,
                 messages,
                 max_completion_tokens: maxTokens,
+                stream: true,
               }
             : {
                 model: candidateModel,
                 messages,
                 temperature: opts.temperature ?? runtimeConfig.temperature ?? 0.2,
                 max_tokens: maxTokens,
+                stream: true,
               };
+          if (wantLowReasoning) {
+            if (isOpenRouter) {
+              base.reasoning = { effort: "low" };
+            } else if (isGemini || isReasoningModel) {
+              base.reasoning_effort = "low";
+            }
+          }
+          return base;
+        };
 
         let res = await fetch(`${baseUrl}/chat/completions`, {
           method: "POST",
@@ -772,9 +826,9 @@ export async function callChatCompletion(
           signal: controller.signal,
         });
 
-        if (res.status === 400 && !isReasoningModel) {
+        if (res.status === 400) {
           const errPreview = await res.clone().text().catch(() => "");
-          if (/max_tokens|max_completion_tokens|temperature|unsupported_parameter/i.test(errPreview)) {
+          if (/max_tokens|max_completion_tokens|temperature|reasoning|thinking|stream|unknown|unsupported/i.test(errPreview)) {
             res = await fetch(`${baseUrl}/chat/completions`, {
               method: "POST",
               headers,
@@ -809,10 +863,25 @@ export async function callChatCompletion(
           throw lastError;
         }
 
-        const data = (await res.json()) as { model?: string };
+        let rawBodyText = "";
+        if (res.body) {
+          const reader = res.body.getReader();
+          const dec = new TextDecoder("utf-8");
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            clearTimeout(timer);
+            timer = setTimeout(() => controller.abort(), perChunkTimeout);
+            rawBodyText += dec.decode(value, { stream: true });
+          }
+          rawBodyText += dec.decode();
+        } else {
+          rawBodyText = await res.text();
+        }
+        const parsedOut = parseRawSseOrJsonText(rawBodyText);
         return {
-          content: extractAssistantContent(data),
-          model: data.model || candidateModel,
+          content: parsedOut.text,
+          model: parsedOut.model || candidateModel,
           latencyMs: Date.now() - started,
         };
       } catch (err) {

@@ -215,12 +215,16 @@ const isDesktop =
     location.hostname === "tauri.localhost" ||
     location.hostname.endsWith(".localhost"));
 import {
+  abortActiveMobileHttp,
   IS_ANDROID_APK,
   mobileApi,
   resolveMobileMediaUrl,
   sanitizeProjectShape,
+  subscribeAiStreamProgress,
   subscribeMobileChanges,
 } from "./mobileRuntime";
+
+export { abortActiveMobileHttp, subscribeAiStreamProgress };
 
 let standaloneFallbackActive = false;
 
@@ -258,8 +262,29 @@ export function withToken(url: string): string {
 
 export { sanitizeProjectShape };
 
-async function req<T>(method: string, path: string, body?: unknown, timeoutMs = 60000): Promise<T> {
+let activeDesktopCopilotAbort: AbortController | null = null;
+
+export function cancelActiveAiCopilot(): void {
+  abortActiveMobileHttp();
+  if (activeDesktopCopilotAbort) {
+    try {
+      activeDesktopCopilotAbort.abort();
+    } catch {
+      /* ignore */
+    }
+    activeDesktopCopilotAbort = null;
+  }
+}
+
+async function req<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs = 90000,
+  trackCopilotAbort = false,
+): Promise<T> {
   const controller = new AbortController();
+  if (trackCopilotAbort) activeDesktopCopilotAbort = controller;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
@@ -272,8 +297,16 @@ async function req<T>(method: string, path: string, body?: unknown, timeoutMs = 
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
+  } catch (err) {
+    if (controller.signal.aborted && activeDesktopCopilotAbort === null && trackCopilotAbort) {
+      throw new Error("Cancelled");
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
+    if (trackCopilotAbort && activeDesktopCopilotAbort === controller) {
+      activeDesktopCopilotAbort = null;
+    }
   }
   if (!res.ok) {
     let message = res.statusText;
@@ -342,7 +375,8 @@ const rawApi = {
       "POST",
       `/projects/${currentId}/copilot`,
       { prompt, ...(context ?? {}) },
-      65000,
+      240000,
+      true,
     ),
   applyLut: (clipId: string, lutId: string) =>
     req<{ cubePath: string }>(`POST`, `/projects/${currentId}/clips/${clipId}/lut`, { lutId }),

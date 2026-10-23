@@ -849,33 +849,72 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* ==================== NATIVE MOBILE BOTTOM WORKSPACE ==================== */
 .mobile-root {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  --mobile-dock-h: 68px;
 }
 
+.mobile-timeline-slot {
+  height: clamp(244px, 36vh, 320px);
+  flex: none;
+  min-height: 0;
+}
+
+/* Overlays DIRECTLY OVER the timeline (`přes timeline`) without shrinking preview or timeline */
 .mobile-sheet {
-  height: 215px;
-  min-height: 195px;
-  max-height: 42vh;
-  background: var(--panel);
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--mobile-dock-h);
+  height: min(50vh, 430px);
+  min-height: 220px;
+  max-height: 78vh;
+  z-index: 35;
+  background: rgba(20, 20, 25, 0.985);
+  backdrop-filter: blur(18px);
   border-top: 1px solid var(--border-strong);
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.78);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
+.mobile-sheet.ai-sheet {
+  height: min(58vh, 490px);
+}
+
+.mobile-sheet-grabber {
+  width: 100%;
+  height: 20px;
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  cursor: ns-resize;
+}
+
+.mobile-sheet-pill {
+  width: 40px;
+  height: 4.5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+}
+
 .mobile-sheet-head {
-  height: 36px;
-  min-height: 36px;
-  padding: 0 12px;
+  height: 42px;
+  min-height: 42px;
+  padding: 0 14px 4px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 14.5px;
   font-weight: 600;
 }
 
@@ -883,24 +922,26 @@ input[type="range"]::-webkit-slider-thumb {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px 12px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   -webkit-overflow-scrolling: touch;
 }
 
 .mobile-dock {
-  height: 58px;
-  min-height: 58px;
+  position: relative;
+  z-index: 40;
+  height: var(--mobile-dock-h);
+  min-height: var(--mobile-dock-h);
   background: var(--bg-elevated);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-strong);
   display: flex;
   align-items: center;
   overflow-x: auto;
   scrollbar-width: none;
   padding: 0 6px;
-  gap: 2px;
+  gap: 4px;
 }
 
 .mobile-dock::-webkit-scrollbar {
@@ -908,25 +949,252 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .dock-item {
-  flex: 1 0 62px;
-  height: 48px;
-  padding: 4px 2px;
-  border-radius: 10px;
+  flex: 1 0 68px;
+  height: 58px;
+  padding: 5px 4px;
+  border-radius: 12px;
   background: transparent;
   border: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  font-size: 10.5px;
-  font-weight: 500;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--text-secondary);
+}
+
+.dock-item svg {
+  width: 20px;
+  height: 20px;
 }
 
 .dock-item.active {
   color: #fafafa;
   background: var(--panel-2);
+}
+
+.topbar-btn {
+  height: 32px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+.tl-btn {
+  padding: 4px 8px;
+  font-size: 11.5px;
+}
+
+.tl-icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.ai-prompt-box {
+  width: 100%;
+  resize: none;
+  line-height: 1.45;
+  min-height: 44px;
+  max-height: 140px;
+}
+
+.ai-chat-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+/* ==================== LARGE TOUCH ERGONOMICS ON PHONES (< 900px) ==================== */
+@media (max-width: 899px) {
+  :root {
+    font-size: 15px;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+    min-height: 44px;
+    padding: 10px 13px;
+    border-radius: 10px;
+  }
+
+  button {
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 14px;
+    border-radius: 10px;
+  }
+
+  .topbar {
+    height: 56px;
+    min-height: 56px;
+    padding: 0 10px;
+    gap: 8px;
+  }
+
+  .icon-btn {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    border-radius: 10px;
+  }
+
+  .project-pill {
+    max-width: 168px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0 10px;
+    font-size: 14px;
+    border-radius: 10px;
+  }
+
+  .aspect-pill {
+    height: 38px;
+    min-height: 38px;
+    padding: 0 11px;
+    font-size: 13px;
+    border-radius: 9px;
+  }
+
+  .topbar-btn {
+    height: 40px;
+    min-height: 40px;
+    padding: 0 13px;
+    font-size: 13.5px;
+  }
+
+  .stage-pill {
+    height: 36px;
+    min-height: 36px;
+    padding: 0 13px;
+    font-size: 13px;
+  }
+
+  .transport-bar {
+    height: 52px;
+    min-height: 52px;
+    padding: 0 12px;
+  }
+
+  .play-btn {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .timeline-toolbar {
+    height: 48px;
+    min-height: 48px;
+    padding: 0 10px;
+    gap: 8px;
+  }
+
+  .tl-btn {
+    height: 38px;
+    min-height: 38px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+
+  .tl-icon-btn {
+    width: 38px;
+    height: 38px;
+    min-height: 38px;
+  }
+
+  .track-headers {
+    width: 96px;
+  }
+
+  .ruler,
+  .ruler-corner {
+    height: 30px;
+    min-height: 30px;
+  }
+
+  .ruler-tick {
+    font-size: 11.5px;
+    line-height: 30px;
+  }
+
+  .track-hdr,
+  .track-lane {
+    height: 62px;
+    min-height: 62px;
+    font-size: 12.5px;
+  }
+
+  .track-hdr.caption-hdr,
+  .track-lane.caption-lane {
+    height: 46px;
+    min-height: 46px;
+  }
+
+  .tl-clip-label {
+    font-size: 13px;
+    padding: 0 22px;
+  }
+
+  .trim-handle {
+    width: 22px;
+  }
+
+  .playhead-cap {
+    left: -7px;
+    width: 16px;
+    height: 16px;
+  }
+
+  .fab-import {
+    width: 52px;
+    height: 52px;
+    min-height: 52px;
+    border-radius: 15px;
+  }
+
+  .section-label {
+    font-size: 12px;
+  }
+
+  .slider-head {
+    font-size: 13.5px;
+  }
+
+  input[type="range"] {
+    height: 34px;
+    min-height: 34px;
+    padding: 0;
+  }
+
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 6px;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+    margin-top: -9px;
+  }
+
+  .chip-btn {
+    min-height: 38px;
+    padding: 8px 15px;
+    font-size: 13.5px;
+  }
+
+  .seg-btn {
+    min-height: 40px;
+    font-size: 13.5px;
+  }
+
+  .ai-chat-scroll {
+    max-height: none;
+    flex: 1;
+  }
 }
 
 /* ==================== MODALS & TOAST ==================== */
