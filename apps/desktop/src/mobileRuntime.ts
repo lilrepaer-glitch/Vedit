@@ -34,6 +34,19 @@ import {
   type ToneCurvePoint,
   type ToneCurvePresetUi,
 } from "./compositor";
+import {
+  buildCameraMotionKeyframes,
+  inferStudioAssetParamsFromPrompt,
+  MOTION_GRAPHIC_TEMPLATES,
+  renderVisualAssetPreviewDataUrl,
+  STUDIO_AUDIO_ASSETS,
+  STUDIO_VISUAL_ASSETS,
+  synthesizeStudioSfxWav,
+  type CameraMotionPresetId,
+  type MotionGraphicTemplateId,
+  type ProceduralVisualPresetId,
+  type StudioSfxPresetId,
+} from "./studioAssets";
 
 declare global {
   interface Window {
@@ -65,7 +78,7 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "1.0.1";
+const APK_VERSION = "1.0.2";
 const STORAGE_KEY_PROJECT = "vedit.apk.project.v3";
 const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
 const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
@@ -2650,6 +2663,204 @@ export const mobileApi = {
     gTrack.clips.push(clip);
     persist();
     return { asset: clone(asset), clip: clone(clip), outPath: dataUri };
+  },
+  generateStudioAsset: async (req: {
+    category: "transition" | "motion" | "overlay" | "sfx";
+    presetId?: string;
+    title?: string;
+    subtitle?: string;
+    primaryColor?: string;
+    accentColor?: string;
+    duration?: number;
+    intensity?: number;
+    prompt?: string;
+    atTime?: number;
+  }) => {
+    recordUndo();
+    const seq = activeSeq();
+    const seed = Math.floor(1 + Math.random() * 999);
+    const at = Math.max(0, Number(req.atTime ?? 0));
+    const promptHint = req.prompt?.trim()
+      ? inferStudioAssetParamsFromPrompt(req.prompt, req.category)
+      : null;
+
+    if (req.category === "motion") {
+      const tplId = (req.presetId ||
+        promptHint?.motionTemplate ||
+        "lower-third-editorial") as MotionGraphicTemplateId;
+      const tplDef =
+        MOTION_GRAPHIC_TEMPLATES.find((m) => m.id === tplId) ?? MOTION_GRAPHIC_TEMPLATES[0]!;
+      const dur = Math.max(0.6, Number(req.duration ?? tplDef.defaultDuration));
+      const title = (req.title || promptHint?.title || tplDef.defaultTitle).trim();
+      const subtitle = (req.subtitle ?? promptHint?.subtitle ?? tplDef.defaultSubtitle).trim();
+      const caption: Caption = {
+        id: uid("cap"),
+        text: title,
+        start: Number(at.toFixed(3)),
+        end: Number((at + dur).toFixed(3)),
+        style: {
+          motionTemplate: tplDef.id,
+          subtitle,
+          color: req.primaryColor || tplDef.defaultColor,
+          accentColor: req.accentColor || promptHint?.accentColor || tplDef.defaultAccent,
+          x: tplDef.defaultX,
+          y: tplDef.defaultY,
+          fontSize: tplDef.defaultFontSize,
+          bold: true,
+        },
+      };
+      seq.captions.push(caption);
+      persist();
+      return {
+        summary: `Generated Motion Graphic "${title}"`,
+        caption: clone(caption),
+      };
+    }
+
+    if (req.category === "sfx") {
+      const sfxId = (req.presetId || promptHint?.sfxPreset || "cinema-whoosh") as StudioSfxPresetId;
+      const sfxDef = STUDIO_AUDIO_ASSETS.find((s) => s.id === sfxId) ?? STUDIO_AUDIO_ASSETS[0]!;
+      const dur = Math.max(0.25, Number(req.duration ?? sfxDef.defaultDuration));
+      const wavBytes = synthesizeStudioSfxWav(sfxDef.id, dur, seed);
+      const wavBlob = new Blob([wavBytes as BlobPart], { type: "audio/wav" });
+      const assetId = uid("sfx");
+      await putVaultBlob(assetId, wavBlob).catch(() => {});
+      let audioUrl: string;
+      if (wavBytes.byteLength <= 1_600_000) {
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < wavBytes.length; i += chunk) {
+          binary += String.fromCharCode(...wavBytes.subarray(i, i + chunk));
+        }
+        audioUrl = `data:audio/wav;base64,${btoa(binary)}`;
+      } else if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+        audioUrl = URL.createObjectURL(wavBlob);
+        blobUrls.set(assetId, audioUrl);
+      } else {
+        audioUrl = "";
+      }
+
+      const asset: Asset = {
+        id: assetId,
+        name: `${req.title || sfxDef.label} #${seed}.wav`,
+        kind: "audio",
+        path: audioUrl,
+        duration: dur,
+      };
+      state.assets.push(asset);
+
+      let aTrack = seq.tracks.find((t) => t.kind === "audio" && !t.locked);
+      if (!aTrack) {
+        aTrack = {
+          id: uid("track"),
+          name: "A2 Sound FX",
+          kind: "audio",
+          muted: false,
+          solo: false,
+          locked: false,
+          clips: [],
+        };
+        seq.tracks.push(aTrack);
+      }
+      const startAt =
+        sfxDef.id === "cinema-whoosh" || sfxDef.id === "camera-shutter"
+          ? Number(Math.max(0, at - dur * 0.45).toFixed(3))
+          : Number(at.toFixed(3));
+      const clip: Clip = {
+        id: uid("clip"),
+        assetId: asset.id,
+        name: req.title || sfxDef.label,
+        start: startAt,
+        duration: dur,
+        in: 0,
+        out: dur,
+        transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
+        keyframes: [],
+        effects: [],
+      };
+      aTrack.clips.push(clip);
+      persist();
+      return {
+        summary: `Generated Sound FX "${clip.name}"`,
+        asset: clone(asset),
+        clip: clone(clip),
+      };
+    }
+
+    // Visual Transition or Overlay Asset (`transition` | `overlay`)
+    const visId = (req.presetId ||
+      promptHint?.visualPreset ||
+      (req.category === "transition" ? "golden-light-leak" : "bokeh-shimmer")) as ProceduralVisualPresetId;
+    const visDef = STUDIO_VISUAL_ASSETS.find((v) => v.id === visId) ?? STUDIO_VISUAL_ASSETS[0]!;
+    const c1 = req.primaryColor || promptHint?.primaryColor || visDef.primaryColor;
+    const c2 = req.accentColor || promptHint?.accentColor || visDef.accentColor;
+    const dur = Math.max(0.3, Number(req.duration ?? visDef.defaultDuration));
+    const previewUri =
+      renderVisualAssetPreviewDataUrl(visDef.id, c1, c2, seed) ||
+      buildSvgDataUri("lower-third-card", visDef.label, c1);
+
+    const asset: Asset = {
+      id: uid("vfx"),
+      name: `${req.title || visDef.label} #${seed}`,
+      kind: "image",
+      path: previewUri,
+      duration: dur,
+      width: seq.width,
+      height: seq.height,
+    };
+    blobUrls.set(asset.id, previewUri);
+    state.assets.push(asset);
+
+    let gTrack = seq.tracks.find((t) => t.kind === "graphics" && !t.locked);
+    if (!gTrack) {
+      gTrack = {
+        id: uid("track"),
+        name: "FX & Transitions",
+        kind: "graphics",
+        muted: false,
+        solo: false,
+        locked: false,
+        clips: [],
+      };
+      seq.tracks.push(gTrack);
+    }
+
+    const startAt =
+      req.category === "transition" ? Number(Math.max(0, at - dur / 2).toFixed(3)) : Number(at.toFixed(3));
+    const clip: Clip = {
+      id: uid("clip"),
+      assetId: asset.id,
+      name: req.title || visDef.label,
+      start: startAt,
+      duration: dur,
+      in: 0,
+      out: dur,
+      transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
+      keyframes: [],
+      effects: [
+        {
+          id: uid("fx"),
+          type: "procedural-fx",
+          params: {
+            preset: visDef.id,
+            primaryColor: c1,
+            accentColor: c2,
+            intensity: Number(req.intensity ?? 92),
+            seed,
+          },
+        },
+        ...(visDef.blendMode !== "normal"
+          ? [{ id: uid("fx"), type: "blend", params: { mode: visDef.blendMode } }]
+          : []),
+      ],
+    };
+    gTrack.clips.push(clip);
+    persist();
+    return {
+      summary: `Generated ${req.category === "transition" ? "Transition" : "Overlay"} "${clip.name}"`,
+      asset: clone(asset),
+      clip: clone(clip),
+    };
   },
   exportThumbnail: async (_title?: string, at?: number) => {
     const firstAsset = state.assets[0];

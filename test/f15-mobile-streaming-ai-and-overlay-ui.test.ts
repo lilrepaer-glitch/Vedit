@@ -110,7 +110,7 @@ describe("F15 — Streaming Non-Timeout AI, Macro Long-Prompt Edits, Touch Ergon
   });
 
   it("streams complex multi-step Czech prompts (auto_shorts + batch_captions + LUT + motion) end-to-end without timeout", async () => {
-    expect(VEDIT_VERSION).toBe("1.0.1");
+    expect(VEDIT_VERSION).toBe("1.0.2");
     saveApiSettings({
       baseUrl: `http://127.0.0.1:${ssePort}/sse-long`,
       apiKey: "sk-test-f15",
@@ -152,7 +152,7 @@ describe("F15 — Streaming Non-Timeout AI, Macro Long-Prompt Edits, Touch Ergon
     expect(javaSource).toContain("readSseStreamAsJson");
     expect(javaSource).toContain("window.__veditHttpProgress");
     expect(javaSource).toContain("public void abortHttpRequest(String requestId)");
-    expect(javaSource).toContain('return "1.0.1";');
+    expect(javaSource).toContain('return "1.0.2";');
 
     const assetsDir = path.resolve("apps/desktop/dist/assets");
     const assetFiles = fs.readdirSync(assetsDir);

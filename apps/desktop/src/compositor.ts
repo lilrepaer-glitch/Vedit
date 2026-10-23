@@ -4,6 +4,15 @@
 
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
 import type { Asset, Caption, Clip, Project, Sequence, Track } from "./api";
+import {
+  drawMotionGraphicOverlay,
+  drawProceduralFxClip,
+  easeInOutQuart,
+  easeOutBackSpring,
+  easeOutExpo,
+  type MotionGraphicTemplateId,
+  type ProceduralVisualPresetId,
+} from "./studioAssets";
 
 export interface ColorAdjustments {
   exposure: number;    // -100 .. 100
@@ -638,6 +647,9 @@ export function interpolateKeyframes(clip: Clip, prop: string, localTime: number
       if (easing === "hold") t = 0;
       else if (easing === "ease-in") t = rawT * rawT;
       else if (easing === "ease-out") t = 1 - (1 - rawT) * (1 - rawT);
+      else if (easing === "expo-out") t = easeOutExpo(rawT);
+      else if (easing === "cinema") t = easeInOutQuart(rawT);
+      else if (easing === "spring") t = easeOutBackSpring(rawT, 1.08);
       else if (easing === "ease-in-out") t = rawT * rawT * (3 - 2 * rawT);
       const av = Number(a.value) || 0;
       const bv = Number(b.value) || 0;
@@ -1186,6 +1198,8 @@ function drawSingleClipLayer(
       : null;
 
   ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   ctx.globalAlpha = alpha;
   if (blend.mode !== "normal") {
     ctx.globalCompositeOperation = blend.canvasOp;
@@ -1257,6 +1271,23 @@ export function drawCaptionOverlay(
   const elapsed = time - cap.start;
 
   const st: CaptionStyle = cap.style ?? {};
+  if (typeof st.motionTemplate === "string" && st.motionTemplate) {
+    return drawMotionGraphicOverlay(ctx, width, height, {
+      template: st.motionTemplate as MotionGraphicTemplateId,
+      title: cap.text,
+      subtitle: typeof st.subtitle === "string" ? st.subtitle : "",
+      color: st.color,
+      accentColor: typeof st.accentColor === "string" ? st.accentColor : "#3b82f6",
+      bgColor: st.bgColor,
+      bgOpacity: st.bgOpacity,
+      x: st.x,
+      y: st.y,
+      fontSize: st.fontSize,
+      elapsed,
+      duration: dur,
+    });
+  }
+
   const cx = (st.x ?? 0.5) * width;
   let cy = (st.y ?? 0.84) * height;
   const scaleFactor = height / 1080;
@@ -1399,6 +1430,42 @@ export function renderSequenceFrame(
       for (let i = 0; i < sorted.length; i++) {
         const clip = sorted[i]!;
         if (time < clip.start || time > clip.start + clip.duration) continue;
+
+        const procFx = clip.effects.find((e) => e.type === "procedural-fx" && e.enabled !== false);
+        if (procFx && procFx.params?.preset) {
+          const localProcT = time - clip.start;
+          const fadeEnv = getClipFadeEnvelope(clip, localProcT);
+          const clipAlpha = Math.max(0, Math.min(1, (clip.transform.opacity ?? 1) * fadeEnv));
+          drawProceduralFxClip(
+            ctx,
+            width,
+            height,
+            localProcT,
+            clip.duration,
+            {
+              preset: procFx.params.preset as ProceduralVisualPresetId,
+              primaryColor: String(procFx.params.primaryColor || "#f59e0b"),
+              accentColor: String(procFx.params.accentColor || "#ef4444"),
+              intensity: Number(procFx.params.intensity ?? 92),
+              seed: Number(procFx.params.seed ?? 7),
+            },
+            clipAlpha,
+          );
+          if (recordBounds) {
+            lastRenderedClipBoxes.push({
+              clipId: clip.id,
+              trackId: track.id,
+              x: 0,
+              y: 0,
+              w: width,
+              h: height,
+              cx: width / 2,
+              cy: height / 2,
+            });
+          }
+          continue;
+        }
+
         const source = mediaElements.get(clip.id) ?? mediaElements.get(clip.assetId);
         if (!source) continue;
 
@@ -1409,10 +1476,11 @@ export function renderSequenceFrame(
         let offsetY = 0;
         let extraScale = 1;
         let wipeRect: { x: number; y: number; w: number; h: number } | null = null;
+        let irisRadius: number | null = null;
 
         if (tx && localTime < tx.duration) {
           const p = Math.max(0, Math.min(1, localTime / tx.duration));
-          const ease = p * p * (3 - 2 * p);
+          const ease = easeInOutQuart(p);
           // Blend outgoing clip underneath during transition window
           const prev = i > 0 ? sorted[i - 1] : undefined;
           if (prev) {
@@ -1427,17 +1495,18 @@ export function renderSequenceFrame(
                 prevSrc,
                 Math.max(0, prev.duration - 0.02),
                 1,
+                tx.kind === "whip-pan" ? -ease * 0.45 : 0,
                 0,
-                0,
-                1,
+                tx.kind === "zoom-punch" ? 1 + 0.35 * ease : 1,
                 trackIdx === 0 && backdropMode === "blur",
                 disableGrading,
                 false,
               );
             }
           }
-          if (tx.kind === "dissolve") alpha = ease;
+          if (tx.kind === "dissolve" || tx.kind === "light-leak" || tx.kind === "film-burn") alpha = ease;
           else if (tx.kind === "slide-left") offsetX = 1 - ease;
+          else if (tx.kind === "whip-pan") offsetX = (1 - easeOutExpo(p)) * 1.15;
           else if (tx.kind === "slide-right") offsetX = -(1 - ease);
           else if (tx.kind === "slide-up") offsetY = 1 - ease;
           else if (tx.kind === "wipe-left") {
@@ -1446,9 +1515,14 @@ export function renderSequenceFrame(
           } else if (tx.kind === "wipe-right") {
             const revealW = Math.round(width * ease);
             wipeRect = { x: 0, y: 0, w: revealW, h: height };
+          } else if (tx.kind === "iris-circle") {
+            irisRadius = Math.hypot(width, height) * 0.6 * ease;
           } else if (tx.kind === "zoom-in") {
             extraScale = 0.78 + 0.22 * ease;
             alpha = ease;
+          } else if (tx.kind === "zoom-punch") {
+            extraScale = 1.42 - 0.42 * easeOutExpo(p);
+            alpha = Math.min(1, p * 2.2);
           } else if (tx.kind === "fade-black" || tx.kind === "fade-white") {
             alpha = ease;
           }
@@ -1458,7 +1532,12 @@ export function renderSequenceFrame(
           ctx.save();
           ctx.beginPath();
           ctx.rect(wipeRect.x, wipeRect.y, wipeRect.w, wipeRect.h);
-          ctx.clip();
+          ctx.clip?.();
+        } else if (irisRadius != null) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(width / 2, height / 2, Math.max(2, irisRadius), 0, Math.PI * 2);
+          ctx.clip?.();
         }
 
         drawSingleClipLayer(
@@ -1478,7 +1557,7 @@ export function renderSequenceFrame(
           recordBounds,
         );
 
-        if (wipeRect) {
+        if (wipeRect || irisRadius != null) {
           ctx.restore();
         }
 
@@ -1489,6 +1568,14 @@ export function renderSequenceFrame(
           ctx.fillStyle = tx.kind === "fade-white" ? "#ffffff" : "#000000";
           ctx.fillRect(0, 0, width, height);
           ctx.restore();
+        } else if (tx && localTime < tx.duration && (tx.kind === "light-leak" || tx.kind === "film-burn")) {
+          drawProceduralFxClip(ctx, width, height, localTime, tx.duration, {
+            preset: tx.kind === "light-leak" ? "golden-light-leak" : "film-flash-burn",
+            primaryColor: tx.kind === "light-leak" ? "#f59e0b" : "#fb923c",
+            accentColor: tx.kind === "light-leak" ? "#ef4444" : "#fef08a",
+            intensity: 90,
+            seed: 11,
+          });
         }
       }
     });

@@ -263,6 +263,6 @@ describe("F10 — Standalone Native Android APK (Vedit.apk v0.8.0), Universal AP
     expect(withoutCap.sequences[0]!.captions.some((c) => c.id === cap.id)).toBe(false);
 
     const check = await mobileApi.checkUpdate();
-    expect(check.currentVersion).toBe("1.0.1");
+    expect(check.currentVersion).toBe("1.0.2");
   });
 });
