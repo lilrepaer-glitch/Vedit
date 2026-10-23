@@ -23,6 +23,7 @@ import {
   type Sequence,
 } from "../core/types.js";
 import { resolveVideoEncoder, type HwAccelBackend } from "./hwaccel.js";
+import { buildMaskFfmpegFilter, BLEND_MODE_PRESETS, type ClipMaskOptions } from "../pro/compositing.js";
 
 export type VideoCodecId = "h264" | "h265" | "prores" | "vp9" | "gif";
 
@@ -345,6 +346,8 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
     const p = effect.params as Record<string, number | boolean | string>;
     switch (effect.type) {
       case "speed":
+      case "speed-ramp":
+      case "blend":
       case "volume":
       case "eq":
       case "transition":
@@ -352,6 +355,14 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
       case "audio-denoise":
       case "audio-eq":
         break;
+      case "mask": {
+        const maskExpr = buildMaskFfmpegFilter(effect.params as Partial<ClipMaskOptions> as ClipMaskOptions);
+        if (maskExpr) {
+          f.push(maskExpr);
+          hasAlpha = true;
+        }
+        break;
+      }
       case "reverse":
         if (p.reversed !== false) f.push("reverse");
         break;
@@ -687,9 +698,27 @@ export function buildRenderArgs(
       ? `(H-h)/2+(${keyframeExpr(rc.clip, "y", clipStaticValue(rc.clip, "y", rc.clip.transform.y))})`
       : baseY;
     const end = (rc.clip.start + rc.clip.duration).toFixed(3);
-    filters.push(
-      `[${current}][${vLabel}]overlay=x='${xExpr}':y='${yExpr}':eof_action=pass:enable='between(t,${rc.clip.start.toFixed(3)},${end})'[${outLabel}]`,
-    );
+    const blendFx = rc.clip.effects.find((e) => e.type === "blend" && (e as { enabled?: boolean }).enabled !== false);
+    const blendPreset = blendFx
+      ? BLEND_MODE_PRESETS.find((b) => b.id === String(blendFx.params?.mode ?? "normal"))
+      : undefined;
+    if (blendPreset && blendPreset.id !== "normal") {
+      const bgA = `bga${n}`;
+      const bgB = `bgb${n}`;
+      const ovLabel = `ov${n}`;
+      const blendAlpha = Math.max(0.05, Math.min(1, rc.clip.transform.opacity ?? 1)).toFixed(3);
+      filters.push(`[${current}]format=yuv420p,split=2[${bgA}][${bgB}]`);
+      filters.push(
+        `[${bgA}][${vLabel}]overlay=x='${xExpr}':y='${yExpr}':eof_action=pass:enable='between(t,${rc.clip.start.toFixed(3)},${end})',format=yuv420p[${ovLabel}]`,
+      );
+      filters.push(
+        `[${ovLabel}][${bgB}]blend=all_mode='${blendPreset.ffmpegMode}':all_opacity=${blendAlpha}:enable='between(t,${rc.clip.start.toFixed(3)},${end})'[${outLabel}]`,
+      );
+    } else {
+      filters.push(
+        `[${current}][${vLabel}]overlay=x='${xExpr}':y='${yExpr}':eof_action=pass:enable='between(t,${rc.clip.start.toFixed(3)},${end})'[${outLabel}]`,
+      );
+    }
     current = outLabel;
   });
 

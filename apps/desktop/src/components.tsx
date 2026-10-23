@@ -11,6 +11,8 @@ import {
 } from "./api";
 import {
   analyzeCanvasScopes,
+  computeClipMediaTime,
+  exportCanvasSnapshotPng,
   extractBrowserWaveformPeaks,
   extractMediaFilmstrip,
   getCachedWaveform,
@@ -23,6 +25,8 @@ import {
   isClipReversed,
   readClipAudioEq,
   readClipChromaKey,
+  readClipMask,
+  readClipSpeedRamp,
   renderSequenceFrame,
   setCachedWaveform,
 } from "./compositor";
@@ -299,14 +303,22 @@ export const CompositorStage = memo(function CompositorStage({
         const item = assetMap.get(clip.assetId);
         if (!item) continue;
         const speed = getClipSpeed(clip);
+        const ramp = readClipSpeedRamp(clip);
         const reversed = isClipReversed(clip);
         const active = playhead >= clip.start && playhead < clip.start + clip.duration - 0.005;
         const localTime = Math.max(0, playhead - clip.start);
-        const localOffset = localTime * speed;
-        const srcDur = Math.max(clip.duration * speed, item.duration || 0);
-        const mediaTime = reversed
-          ? Math.max(0, clip.in + clip.duration * speed - localOffset)
-          : Math.min(Math.max(0, srcDur - 0.01), clip.in + Math.max(0, localOffset));
+        const mediaTime = computeClipMediaTime(clip, playhead);
+        const instRate =
+          ramp.preset !== "constant" && clip.duration > 0.05
+            ? Math.max(
+                0.25,
+                Math.min(
+                  4,
+                  Math.abs(computeClipMediaTime(clip, Math.min(clip.start + clip.duration, playhead + 0.04)) - mediaTime) /
+                    0.04,
+                ),
+              )
+            : speed;
 
         const env = getClipFadeEnvelope(clip, localTime);
         const rawGain = muted || !trackAudible ? 0 : getClipVolumeGain(clip, track) * env;
@@ -315,8 +327,8 @@ export const CompositorStage = memo(function CompositorStage({
           const vid = mediaElsRef.current.get(item.id);
           if (vid instanceof HTMLVideoElement) {
             syncElementAudio(vid, clip, rawGain, reversed);
-            const safeRate = Math.max(0.25, Math.min(4, speed));
-            if (Math.abs(vid.playbackRate - safeRate) > 0.01) vid.playbackRate = safeRate;
+            const safeRate = Math.max(0.25, Math.min(4, instRate));
+            if (Math.abs(vid.playbackRate - safeRate) > 0.02) vid.playbackRate = safeRate;
 
             if (active) {
               const drift = Math.abs((vid.currentTime || 0) - mediaTime);
@@ -729,6 +741,19 @@ export const CompositorStage = memo(function CompositorStage({
             type="button"
             className="stage-pill"
             onClick={() => {
+              exportCanvasSnapshotPng(
+                canvasRef.current,
+                `${project.name || "vedit"}-${playhead.toFixed(2)}s`,
+              );
+            }}
+            title="Export Full-Resolution Frame PNG"
+          >
+            PNG
+          </button>
+          <button
+            type="button"
+            className="stage-pill"
+            onClick={() => {
               const el = viewportRef.current;
               if (!el) return;
               if (document.fullscreenElement) void document.exitFullscreen();
@@ -866,6 +891,8 @@ export const StudioTimeline = memo(function StudioTimeline({
   onSplitAtPlayhead,
   onImportMedia,
   onAddTrack,
+  onAddMarker,
+  onRemoveMarker,
 }: {
   project: Project;
   playhead: number;
@@ -886,6 +913,8 @@ export const StudioTimeline = memo(function StudioTimeline({
   onSplitAtPlayhead: () => void;
   onImportMedia: () => void;
   onAddTrack: (kind: "video" | "audio") => void;
+  onAddMarker?: () => void;
+  onRemoveMarker?: (markerId: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const laneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -1012,8 +1041,11 @@ export const StudioTimeline = memo(function StudioTimeline({
     for (const cap of seq.captions) {
       pts.push(cap.start, cap.end);
     }
+    for (const mk of project.markers ?? []) {
+      pts.push(Number(mk.time) || 0);
+    }
     return pts;
-  }, [seq.tracks, seq.captions, playhead]);
+  }, [seq.tracks, seq.captions, project.markers, playhead]);
 
   const snapTime = useCallback(
     (rawT: number, haptic = false): number => {
@@ -1236,6 +1268,17 @@ export const StudioTimeline = memo(function StudioTimeline({
           >
             +A
           </button>
+          {onAddMarker && (
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={onAddMarker}
+              style={{ padding: "4px 7px", fontSize: 11 }}
+              title="Add Timeline Marker at Playhead (M)"
+            >
+              +M
+            </button>
+          )}
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1311,13 +1354,58 @@ export const StudioTimeline = memo(function StudioTimeline({
           }}
         >
           <div style={{ width: totalWidth, minHeight: "100%", position: "relative" }}>
-            {/* Time Ruler */}
+            {/* Time Ruler + Beat / Chapter Markers */}
             <div className="ruler" onPointerDown={beginRulerScrub}>
               {ticks.map((t) => (
                 <div key={t} className="ruler-tick mono" style={{ left: t * pxPerSec }}>
                   {formatTimecode(t).slice(0, 5)}
                 </div>
               ))}
+              {(project.markers ?? []).map((mk) => {
+                const mkId = String(mk.id ?? "");
+                const mkTime = Number(mk.time) || 0;
+                const mkLabel = String(mk.label ?? "M");
+                const mkColor = String(mk.color || "#3b82f6");
+                return (
+                  <button
+                    key={mkId}
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPlayhead(mkTime);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      onRemoveMarker?.(mkId);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onRemoveMarker?.(mkId);
+                    }}
+                    title={`${mkLabel} (${mkTime.toFixed(2)}s) — click to seek, double-click to remove`}
+                    style={{
+                      position: "absolute",
+                      left: mkTime * pxPerSec,
+                      bottom: 0,
+                      transform: "translateX(-50%)",
+                      padding: "1px 5px",
+                      borderRadius: "4px 4px 0 0",
+                      border: "none",
+                      background: mkColor,
+                      color: "#fff",
+                      fontSize: 9.5,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      lineHeight: 1.25,
+                      zIndex: 4,
+                    }}
+                  >
+                    {mkLabel}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Captions / Titles Interactive Track */}
@@ -1460,9 +1548,43 @@ export const StudioTimeline = memo(function StudioTimeline({
                         <span className="tl-clip-label">
                           {item?.name ?? clip.name}
                           {Math.abs(speed - 1) > 0.02 ? ` · ${speed.toFixed(2)}×` : ""}
+                          {readClipSpeedRamp(clip).preset !== "constant" ? " · Ramp" : ""}
                           {rev ? " · Rev" : ""}
                           {ck.enabled ? " · Key" : ""}
+                          {readClipMask(clip).shape !== "none" ? " · Mask" : ""}
                         </span>
+
+                        {/* Interactive Keyframe Diamond Indicators */}
+                        {clip.keyframes && clip.keyframes.length > 0 && (
+                          <div
+                            style={{
+                              position: "absolute",
+                              left: 0,
+                              right: 0,
+                              bottom: 3,
+                              height: 8,
+                              pointerEvents: "none",
+                            }}
+                          >
+                            {Array.from(
+                              new Set(clip.keyframes.map((k) => Number(Math.max(0, Math.min(cDur, k.time)).toFixed(2)))),
+                            ).map((kt) => (
+                              <span
+                                key={kt}
+                                style={{
+                                  position: "absolute",
+                                  left: `${Math.min(98, Math.max(2, (kt / Math.max(0.05, cDur)) * 100))}%`,
+                                  top: 1,
+                                  width: 6,
+                                  height: 6,
+                                  background: "#fbbf24",
+                                  border: "1px solid rgba(9,9,11,0.9)",
+                                  transform: "translateX(-50%) rotate(45deg)",
+                                }}
+                              />
+                            ))}
+                          </div>
+                        )}
 
                         {/* Transition indicator pill */}
                         {tx && (

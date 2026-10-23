@@ -5,7 +5,7 @@
 
 import type { VeditEngine } from "../core/engine.js";
 import { removeSilences, buildHighlight } from "../ai/edit.js";
-import { saveSnapshot, recordAudit } from "../ext/collab.js";
+import { saveSnapshot, recordAudit, addTimelineMarker } from "../ext/collab.js";
 import { applyTemplate } from "../ext/marketplace.js";
 import { applyChromaKey, applyColorGrade, applyFadeTransition, setClipSpeed } from "../pro/fx.js";
 import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
@@ -14,6 +14,7 @@ import { addGraphicOverlay } from "../pro/graphics.js";
 import { generateProjectThumbnail } from "../pro/capture.js";
 import { applyMulticamCuts, syncMulticamClips } from "../pro/multicam.js";
 import { applyToneCurve, applyParametricEq, type ToneCurvePresetId, type AudioEqPresetId } from "../pro/studio-grade.js";
+import { applyClipBlend, applyClipMask, applySpeedRamp, type MaskShapeId } from "../pro/compositing.js";
 import {
   callChatCompletion,
   getRuntimeApiConfig,
@@ -58,6 +59,10 @@ const COPILOT_SYSTEM_PROMPT =
   '{"op":"eq","preset":"flat|voice-podcast|bass-boost|de-mud|crisp-vocal|warm-cinema","clipId":"optional"}, ' +
   '{"op":"volume","gain":1.0,"clipId":"optional"}, ' +
   '{"op":"speed","value":1.5,"clipId":"optional"}, ' +
+  '{"op":"speed_ramp","preset":"montage-in|hero-slowmo|bullet|jump-cut|smooth-out","intensity":1,"clipId":"optional"}, ' +
+  '{"op":"mask","shape":"none|circle|rectangle|split-h|split-v|linear","scale":0.78,"feather":14,"invert":false,"clipId":"optional"}, ' +
+  '{"op":"blend","mode":"normal|screen|multiply|overlay|lighten|soft-light|color-dodge","clipId":"optional"}, ' +
+  '{"op":"marker","label":"Drop","time":1.2}, ' +
   '{"op":"transition","kind":"dissolve|fade-black|fade-white|wipe-left|wipe-right|slide-left|slide-up|zoom-in","duration":0.5}, ' +
   '{"op":"fade","value":0.5,"fadeIn":0.5,"fadeOut":0.5,"clipId":"optional"}, ' +
   '{"op":"layout","value":"pip-bottom-right|pip-bottom-left|pip-top-right|pip-top-left|split-left|split-right|full-reset","clipId":"optional"}, ' +
@@ -279,6 +284,28 @@ export async function runStudioCopilot(
               const rate = Math.max(0.1, Math.min(8, Number(act.rate ?? act.value ?? 1.5)));
               setClipSpeed(engine, targetClip.id, rate);
               steps.push({ step: "clip.set_speed", detail: `Set "${targetClip.name}" speed to ${rate}×` });
+            } else if (op === "speed_ramp" && targetClip) {
+              const preset = String(act.preset || act.value || "montage-in");
+              applySpeedRamp(engine, targetClip.id, preset, Number(act.intensity ?? 1));
+              steps.push({ step: "clip.speed_ramp", detail: `Applied "${preset}" non-linear speed ramp` });
+            } else if (op === "mask" && targetClip) {
+              const shape = String(act.shape || act.value || "circle") as MaskShapeId;
+              applyClipMask(engine, targetClip.id, {
+                shape,
+                scale: act.scale != null ? Number(act.scale) : 0.78,
+                feather: act.feather != null ? Number(act.feather) : 14,
+                invert: Boolean(act.invert),
+              });
+              steps.push({ step: "vfx.mask", detail: `Applied "${shape}" feathered shape mask` });
+            } else if (op === "blend" && targetClip) {
+              const mode = String(act.mode || act.value || "screen");
+              applyClipBlend(engine, targetClip.id, mode, act.opacity != null ? Number(act.opacity) : undefined);
+              steps.push({ step: "vfx.blend", detail: `Set blend mode to "${mode}"` });
+            } else if (op === "marker") {
+              const time = Math.max(0, Number(act.time ?? opts.playhead ?? 0));
+              const label = String(act.label || act.value || "Beat");
+              addTimelineMarker(engine, { time, label, color: String(act.color || "#3b82f6") });
+              steps.push({ step: "timeline.marker", detail: `Added marker "${label}" at ${time.toFixed(2)}s` });
             } else if (op === "transition" && targetClip) {
               const kind = String(act.kind || act.value || "dissolve");
               const duration = Math.max(0.1, Math.min(3, Number(act.duration ?? 0.5)));
@@ -582,12 +609,50 @@ export async function runStudioCopilot(
   }
 
   const speedMatch = /(\d+(?:\.\d+)?)\s*x\b/.exec(lower);
-  if (clipForLook && (speedMatch || /slow\s*mo|zpomal|zrychl/.test(lower))) {
+  if (clipForLook && /speed\s*ramp|montage\s*ramp|hero\s*slow|bullet\s*time|ramp/.test(lower)) {
+    const preset = /bullet/.test(lower)
+      ? "bullet"
+      : /hero/.test(lower)
+        ? "hero-slowmo"
+        : /jump/.test(lower)
+          ? "jump-cut"
+          : /smooth/.test(lower)
+            ? "smooth-out"
+            : "montage-in";
+    applySpeedRamp(engine, clipForLook.id, preset, 1);
+    steps.push({ step: "clip.speed_ramp", detail: `Applied ${preset} smooth speed ramp` });
+  } else if (clipForLook && (speedMatch || /slow\s*mo|zpomal|zrychl/.test(lower))) {
     const rate = speedMatch ? Number(speedMatch[1]) : /zrychl/.test(lower) ? 1.5 : 0.5;
     if (rate >= 0.1 && rate <= 8) {
       setClipSpeed(engine, clipForLook.id, rate);
       steps.push({ step: "clip.set_speed", detail: `Set clip speed to ${rate}×` });
     }
+  }
+
+  if (clipForLook && /\bmask|masku|circle\s*mask|rect\s*mask|vignette\s*mask/.test(lower)) {
+    const shape: MaskShapeId = /rect|obdéln/.test(lower)
+      ? "rectangle"
+      : /linear|gradient/.test(lower)
+        ? "linear"
+        : /split/.test(lower)
+          ? "split-h"
+          : "circle";
+    applyClipMask(engine, clipForLook.id, { shape, scale: 0.78, feather: 14 });
+    steps.push({ step: "vfx.mask", detail: `Applied ${shape} feathered shape mask` });
+  }
+
+  if (clipForLook && /\bblend\b|\bscreen\b|\bmultiply\b|\boverlay\s*mode|\bsoft.?light|\bcolor.?dodge/.test(lower)) {
+    const mode = /multiply/.test(lower)
+      ? "multiply"
+      : /overlay/.test(lower)
+        ? "overlay"
+        : /soft/.test(lower)
+          ? "soft-light"
+          : /dodge/.test(lower)
+            ? "color-dodge"
+            : "screen";
+    applyClipBlend(engine, clipForLook.id, mode);
+    steps.push({ step: "vfx.blend", detail: `Set compositing blend mode to ${mode}` });
   }
 
   if (clipForLook && /\bfade\b|\bdissolve\b|prolnut/.test(lower)) {

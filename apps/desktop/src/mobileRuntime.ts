@@ -63,7 +63,7 @@ export const IS_ANDROID_APK: boolean =
     location.hostname === "appassets.vedit.studio" ||
     /VedStudioAPK/i.test(navigator.userAgent));
 
-const APK_VERSION = "0.9.2";
+const APK_VERSION = "1.0.0";
 const STORAGE_KEY_PROJECT = "vedit.apk.project.v3";
 const STORAGE_KEY_SAVED_LIST = "vedit.apk.savedProjects.v2";
 const STORAGE_KEY_API = "vedit.apk.apiSettings.v2";
@@ -1634,9 +1634,11 @@ export const mobileApi = {
   addKeyframes: async (
     clipId: string,
     keyframes: Array<{ time: number; property: string; value: number; easing?: string }>,
+    replace = false,
   ) => {
     recordUndo();
     const { clip } = findClip(clipId);
+    if (replace) clip.keyframes = [];
     for (const kf of keyframes) {
       clip.keyframes = clip.keyframes.filter(
         (existing) => !(existing.property === kf.property && Math.abs(existing.time - kf.time) < 0.04),
@@ -2044,6 +2046,10 @@ export const mobileApi = {
               `{"op":"eq","preset":"flat|voice-podcast|bass-boost|de-mud|crisp-vocal|warm-cinema"}, ` +
               `{"op":"volume","gain":1.0}, ` +
               `{"op":"speed","rate":1.25}, ` +
+              `{"op":"speed_ramp","preset":"montage-in|hero-slowmo|bullet|jump-cut|smooth-out","intensity":1}, ` +
+              `{"op":"mask","shape":"none|circle|rectangle|split-h|split-v|linear","scale":0.78,"feather":14,"invert":false}, ` +
+              `{"op":"blend","mode":"normal|screen|multiply|overlay|lighten|soft-light|color-dodge"}, ` +
+              `{"op":"marker","label":"Drop","time":1.2}, ` +
               `{"op":"transition","kind":"dissolve|fade-black|fade-white|wipe-left|wipe-right|slide-left|slide-up|zoom-in","duration":0.5}, ` +
               `{"op":"fade","fadeIn":0.5,"fadeOut":0.5}, ` +
               `{"op":"layout","value":"pip-bottom-right|pip-top-right|split-left|split-right|full-reset"}, ` +
@@ -2145,6 +2151,50 @@ export const mobileApi = {
                 { id: uid("fx"), type: "volume", params: { gain } },
               ];
               steps.push({ step: "Volume", detail: `${Math.round(gain * 100)}%` });
+            } else if (op === "speed_ramp" && target) {
+              const preset = String(act.preset || act.value || "montage-in");
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "speed-ramp"),
+                ...(preset !== "constant"
+                  ? [{ id: uid("fx"), type: "speed-ramp", params: { preset, intensity: Number(act.intensity ?? 1) } }]
+                  : []),
+              ];
+              steps.push({ step: "Speed Ramp", detail: preset });
+            } else if (op === "mask" && target) {
+              const shape = String(act.shape || act.value || "circle");
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "mask"),
+                ...(shape !== "none"
+                  ? [
+                      {
+                        id: uid("fx"),
+                        type: "mask",
+                        params: {
+                          shape,
+                          scale: Number(act.scale ?? 0.78),
+                          feather: Number(act.feather ?? 14),
+                          invert: Boolean(act.invert),
+                        },
+                      },
+                    ]
+                  : []),
+              ];
+              steps.push({ step: "Shape Mask", detail: shape });
+            } else if (op === "blend" && target) {
+              const mode = String(act.mode || act.value || "screen");
+              target.effects = [
+                ...target.effects.filter((e) => e.type !== "blend"),
+                ...(mode !== "normal" ? [{ id: uid("fx"), type: "blend", params: { mode } }] : []),
+              ];
+              steps.push({ step: "Blend Mode", detail: mode });
+            } else if (op === "marker") {
+              const time = Math.max(0, Number(act.time ?? context?.playhead ?? 0));
+              const label = String(act.label || act.value || "Beat");
+              state.markers = [
+                ...(state.markers ?? []),
+                { id: uid("mk"), time, label, color: "#3b82f6" },
+              ].sort((a, b) => Number(a.time) - Number(b.time));
+              steps.push({ step: "Marker", detail: `${label} @ ${time.toFixed(2)}s` });
             } else if (op === "speed" && target) {
               const rate = Math.max(0.25, Math.min(4, Number(act.rate ?? act.value ?? 1.25)));
               const prevRate = Number(target.effects.find((e) => e.type === "speed")?.params?.rate ?? 1) || 1;
@@ -2881,6 +2931,73 @@ export const mobileApi = {
         ? ["WEBVTT", "", ...sorted.flatMap((c, i) => [String(i + 1), `${fmtTs(c.start, ".")} --> ${fmtTs(c.end, ".")}`, c.text.trim() || " ", ""])].join("\n")
         : sorted.map((c, i) => `${i + 1}\n${fmtTs(c.start, ",")} --> ${fmtTs(c.end, ",")}\n${c.text.trim() || " "}\n`).join("\n");
     return { format, text, count: sorted.length };
+  },
+  applyMask: async (
+    clipId: string,
+    opts: { shape: string; scale?: number; feather?: number; invert?: boolean },
+  ) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    clip.effects = clip.effects.filter((e) => e.type !== "mask");
+    if (opts.shape && opts.shape !== "none") {
+      const fx = {
+        id: uid("fx"),
+        type: "mask",
+        params: {
+          shape: opts.shape,
+          scale: opts.scale ?? 0.78,
+          feather: opts.feather ?? 12,
+          invert: Boolean(opts.invert),
+        },
+      };
+      clip.effects.push(fx);
+      persist();
+      return { effect: fx, active: true };
+    }
+    persist();
+    return { effect: null, active: false };
+  },
+  applyBlend: async (clipId: string, mode: string, opacity?: number) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    clip.effects = clip.effects.filter((e) => e.type !== "blend");
+    if (opacity != null && Number.isFinite(opacity)) {
+      clip.transform = { ...clip.transform, opacity: Math.max(0, Math.min(1, opacity)) };
+    }
+    if (mode && mode !== "normal") {
+      const fx = { id: uid("fx"), type: "blend", params: { mode } };
+      clip.effects.push(fx);
+      persist();
+      return { effect: fx, mode };
+    }
+    persist();
+    return { effect: null, mode: "normal" };
+  },
+  applySpeedRamp: async (clipId: string, preset: string, intensity = 1) => {
+    recordUndo();
+    const { clip } = findClip(clipId);
+    clip.effects = clip.effects.filter((e) => e.type !== "speed-ramp");
+    if (preset && preset !== "constant") {
+      const fx = { id: uid("fx"), type: "speed-ramp", params: { preset, intensity } };
+      clip.effects.push(fx);
+      persist();
+      return { effect: fx, preset };
+    }
+    persist();
+    return { effect: null, preset: "constant" };
+  },
+  addMarker: async (time: number, label = "Marker", color = "#3b82f6") => {
+    recordUndo();
+    const marker = { id: uid("mk"), time: Math.max(0, Number(time.toFixed(3))), label, color };
+    state.markers = [...(state.markers ?? []), marker].sort((a, b) => Number(a.time) - Number(b.time));
+    persist();
+    return { marker };
+  },
+  removeMarker: async (markerId: string) => {
+    recordUndo();
+    state.markers = (state.markers ?? []).filter((m) => String(m.id) !== markerId);
+    persist();
+    return { ok: true };
   },
   saveClientMp4: async (blob: Blob, filename = "Vedit_Export.mp4") => {
     const outUrl = URL.createObjectURL(blob);
