@@ -46,6 +46,14 @@ import {
   type SubtitleFormat,
   type ToneCurvePresetId,
 } from "../pro/studio-grade.js";
+import {
+  BLEND_MODE_PRESETS,
+  MASK_SHAPE_PRESETS,
+  SPEED_RAMP_PRESETS,
+  applyClipBlend,
+  applyClipMask,
+  applySpeedRamp,
+} from "../pro/compositing.js";
 import { VEDIT_VERSION, checkForUpdates, downloadAndInstallUpdate } from "../pro/updater.js";
 import {
   fetchRemoteModels,
@@ -1001,7 +1009,13 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
     const keyframes = req.body?.keyframes;
     if (!Array.isArray(keyframes)) return badRequest(res, "keyframes musí být pole");
     try {
-      const clip = engine.addKeyframes(String(req.params.clipId), keyframes, req.body?.trackId ? String(req.body.trackId) : undefined);
+      const clipId = String(req.params.clipId);
+      const trackId = req.body?.trackId ? String(req.body.trackId) : undefined;
+      if (req.body?.replace) {
+        const found = engine.findClipAnywhere(clipId);
+        found.clip.keyframes = [];
+      }
+      const clip = engine.addKeyframes(clipId, keyframes, trackId);
       res.json({ clip });
     } catch (err) {
       badRequest(res, (err as Error).message);
@@ -1445,6 +1459,12 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       color: req.body?.color != null ? String(req.body.color) : undefined,
     });
     res.status(201).json({ marker });
+  }, registry));
+
+  app.delete("/api/v1/projects/:id/markers/:markerId", wrap((req, res, engine) => {
+    const markerId = String(req.params.markerId);
+    engine.project.markers = (engine.project.markers ?? []).filter((m) => m.id !== markerId);
+    res.json({ ok: true });
   }, registry));
 
   app.get("/api/v1/projects/:id/chapters", wrap((_req, res, engine) => {
@@ -2059,6 +2079,59 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
       }
     }, registry),
   );
+
+  app.get("/api/v1/compositing/presets", (_req, res) => {
+    res.json({
+      masks: MASK_SHAPE_PRESETS,
+      blendModes: BLEND_MODE_PRESETS,
+      speedRamps: SPEED_RAMP_PRESETS,
+    });
+  });
+
+  app.post("/api/v1/projects/:id/clips/:clipId/mask", wrap((req, res, engine) => {
+    try {
+      const fx = applyClipMask(engine, String(req.params.clipId), {
+        shape: req.body?.shape,
+        scale: req.body?.scale,
+        feather: req.body?.feather,
+        radius: req.body?.radius,
+        centerX: req.body?.centerX,
+        centerY: req.body?.centerY,
+        invert: req.body?.invert,
+      });
+      res.json({ effect: fx, active: Boolean(fx) });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/blend", wrap((req, res, engine) => {
+    try {
+      const fx = applyClipBlend(
+        engine,
+        String(req.params.clipId),
+        String(req.body?.mode ?? "normal"),
+        req.body?.opacity != null ? Number(req.body.opacity) : undefined,
+      );
+      res.json({ effect: fx, mode: fx?.params?.mode ?? "normal" });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/clips/:clipId/speed-ramp", wrap((req, res, engine) => {
+    try {
+      const fx = applySpeedRamp(
+        engine,
+        String(req.params.clipId),
+        String(req.body?.preset ?? "constant"),
+        req.body?.intensity != null ? Number(req.body.intensity) : 1,
+      );
+      res.json({ effect: fx, preset: fx?.params?.preset ?? "constant" });
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
 
   // Serve built Desktop UI bundle directly on same-origin `http://127.0.0.1:47000/`
   // so Windows WebView2 avoids every cross-origin / Mixed Content / Private Network Access restriction!

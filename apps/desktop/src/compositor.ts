@@ -242,6 +242,127 @@ export function getSequenceDuration(seq: Sequence | undefined | null): number {
   return Number(max.toFixed(3));
 }
 
+export type MaskShapeUiId = "none" | "circle" | "rectangle" | "split-h" | "split-v" | "linear";
+export type BlendModeUiId =
+  | "normal"
+  | "screen"
+  | "multiply"
+  | "overlay"
+  | "lighten"
+  | "darken"
+  | "soft-light"
+  | "color-dodge"
+  | "add";
+export type SpeedRampUiId =
+  | "constant"
+  | "montage-in"
+  | "hero-slowmo"
+  | "bullet"
+  | "jump-cut"
+  | "smooth-out";
+
+export const MASK_SHAPES_UI: ReadonlyArray<{ id: MaskShapeUiId; label: string }> = [
+  { id: "none", label: "None" },
+  { id: "circle", label: "Circle" },
+  { id: "rectangle", label: "Rectangle" },
+  { id: "split-h", label: "Split H" },
+  { id: "split-v", label: "Split V" },
+  { id: "linear", label: "Linear" },
+];
+
+export const BLEND_MODES_UI: ReadonlyArray<{
+  id: BlendModeUiId;
+  label: string;
+  canvasOp: GlobalCompositeOperation;
+}> = [
+  { id: "normal", label: "Normal", canvasOp: "source-over" },
+  { id: "screen", label: "Screen", canvasOp: "screen" },
+  { id: "multiply", label: "Multiply", canvasOp: "multiply" },
+  { id: "overlay", label: "Overlay", canvasOp: "overlay" },
+  { id: "lighten", label: "Lighten", canvasOp: "lighten" },
+  { id: "darken", label: "Darken", canvasOp: "darken" },
+  { id: "soft-light", label: "Soft Light", canvasOp: "soft-light" },
+  { id: "color-dodge", label: "Color Dodge", canvasOp: "color-dodge" },
+  { id: "add", label: "Linear Add", canvasOp: "lighter" },
+];
+
+export const SPEED_RAMPS_UI: ReadonlyArray<{
+  id: SpeedRampUiId;
+  label: string;
+  curve: readonly [number, number, number, number, number];
+}> = [
+  { id: "constant", label: "Constant", curve: [1, 1, 1, 1, 1] },
+  { id: "montage-in", label: "Montage In", curve: [2.4, 1.35, 0.72, 0.72, 0.85] },
+  { id: "hero-slowmo", label: "Hero Slow-Mo", curve: [1.55, 1.2, 0.42, 1.2, 1.63] },
+  { id: "bullet", label: "Bullet Time", curve: [2.1, 1.15, 0.3, 1.15, 2.1] },
+  { id: "jump-cut", label: "Jump Pop", curve: [0.65, 1.95, 0.65, 1.95, 0.8] },
+  { id: "smooth-out", label: "Smooth Out", curve: [0.85, 0.85, 0.95, 1.45, 2.2] },
+];
+
+export interface ClipMaskUiState {
+  shape: MaskShapeUiId;
+  scale: number;
+  feather: number;
+  invert: boolean;
+}
+
+export function readClipMask(clip: Clip): ClipMaskUiState {
+  const fx = clip.effects.find((e) => e.type === "mask" && e.enabled !== false);
+  if (!fx) return { shape: "none", scale: 0.78, feather: 12, invert: false };
+  return {
+    shape: (fx.params?.shape as MaskShapeUiId) || "none",
+    scale: Math.max(0.15, Math.min(1, Number(fx.params?.scale ?? 0.78))),
+    feather: Math.max(0, Math.min(100, Number(fx.params?.feather ?? 12))),
+    invert: Boolean(fx.params?.invert),
+  };
+}
+
+export function readClipBlend(clip: Clip): { mode: BlendModeUiId; canvasOp: GlobalCompositeOperation } {
+  const fx = clip.effects.find((e) => e.type === "blend" && e.enabled !== false);
+  if (!fx) return { mode: "normal", canvasOp: "source-over" };
+  const hit = BLEND_MODES_UI.find((b) => b.id === String(fx.params?.mode || "normal")) ?? BLEND_MODES_UI[0]!;
+  return { mode: hit.id, canvasOp: hit.canvasOp };
+}
+
+export function readClipSpeedRamp(clip: Clip): { preset: SpeedRampUiId; intensity: number } {
+  const fx = clip.effects.find((e) => e.type === "speed-ramp" && e.enabled !== false);
+  if (!fx) return { preset: "constant", intensity: 1 };
+  const hit = SPEED_RAMPS_UI.find((r) => r.id === String(fx.params?.preset || "constant")) ?? SPEED_RAMPS_UI[0]!;
+  return {
+    preset: hit.id,
+    intensity: Math.max(0.1, Math.min(1, Number(fx.params?.intensity ?? 1))),
+  };
+}
+
+export function evaluateSpeedRampUiProgress(
+  preset: SpeedRampUiId,
+  uRaw: number,
+  intensity = 1,
+): number {
+  const u = Math.max(0, Math.min(1, uRaw));
+  if (preset === "constant" || u <= 0 || u >= 1) return u;
+  const spec = SPEED_RAMPS_UI.find((s) => s.id === preset) ?? SPEED_RAMPS_UI[0]!;
+  const k = Math.max(0, Math.min(1, intensity));
+  const weights = spec.curve.map((w) => Math.max(0.15, 1 + (w - 1) * k));
+  const STEPS = 64;
+  let totalArea = 0;
+  let partialArea = 0;
+  for (let i = 0; i < STEPS; i++) {
+    const mid = (i + 0.5) / STEPS;
+    const seg = mid * 4;
+    const idx = Math.min(3, Math.floor(seg));
+    const frac = seg - idx;
+    const w = weights[idx]! + (weights[idx + 1]! - weights[idx]!) * frac;
+    const area = w / STEPS;
+    totalArea += area;
+    const segEnd = (i + 1) / STEPS;
+    const segStart = i / STEPS;
+    if (u >= segEnd) partialArea += area;
+    else if (u > segStart) partialArea += area * ((u - segStart) * STEPS);
+  }
+  return totalArea > 0 ? Math.max(0, Math.min(1, partialArea / totalArea)) : u;
+}
+
 export function getClipSpeed(clip: Clip): number {
   const fx = clip.effects.find((e) => e.type === "speed");
   const rate = Number(fx?.params?.rate ?? fx?.params?.speed ?? 1);
@@ -527,7 +648,12 @@ export function interpolateKeyframes(clip: Clip, prop: string, localTime: number
 }
 
 export function computeClipMediaTime(clip: Clip, timelineTime: number): number {
-  const local = Math.max(0, Math.min(clip.duration, timelineTime - clip.start));
+  const rawLocal = Math.max(0, Math.min(clip.duration, timelineTime - clip.start));
+  const ramp = readClipSpeedRamp(clip);
+  const local =
+    ramp.preset !== "constant" && clip.duration > 0.05
+      ? evaluateSpeedRampUiProgress(ramp.preset, rawLocal / clip.duration, ramp.intensity) * clip.duration
+      : rawLocal;
   const speed = getClipSpeed(clip);
   if (isClipReversed(clip)) {
     return Math.max(0, clip.out - local * speed);
@@ -815,7 +941,113 @@ function renderProcessedClipSource(
   return fxCanvas;
 }
 
-// ---------- Core Composite Frame Renderer ----------
+let maskCompCanvas: HTMLCanvasElement | null = null;
+let maskCompCtx: CanvasRenderingContext2D | null = null;
+let maskAlphaCanvas: HTMLCanvasElement | null = null;
+let maskAlphaCtx: CanvasRenderingContext2D | null = null;
+
+function applyShapeMaskToSource(
+  source: CanvasImageSource,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  drawW: number,
+  drawH: number,
+  mask: ClipMaskUiState,
+): HTMLCanvasElement | null {
+  if (typeof document === "undefined" || mask.shape === "none") return null;
+  const maxDim = 960;
+  const ratio = Math.min(1, maxDim / Math.max(drawW, drawH, 1));
+  const mw = Math.max(4, Math.round(drawW * ratio));
+  const mh = Math.max(4, Math.round(drawH * ratio));
+  if (!maskCompCanvas) {
+    maskCompCanvas = document.createElement("canvas");
+    maskCompCtx = maskCompCanvas.getContext("2d");
+  }
+  if (!maskAlphaCanvas) {
+    maskAlphaCanvas = document.createElement("canvas");
+    maskAlphaCtx = maskAlphaCanvas.getContext("2d");
+  }
+  if (!maskCompCtx || !maskAlphaCtx) return null;
+  if (maskCompCanvas.width !== mw || maskCompCanvas.height !== mh) {
+    maskCompCanvas.width = mw;
+    maskCompCanvas.height = mh;
+    maskAlphaCanvas.width = mw;
+    maskAlphaCanvas.height = mh;
+  }
+
+  maskAlphaCtx.save();
+  maskAlphaCtx.clearRect(0, 0, mw, mh);
+  const blurPx = Math.round((mask.feather / 100) * Math.min(mw, mh) * 0.16);
+  if (blurPx > 0) maskAlphaCtx.filter = `blur(${blurPx}px)`;
+  maskAlphaCtx.fillStyle = "#ffffff";
+
+  if (mask.shape === "circle") {
+    const r = (Math.min(mw, mh) / 2) * mask.scale;
+    maskAlphaCtx.beginPath();
+    maskAlphaCtx.arc(mw / 2, mh / 2, r, 0, Math.PI * 2);
+    maskAlphaCtx.fill();
+  } else if (mask.shape === "rectangle") {
+    const rw = mw * mask.scale;
+    const rh = mh * mask.scale;
+    const rx = (mw - rw) / 2;
+    const ry = (mh - rh) / 2;
+    const rad = Math.min(rw, rh) * 0.08;
+    maskAlphaCtx.beginPath();
+    maskAlphaCtx.moveTo(rx + rad, ry);
+    maskAlphaCtx.lineTo(rx + rw - rad, ry);
+    maskAlphaCtx.quadraticCurveTo(rx + rw, ry, rx + rw, ry + rad);
+    maskAlphaCtx.lineTo(rx + rw, ry + rh - rad);
+    maskAlphaCtx.quadraticCurveTo(rx + rw, ry + rh, rx + rw - rad, ry + rh);
+    maskAlphaCtx.lineTo(rx + rad, ry + rh);
+    maskAlphaCtx.quadraticCurveTo(rx, ry + rh, rx, ry + rh - rad);
+    maskAlphaCtx.lineTo(rx, ry + rad);
+    maskAlphaCtx.quadraticCurveTo(rx, ry, rx + rad, ry);
+    maskAlphaCtx.closePath();
+    maskAlphaCtx.fill();
+  } else if (mask.shape === "split-h") {
+    maskAlphaCtx.fillRect(0, 0, mw, mh * mask.scale);
+  } else if (mask.shape === "split-v") {
+    maskAlphaCtx.fillRect(0, 0, mw * mask.scale, mh);
+  } else if (mask.shape === "linear") {
+    maskAlphaCtx.filter = "none";
+    const span = Math.max(0.06, (mask.feather / 100) * 0.55);
+    const y0 = mh * Math.max(0, mask.scale - span);
+    const y1 = mh * Math.min(1, mask.scale + span);
+    const grad = maskAlphaCtx.createLinearGradient(0, y0, 0, Math.max(y0 + 2, y1));
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    maskAlphaCtx.fillStyle = grad;
+    maskAlphaCtx.fillRect(0, 0, mw, mh);
+  }
+  maskAlphaCtx.restore();
+
+  maskCompCtx.save();
+  maskCompCtx.clearRect(0, 0, mw, mh);
+  maskCompCtx.globalCompositeOperation = "source-over";
+  maskCompCtx.drawImage(source, sx, sy, sw, sh, 0, 0, mw, mh);
+  maskCompCtx.globalCompositeOperation = mask.invert ? "destination-out" : "destination-in";
+  maskCompCtx.drawImage(maskAlphaCanvas, 0, 0);
+  maskCompCtx.restore();
+  return maskCompCanvas;
+}
+
+export function exportCanvasSnapshotPng(canvas: HTMLCanvasElement | null, baseName = "vedit-frame"): boolean {
+  if (!canvas || typeof document === "undefined") return false;
+  try {
+    const dataUrl = canvas.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `${baseName.replace(/[^a-zA-Z0-9_-]+/g, "_")}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface RenderFrameOptions {
   project: Project;
@@ -865,11 +1097,19 @@ function drawSingleClipLayer(
   const curves = disableGrading
     ? { active: false, preset: "linear" as const, shadows: 0, midtones: 0, highlights: 0, clarity: 0, points: [] }
     : readClipCurves(clip);
+  const mask = readClipMask(clip);
+  const blend = readClipBlend(clip);
 
-  // Optional blurred full-canvas background fill when aspect ratios differ (suppress if chroma-keyed overlay!)
+  // Optional blurred full-canvas background fill when aspect ratios differ (suppress if chroma-keyed or masked!)
   const canvasAspect = width / height;
   const srcAspect = srcW / srcH;
-  if (backdropBlurFill && !chroma.enabled && Math.abs(canvasAspect - srcAspect) > 0.08) {
+  if (
+    backdropBlurFill &&
+    !chroma.enabled &&
+    mask.shape === "none" &&
+    blend.mode === "normal" &&
+    Math.abs(canvasAspect - srcAspect) > 0.08
+  ) {
     ctx.save();
     ctx.globalAlpha = alpha * 0.85;
     ctx.filter = "blur(26px) brightness(0.62) saturate(1.2)";
@@ -931,8 +1171,25 @@ function drawSingleClipLayer(
       ? renderProcessedClipSource(source, sxPx, syPx, swPx, shPx, drawW, drawH, chroma, curves)
       : null;
 
+  const maskedSource =
+    mask.shape !== "none"
+      ? applyShapeMaskToSource(
+          processed ?? source,
+          processed ? 0 : sxPx,
+          processed ? 0 : syPx,
+          processed ? processed.width : swPx,
+          processed ? processed.height : shPx,
+          drawW,
+          drawH,
+          mask,
+        )
+      : null;
+
   ctx.save();
   ctx.globalAlpha = alpha;
+  if (blend.mode !== "normal") {
+    ctx.globalCompositeOperation = blend.canvasOp;
+  }
   if (!disableGrading) {
     const cssFilter = buildClipCssFilter(clip);
     if (cssFilter !== "none") ctx.filter = cssFilter;
@@ -941,7 +1198,9 @@ function drawSingleClipLayer(
   ctx.translate(centerX, centerY);
   if (rot) ctx.rotate((rot * Math.PI) / 180);
   ctx.scale(sx < 0 ? -1 : 1, sy < 0 ? -1 : 1);
-  if (processed) {
+  if (maskedSource) {
+    ctx.drawImage(maskedSource, 0, 0, maskedSource.width, maskedSource.height, -drawW / 2, -drawH / 2, drawW, drawH);
+  } else if (processed) {
     ctx.drawImage(processed, 0, 0, processed.width, processed.height, -drawW / 2, -drawH / 2, drawW, drawH);
   } else {
     ctx.drawImage(source, sxPx, syPx, swPx, shPx, -drawW / 2, -drawH / 2, drawW, drawH);

@@ -20,18 +20,25 @@ import {
 import { CompositorStage, StudioTimeline } from "./components";
 import {
   AUDIO_EQ_PRESETS_UI,
+  BLEND_MODES_UI,
   computeCurvePoints,
   getCachedCurveLut,
   getClipSpeed,
   getClipTransition,
   getSequenceDuration,
+  interpolateKeyframes,
   isClipReversed,
   LOOK_PRESETS,
+  MASK_SHAPES_UI,
   readClipAdjustments,
   readClipAudioEq,
+  readClipBlend,
   readClipChromaKey,
   readClipCurves,
   readClipLook,
+  readClipMask,
+  readClipSpeedRamp,
+  SPEED_RAMPS_UI,
   TONE_CURVE_PRESETS_UI,
   type ToneCurvePoint,
   type ToneCurvePresetUi,
@@ -125,6 +132,7 @@ function getEffectParams(clip: Clip | null, type: string): Record<string, unknow
 export function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<Project | null>(null);
+  const [kfEasing, setKfEasing] = useState<"ease-in-out" | "linear" | "ease-in" | "ease-out" | "hold">("ease-in-out");
   const [historyState, setHistoryState] = useState<HistoryState>({
     canUndo: false,
     canRedo: false,
@@ -782,6 +790,11 @@ export function App() {
         setPlayhead(getSequenceDuration(seq));
       } else if ((e.key === "s" || e.key === "S") && !e.ctrlKey && !e.metaKey) {
         void handleSplitAtPlayhead();
+      } else if ((e.key === "m" || e.key === "M") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (project) {
+          const nextNum = (project.markers?.length ?? 0) + 1;
+          void api.addMarker(playhead, `M${nextNum}`, "#3b82f6").then(() => refreshCurrentProject());
+        }
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         void handleSaveProject();
@@ -882,6 +895,22 @@ export function App() {
   const volFx = getEffectParams(selectedClip, "volume");
   const fadeFx = getEffectParams(selectedClip, "fade");
   const clipSpeed = selectedClip ? getClipSpeed(selectedClip) : 1;
+  const maskInfo = selectedClip ? readClipMask(selectedClip) : { shape: "none" as const, scale: 0.78, feather: 12, invert: false };
+  const blendInfo = selectedClip ? readClipBlend(selectedClip) : { mode: "normal" as const, canvasOp: "source-over" as const };
+  const rampInfo = selectedClip ? readClipSpeedRamp(selectedClip) : { preset: "constant" as const, intensity: 1 };
+
+  const handleAddMarker = async () => {
+    const nextNum = (project.markers?.length ?? 0) + 1;
+    await api.addMarker(playhead, `M${nextNum}`, "#3b82f6");
+    await refreshCurrentProject();
+    flash(`Added marker M${nextNum} at ${playhead.toFixed(2)}s`);
+  };
+
+  const handleRemoveMarker = async (markerId: string) => {
+    await api.removeMarker(markerId);
+    await refreshCurrentProject();
+    flash("Marker removed");
+  };
 
   // Interactive SVG Tone Curve Pad pointer drag handler
   const handleCurvePadPointer = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -1108,55 +1137,233 @@ export function App() {
             </div>
 
             <div>
-              <div className="section-label">Motion Keyframes</div>
+              <div className="section-label">Speed Ramp Curve</div>
               <div className="pill-strip">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const c = ensureTargetClip();
-                    if (!c) return;
-                    await api.addKeyframes(c.id, [
-                      { time: 0, property: "scaleX", value: 1 },
-                      { time: c.duration, property: "scaleX", value: 1.22, easing: "ease-in-out" },
-                      { time: 0, property: "scaleY", value: 1 },
-                      { time: c.duration, property: "scaleY", value: 1.22, easing: "ease-in-out" },
-                    ]);
-                    await refreshCurrentProject();
-                    flash("Applied smooth Zoom-In motion");
-                  }}
-                >
-                  Zoom In
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const c = ensureTargetClip();
-                    if (!c) return;
-                    await api.addKeyframes(c.id, [
-                      { time: 0, property: "scaleX", value: 1.22 },
-                      { time: c.duration, property: "scaleX", value: 1, easing: "ease-in-out" },
-                      { time: 0, property: "scaleY", value: 1.22 },
-                      { time: c.duration, property: "scaleY", value: 1, easing: "ease-in-out" },
-                    ]);
-                    await refreshCurrentProject();
-                    flash("Applied Zoom-Out motion");
-                  }}
-                >
-                  Zoom Out
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const c = ensureTargetClip();
-                    if (!c) return;
-                    await api.updateClip(c.id, { keyframes: [] });
-                    await refreshCurrentProject();
-                    flash("Cleared motion keyframes");
-                  }}
-                >
-                  Reset Motion
-                </button>
+                {SPEED_RAMPS_UI.map((sr) => (
+                  <button
+                    key={sr.id}
+                    type="button"
+                    className={`chip-btn ${rampInfo.preset === sr.id ? "active" : ""}`}
+                    onClick={async () => {
+                      const c = ensureTargetClip();
+                      if (!c) return;
+                      mutateClipLocal(c.id, (prev) => ({
+                        ...prev,
+                        effects: [
+                          ...prev.effects.filter((fx) => fx.type !== "speed-ramp"),
+                          ...(sr.id !== "constant"
+                            ? [{ id: "fx-speed-ramp", type: "speed-ramp", params: { preset: sr.id, intensity: 1 } }]
+                            : []),
+                        ],
+                      }));
+                      await api.applySpeedRamp(c.id, sr.id, 1);
+                      await refreshCurrentProject();
+                      flash(sr.id === "constant" ? "Constant speed" : `Speed ramp: ${sr.label}`);
+                    }}
+                  >
+                    {sr.label}
+                  </button>
+                ))}
               </div>
+            </div>
+
+            <div>
+              <div className="section-label">Keyframes &amp; Motion</div>
+              {(() => {
+                const kfClip = selectedClip;
+                const localT = kfClip
+                  ? Number(Math.max(0, Math.min(kfClip.duration, playhead - kfClip.start)).toFixed(3))
+                  : 0;
+                const uniqueTimes = kfClip
+                  ? Array.from(new Set(kfClip.keyframes.map((k) => Number(k.time.toFixed(3))))).sort((a, b) => a - b)
+                  : [];
+                const activeKfTime = uniqueTimes.find((t) => Math.abs(t - localT) < 0.045);
+
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div className="pill-strip">
+                      <button
+                        type="button"
+                        disabled={uniqueTimes.every((t) => t >= localT - 0.045)}
+                        onClick={() => {
+                          if (!kfClip) return;
+                          const prevT = [...uniqueTimes].reverse().find((t) => t < localT - 0.045);
+                          if (prevT != null) setPlayhead(Number((kfClip.start + prevT).toFixed(3)));
+                        }}
+                        title="Previous Keyframe"
+                      >
+                        ‹
+                      </button>
+                      <button
+                        type="button"
+                        className={activeKfTime != null ? "chip-btn active" : "btn-primary"}
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) return;
+                          const t = Number(Math.max(0, Math.min(c.duration, playhead - c.start)).toFixed(3));
+                          const hasAtPlayhead = c.keyframes.some((k) => Math.abs(k.time - t) < 0.045);
+                          if (hasAtPlayhead) {
+                            const remaining = c.keyframes
+                              .filter((k) => Math.abs(k.time - t) >= 0.045)
+                              .map((k) => ({ ...k, value: Number(k.value) || 0 }));
+                            await api.addKeyframes(c.id, remaining, true);
+                            await refreshCurrentProject();
+                            flash(`Removed keyframe at ${t.toFixed(2)}s`);
+                          } else {
+                            await api.addKeyframes(c.id, [
+                              { time: t, property: "x", value: interpolateKeyframes(c, "x", t, c.transform.x ?? 0), easing: kfEasing },
+                              { time: t, property: "y", value: interpolateKeyframes(c, "y", t, c.transform.y ?? 0), easing: kfEasing },
+                              { time: t, property: "scaleX", value: interpolateKeyframes(c, "scaleX", t, c.transform.scaleX ?? 1), easing: kfEasing },
+                              { time: t, property: "scaleY", value: interpolateKeyframes(c, "scaleY", t, c.transform.scaleY ?? 1), easing: kfEasing },
+                              { time: t, property: "rotation", value: interpolateKeyframes(c, "rotation", t, c.transform.rotation ?? 0), easing: kfEasing },
+                              { time: t, property: "opacity", value: interpolateKeyframes(c, "opacity", t, c.transform.opacity ?? 1), easing: kfEasing },
+                            ]);
+                            await refreshCurrentProject();
+                            flash(`Added ◆ keyframe at ${t.toFixed(2)}s`);
+                          }
+                        }}
+                      >
+                        {activeKfTime != null ? "◆ Remove Keyframe" : "◆ + Keyframe"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={uniqueTimes.every((t) => t <= localT + 0.045)}
+                        onClick={() => {
+                          if (!kfClip) return;
+                          const nextT = uniqueTimes.find((t) => t > localT + 0.045);
+                          if (nextT != null) setPlayhead(Number((kfClip.start + nextT).toFixed(3)));
+                        }}
+                        title="Next Keyframe"
+                      >
+                        ›
+                      </button>
+                    </div>
+
+                    <div className="pill-strip">
+                      {(
+                        [
+                          { id: "ease-in-out", label: "Smooth" },
+                          { id: "linear", label: "Linear" },
+                          { id: "ease-out", label: "Decel" },
+                          { id: "hold", label: "Hold" },
+                        ] as const
+                      ).map((ez) => (
+                        <button
+                          key={ez.id}
+                          type="button"
+                          className={`chip-btn ${kfEasing === ez.id ? "active" : ""}`}
+                          onClick={() => setKfEasing(ez.id)}
+                        >
+                          {ez.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="pill-strip">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) return;
+                          await api.addKeyframes(
+                            c.id,
+                            [
+                              { time: 0, property: "scaleX", value: 1, easing: kfEasing },
+                              { time: c.duration, property: "scaleX", value: 1.22, easing: kfEasing },
+                              { time: 0, property: "scaleY", value: 1, easing: kfEasing },
+                              { time: c.duration, property: "scaleY", value: 1.22, easing: kfEasing },
+                            ],
+                            true,
+                          );
+                          await refreshCurrentProject();
+                          flash("Applied smooth Zoom-In motion");
+                        }}
+                      >
+                        Zoom In
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) return;
+                          await api.addKeyframes(
+                            c.id,
+                            [
+                              { time: 0, property: "scaleX", value: 1.22, easing: kfEasing },
+                              { time: c.duration, property: "scaleX", value: 1, easing: kfEasing },
+                              { time: 0, property: "scaleY", value: 1.22, easing: kfEasing },
+                              { time: c.duration, property: "scaleY", value: 1, easing: kfEasing },
+                            ],
+                            true,
+                          );
+                          await refreshCurrentProject();
+                          flash("Applied Zoom-Out motion");
+                        }}
+                      >
+                        Zoom Out
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) return;
+                          await api.addKeyframes(
+                            c.id,
+                            [
+                              { time: 0, property: "scaleX", value: 1.14, easing: kfEasing },
+                              { time: c.duration, property: "scaleX", value: 1.14, easing: kfEasing },
+                              { time: 0, property: "scaleY", value: 1.14, easing: kfEasing },
+                              { time: c.duration, property: "scaleY", value: 1.14, easing: kfEasing },
+                              { time: 0, property: "x", value: -90, easing: kfEasing },
+                              { time: c.duration, property: "x", value: 90, easing: kfEasing },
+                            ],
+                            true,
+                          );
+                          await refreshCurrentProject();
+                          flash("Applied Pan-Right motion");
+                        }}
+                      >
+                        Pan Right
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) return;
+                          await api.addKeyframes(
+                            c.id,
+                            [
+                              { time: 0, property: "scaleX", value: 0.82, easing: "ease-out" },
+                              { time: Math.min(0.45, c.duration), property: "scaleX", value: 1, easing: "ease-out" },
+                              { time: 0, property: "scaleY", value: 0.82, easing: "ease-out" },
+                              { time: Math.min(0.45, c.duration), property: "scaleY", value: 1, easing: "ease-out" },
+                              { time: 0, property: "opacity", value: 0, easing: "ease-out" },
+                              { time: Math.min(0.35, c.duration), property: "opacity", value: 1, easing: "ease-out" },
+                            ],
+                            true,
+                          );
+                          await refreshCurrentProject();
+                          flash("Applied Pop-In motion");
+                        }}
+                      >
+                        Pop In
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) return;
+                          await api.addKeyframes(c.id, [], true);
+                          await refreshCurrentProject();
+                          flash("Cleared motion keyframes");
+                        }}
+                      >
+                        Reset Motion
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </>
         );
@@ -1824,6 +2031,131 @@ export function App() {
                 );
               })}
             </div>
+
+            <div className="section-label">Shape Mask</div>
+            <div className="pill-strip">
+              {MASK_SHAPES_UI.map((ms) => (
+                <button
+                  key={ms.id}
+                  type="button"
+                  className={`chip-btn ${maskInfo.shape === ms.id ? "active" : ""}`}
+                  onClick={async () => {
+                    const c = ensureTargetClip();
+                    if (!c) return;
+                    const nextMask = {
+                      shape: ms.id,
+                      scale: maskInfo.scale,
+                      feather: maskInfo.feather,
+                      invert: maskInfo.invert,
+                    };
+                    mutateClipLocal(c.id, (prev) => ({
+                      ...prev,
+                      effects: [
+                        ...prev.effects.filter((fx) => fx.type !== "mask"),
+                        ...(ms.id !== "none" ? [{ id: "fx-mask", type: "mask", params: nextMask }] : []),
+                      ],
+                    }));
+                    await api.applyMask(c.id, nextMask);
+                    await refreshCurrentProject();
+                  }}
+                >
+                  {ms.label}
+                </button>
+              ))}
+            </div>
+
+            {maskInfo.shape !== "none" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="form-grid-2">
+                  <div className="slider-row">
+                    <div className="slider-head">
+                      <span>Mask Size</span>
+                      <span className="mono">{Math.round(maskInfo.scale * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={15}
+                      max={100}
+                      value={Math.round(maskInfo.scale * 100)}
+                      onChange={(e) => {
+                        const c = ensureTargetClip();
+                        if (!c) return;
+                        const next = { ...maskInfo, scale: Number(e.target.value) / 100 };
+                        mutateClipLocal(c.id, (prev) => ({
+                          ...prev,
+                          effects: [...prev.effects.filter((fx) => fx.type !== "mask"), { id: "fx-mask", type: "mask", params: next }],
+                        }));
+                        scheduleCommit(`mask:${c.id}`, () => api.applyMask(c.id, next), 120);
+                      }}
+                    />
+                  </div>
+                  <div className="slider-row">
+                    <div className="slider-head">
+                      <span>Feather</span>
+                      <span className="mono">{maskInfo.feather}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={maskInfo.feather}
+                      onChange={(e) => {
+                        const c = ensureTargetClip();
+                        if (!c) return;
+                        const next = { ...maskInfo, feather: Number(e.target.value) };
+                        mutateClipLocal(c.id, (prev) => ({
+                          ...prev,
+                          effects: [...prev.effects.filter((fx) => fx.type !== "mask"), { id: "fx-mask", type: "mask", params: next }],
+                        }));
+                        scheduleCommit(`mask:${c.id}`, () => api.applyMask(c.id, next), 120);
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="pill-strip">
+                  <button
+                    type="button"
+                    className={`chip-btn ${maskInfo.invert ? "active" : ""}`}
+                    onClick={async () => {
+                      const c = ensureTargetClip();
+                      if (!c) return;
+                      const next = { ...maskInfo, invert: !maskInfo.invert };
+                      await api.applyMask(c.id, next);
+                      await refreshCurrentProject();
+                    }}
+                  >
+                    Invert Mask
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="section-label">Blend Mode</div>
+            <div className="pill-strip">
+              {BLEND_MODES_UI.map((bm) => (
+                <button
+                  key={bm.id}
+                  type="button"
+                  className={`chip-btn ${blendInfo.mode === bm.id ? "active" : ""}`}
+                  onClick={async () => {
+                    const c = ensureTargetClip();
+                    if (!c) return;
+                    mutateClipLocal(c.id, (prev) => ({
+                      ...prev,
+                      effects: [
+                        ...prev.effects.filter((fx) => fx.type !== "blend"),
+                        ...(bm.id !== "normal" ? [{ id: "fx-blend", type: "blend", params: { mode: bm.id } }] : []),
+                      ],
+                    }));
+                    await api.applyBlend(c.id, bm.id);
+                    await refreshCurrentProject();
+                    flash(`Blend mode: ${bm.label}`);
+                  }}
+                >
+                  {bm.label}
+                </button>
+              ))}
+            </div>
           </>
         );
       }
@@ -2302,6 +2634,8 @@ export function App() {
                 await api.addTrack(kind);
                 await refreshCurrentProject();
               }}
+              onAddMarker={handleAddMarker}
+              onRemoveMarker={handleRemoveMarker}
             />
           </div>
 
@@ -2468,6 +2802,8 @@ export function App() {
                 await api.addTrack(kind);
                 await refreshCurrentProject();
               }}
+              onAddMarker={handleAddMarker}
+              onRemoveMarker={handleRemoveMarker}
             />
           </div>
         </>
@@ -2488,6 +2824,7 @@ export function App() {
                 ["J / L", "Step Back / Play Forward"],
                 ["← / →", "Step 1 Frame (Shift = 1s)"],
                 ["S", "Split Clip at Playhead"],
+                ["M", "Add Marker at Playhead"],
                 ["Delete / Backspace", "Delete Selected Clip or Title"],
                 ["Ctrl + Z / Ctrl + Y", "Undo / Redo"],
                 ["Ctrl + S", "Save Project"],

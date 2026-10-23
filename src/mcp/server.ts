@@ -1813,6 +1813,66 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     }),
   );
 
+  // ---- F14 (v1.0.0): Pro Shape Masks, Blend Modes & Non-Linear Speed Ramps ----
+  server.registerTool(
+    "vfx.apply_mask",
+    {
+      description: "F14: Apply parametric alpha shape mask (circle, rectangle, split-h, split-v, linear) with feather & inversion to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        shape: z.enum(["none", "circle", "rectangle", "split-h", "split-v", "linear"]),
+        scale: z.number().min(0.15).max(1).optional(),
+        feather: z.number().min(0).max(100).optional(),
+        radius: z.number().min(0).max(50).optional(),
+        centerX: z.number().min(0).max(1).optional(),
+        centerY: z.number().min(0).max(1).optional(),
+        invert: z.boolean().optional(),
+      },
+    },
+    async ({ clipId, shape, scale, feather, radius, centerX, centerY, invert }) =>
+      wrapTool(async () => {
+        const { applyClipMask } = await import("../pro/compositing.js");
+        const fx = applyClipMask(engine(), clipId, { shape, scale, feather, radius, centerX, centerY, invert });
+        return { effect: fx, active: Boolean(fx) };
+      }),
+  );
+
+  server.registerTool(
+    "vfx.apply_blend",
+    {
+      description: "F14: Apply compositing layer blend mode (normal, screen, multiply, overlay, lighten, darken, soft-light, color-dodge, add) to a clip.",
+      inputSchema: {
+        clipId: idSchema,
+        mode: z.enum(["normal", "screen", "multiply", "overlay", "lighten", "darken", "soft-light", "color-dodge", "add"]),
+        opacity: z.number().min(0).max(1).optional(),
+      },
+    },
+    async ({ clipId, mode, opacity }) =>
+      wrapTool(async () => {
+        const { applyClipBlend } = await import("../pro/compositing.js");
+        const fx = applyClipBlend(engine(), clipId, mode, opacity);
+        return { effect: fx, mode: fx?.params?.mode ?? "normal" };
+      }),
+  );
+
+  server.registerTool(
+    "vfx.apply_speed_ramp",
+    {
+      description: "F14: Apply smooth duration-preserving non-linear speed ramp curve (constant, montage-in, hero-slowmo, bullet, jump-cut, smooth-out).",
+      inputSchema: {
+        clipId: idSchema,
+        preset: z.enum(["constant", "montage-in", "hero-slowmo", "bullet", "jump-cut", "smooth-out"]),
+        intensity: z.number().min(0.1).max(1).optional(),
+      },
+    },
+    async ({ clipId, preset, intensity }) =>
+      wrapTool(async () => {
+        const { applySpeedRamp } = await import("../pro/compositing.js");
+        const fx = applySpeedRamp(engine(), clipId, preset, intensity ?? 1);
+        return { effect: fx, preset: fx?.params?.preset ?? "constant" };
+      }),
+  );
+
   server.registerPrompt(
     "shorts-from-longform",
     {

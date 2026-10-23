@@ -127,7 +127,7 @@ describe("F13 — Real Production Bundle Boot & Zero-Black-Screen UI Render Veri
       setup: (w) => {
         w.VeditAndroid = {
           isAndroid: () => true,
-          getVersion: () => "0.9.2",
+          getVersion: () => "1.0.0",
         };
       },
     });
@@ -145,7 +145,7 @@ describe("F13 — Real Production Bundle Boot & Zero-Black-Screen UI Render Veri
       setup: (w) => {
         w.VeditAndroid = {
           isAndroid: () => true,
-          getVersion: () => "0.9.2",
+          getVersion: () => "1.0.0",
         };
         w.localStorage.setItem(
           "vedit.apk.project.v3",

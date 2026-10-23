@@ -426,8 +426,15 @@ const rawApi = {
       params,
       replace: true,
     }),
-  addKeyframes: (clipId: string, keyframes: Array<{ time: number; property: string; value: number; easing?: string }>) =>
-    req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/keyframes`, { keyframes }),
+  addKeyframes: (
+    clipId: string,
+    keyframes: Array<{ time: number; property: string; value: number; easing?: string }>,
+    replace = false,
+  ) =>
+    req<{ clip: Clip }>(`POST`, `/projects/${currentId}/clips/${clipId}/keyframes`, {
+      keyframes,
+      ...(replace ? { replace: true } : {}),
+    }),
   shareExport: () => Promise.resolve({ shared: Boolean(window.VeditAndroid?.shareLastExport?.()) }),
   undo: () => req<{ ok: boolean }>("POST", `/projects/${currentId}/undo`),
   redo: () => req<{ ok: boolean }>("POST", `/projects/${currentId}/redo`),
@@ -641,6 +648,35 @@ const rawApi = {
       `GET`,
       `/projects/${currentId}/captions/export?format=${format}`,
     ),
+  applyMask: (
+    clipId: string,
+    opts: { shape: string; scale?: number; feather?: number; invert?: boolean },
+  ) =>
+    req<{ effect: { id: string; type: string } | null; active: boolean }>(
+      `POST`,
+      `/projects/${currentId}/clips/${clipId}/mask`,
+      opts,
+    ),
+  applyBlend: (clipId: string, mode: string, opacity?: number) =>
+    req<{ effect: { id: string; type: string } | null; mode: string }>(
+      `POST`,
+      `/projects/${currentId}/clips/${clipId}/blend`,
+      { mode, ...(opacity != null ? { opacity } : {}) },
+    ),
+  applySpeedRamp: (clipId: string, preset: string, intensity = 1) =>
+    req<{ effect: { id: string; type: string } | null; preset: string }>(
+      `POST`,
+      `/projects/${currentId}/clips/${clipId}/speed-ramp`,
+      { preset, intensity },
+    ),
+  addMarker: (time: number, label = "Marker", color = "#3b82f6") =>
+    req<{ marker: { id: string; time: number; label: string; color?: string } }>(
+      `POST`,
+      `/projects/${currentId}/markers`,
+      { time, label, color },
+    ),
+  removeMarker: (markerId: string) =>
+    req<{ ok: boolean }>(`DELETE`, `/projects/${currentId}/markers/${markerId}`),
   saveClientMp4: async (blob: Blob, filename = "Vedit_Export.mp4") => {
     const res = await fetch(
       apiUrl(`/projects/${currentId}/export/client-mp4?filename=${encodeURIComponent(filename)}`),
