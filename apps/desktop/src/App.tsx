@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   activeSequence,
   api,
+  cancelActiveAiCopilot,
   connectWs,
   enableStandaloneFallback,
   sanitizeProjectShape,
   setCurrentId,
+  subscribeAiStreamProgress,
   withToken,
   type ApiSettingsResponse,
   type Asset,
@@ -148,6 +150,9 @@ export function App() {
   const [adjustSubTab, setAdjustSubTab] = useState<AdjustSubTab>("light");
   const [inspectorTab, setInspectorTab] = useState<DesktopInspectorTab>("adjust");
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const [mobileSheetHeight, setMobileSheetHeight] = useState<number | null>(null);
+  const [aiElapsedSec, setAiElapsedSec] = useState(0);
+  const [aiStreamChars, setAiStreamChars] = useState(0);
 
   const [pxPerSec, setPxPerSec] = useState(64);
   const [snapEnabled, setSnapEnabled] = useState(true);
@@ -733,7 +738,21 @@ export function App() {
     }
   };
 
-  // AI Assistant execution (multi-turn context + selected clip + playhead aware)
+  useEffect(() => {
+    return subscribeAiStreamProgress((chars) => setAiStreamChars(chars));
+  }, []);
+
+  useEffect(() => {
+    if (!aiBusy) {
+      setAiElapsedSec(0);
+      setAiStreamChars(0);
+      return;
+    }
+    const id = window.setInterval(() => setAiElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [aiBusy]);
+
+  // AI Assistant execution (multi-turn context + streaming + instant cancel)
   const sendAiPrompt = async (customText?: string) => {
     const prompt = (customText ?? aiInput).trim();
     if (!prompt || aiBusy || !project) return;
@@ -741,6 +760,8 @@ export function App() {
     const priorHistory = aiMessages.slice(-6);
     setAiMessages((prev) => [...prev, { role: "user", text: prompt }]);
     setAiBusy(true);
+    setAiElapsedSec(0);
+    setAiStreamChars(0);
     try {
       const res = await api.runCopilot(prompt, {
         playhead,
@@ -753,7 +774,12 @@ export function App() {
       setAiMessages((prev) => [...prev, { role: "assistant", text: detail }]);
       await refreshCurrentProject();
     } catch (err) {
-      setAiMessages((prev) => [...prev, { role: "assistant", text: `Error: ${(err as Error).message}` }]);
+      const msg = (err as Error).message || "AI request failed";
+      if (msg === "Cancelled" || /aborted/i.test(msg)) {
+        setAiMessages((prev) => [...prev, { role: "assistant", text: "Zrušeno uživatelem." }]);
+      } else {
+        setAiMessages((prev) => [...prev, { role: "assistant", text: `Error: ${msg}` }]);
+      }
     } finally {
       setAiBusy(false);
     }
@@ -2351,17 +2377,22 @@ export function App() {
             </div>
 
             {aiMessages.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 190, overflowY: "auto" }}>
+              <div className="ai-chat-scroll">
                 {aiMessages.map((m, idx) => (
                   <div
                     key={idx}
                     style={{
-                      padding: "7px 10px",
-                      borderRadius: 8,
-                      fontSize: 12,
-                      lineHeight: 1.4,
+                      padding: "9px 12px",
+                      borderRadius: 10,
+                      fontSize: isMobileLayout ? 14 : 12.5,
+                      lineHeight: 1.45,
                       whiteSpace: "pre-wrap",
-                      background: m.role === "user" ? "var(--accent-soft)" : m.text.startsWith("Error:") ? "rgba(239,68,68,0.12)" : "var(--panel-2)",
+                      background:
+                        m.role === "user"
+                          ? "var(--accent-soft)"
+                          : m.text.startsWith("Error:")
+                            ? "rgba(239,68,68,0.12)"
+                            : "var(--panel-2)",
                       border: `1px solid ${m.text.startsWith("Error:") ? "rgba(239,68,68,0.35)" : "var(--border)"}`,
                     }}
                   >
@@ -2371,19 +2402,63 @@ export function App() {
               </div>
             )}
 
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
+            {aiBusy && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  padding: "8px 11px",
+                  borderRadius: 10,
+                  background: "var(--accent-soft)",
+                  border: "1px solid rgba(59,130,246,0.35)",
+                  fontSize: isMobileLayout ? 13.5 : 12,
+                }}
+              >
+                <span className="mono">
+                  {aiStreamChars > 0
+                    ? `AI generuje úpravy… ${aiElapsedSec}s · ${aiStreamChars} zn.`
+                    : `AI zpracovává zadání… ${aiElapsedSec}s`}
+                </span>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={() => cancelActiveAiCopilot()}
+                >
+                  Stop
+                </button>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <textarea
+                className="ai-prompt-box"
+                rows={isMobileLayout ? 2 : 2}
                 value={aiInput}
                 onChange={(e) => setAiInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") void sendAiPrompt();
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendAiPrompt();
+                  }
                 }}
-                placeholder={aiBusy ? "AI is working…" : "Ask AI to edit clips, grade colors, EQ audio, add titles…"}
+                placeholder={
+                  aiBusy
+                    ? "AI pracuje na úpravách…"
+                    : "Popiš úpravy (klidně i delší scénář, střihy, titulky, barvy)…"
+                }
                 disabled={aiBusy}
                 style={{ flex: 1 }}
               />
-              <button type="button" className="btn-primary" onClick={() => void sendAiPrompt()} disabled={aiBusy}>
-                <IconSend size={14} />
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void sendAiPrompt()}
+                disabled={aiBusy}
+                aria-label="Send AI prompt"
+              >
+                <IconSend size={isMobileLayout ? 17 : 14} />
               </button>
             </div>
           </>
@@ -2546,8 +2621,8 @@ export function App() {
 
           <button
             type="button"
+            className="topbar-btn"
             onClick={() => setShowApiModal(true)}
-            style={{ height: 32, padding: "0 10px", fontSize: 12 }}
             title="Configure AI API Key & Model"
           >
             <span className={`status-dot ${apiSettings?.hasApiKey ? "online" : ""}`} />
@@ -2556,11 +2631,10 @@ export function App() {
 
           <button
             type="button"
-            className="btn-primary"
+            className="btn-primary topbar-btn"
             onClick={() => setShowExportModal(true)}
-            style={{ height: 32, padding: "0 12px", fontSize: 12 }}
           >
-            <IconExport size={14} />
+            <IconExport size={15} />
             <span>Export</span>
           </button>
         </div>
@@ -2569,7 +2643,7 @@ export function App() {
       {/* ==================== ADAPTIVE BODY: NATIVE MOBILE vs PRO DESKTOP ==================== */}
       {isMobileLayout ? (
         <div className="mobile-root">
-          <div style={{ flex: 1, minHeight: 190, display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: 1, minHeight: 205, display: "flex", flexDirection: "column" }}>
             <CompositorStage
               project={project}
               playhead={playhead}
@@ -2595,7 +2669,7 @@ export function App() {
             />
           </div>
 
-          <div style={{ height: mobileSheetOpen ? 155 : 210, flex: "none" }}>
+          <div className="mobile-timeline-slot">
             <StudioTimeline
               project={project}
               playhead={playhead}
@@ -2640,17 +2714,46 @@ export function App() {
           </div>
 
           {mobileSheetOpen && (
-            <div className="mobile-sheet">
+            <div
+              className={`mobile-sheet ${activeTab === "ai" ? "ai-sheet" : ""}`}
+              style={mobileSheetHeight ? { height: mobileSheetHeight } : undefined}
+            >
+              <div
+                className="mobile-sheet-grabber"
+                onPointerDown={(e) => {
+                  const sheetEl = e.currentTarget.parentElement;
+                  if (!sheetEl) return;
+                  const startY = e.clientY;
+                  const startH = sheetEl.getBoundingClientRect().height;
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  const onMove = (ev: PointerEvent) => {
+                    const nextH = Math.round(startH + (startY - ev.clientY));
+                    if (nextH < 130) {
+                      setMobileSheetOpen(false);
+                      setMobileSheetHeight(null);
+                    } else {
+                      setMobileSheetHeight(Math.min(Math.round(window.innerHeight * 0.78), Math.max(220, nextH)));
+                    }
+                  };
+                  const onUp = () => {
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
+                  };
+                  window.addEventListener("pointermove", onMove);
+                  window.addEventListener("pointerup", onUp);
+                }}
+              >
+                <span className="mobile-sheet-pill" />
+              </div>
               <div className="mobile-sheet-head">
                 <span>{NAV_ITEMS.find((i) => i.id === activeTab)?.label}</span>
                 <button
                   type="button"
                   className="icon-btn"
-                  style={{ width: 28, height: 28 }}
                   onClick={() => setMobileSheetOpen(false)}
                   aria-label="Collapse panel"
                 >
-                  <IconChevronDown size={16} />
+                  <IconChevronDown size={18} />
                 </button>
               </div>
               <div className="mobile-sheet-body">{renderToolContent(activeTab)}</div>

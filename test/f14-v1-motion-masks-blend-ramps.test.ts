@@ -100,8 +100,8 @@ describe("F14 — Vedit Studio v1.0.0: Motion Keyframes, Shape Masks, Blend Mode
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("verifies v1.0.0 flagship version & strictly monotonic duration-preserving speed-ramp curves", () => {
-    expect(VEDIT_VERSION).toBe("1.0.0");
+  it("verifies v1.0.1 flagship version & strictly monotonic duration-preserving speed-ramp curves", () => {
+    expect(VEDIT_VERSION).toBe("1.0.1");
     expect(MASK_SHAPE_PRESETS.length).toBeGreaterThanOrEqual(6);
     expect(BLEND_MODE_PRESETS.length).toBeGreaterThanOrEqual(9);
     expect(SPEED_RAMP_PRESETS.length).toBeGreaterThanOrEqual(6);

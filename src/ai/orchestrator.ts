@@ -45,10 +45,13 @@ export interface CopilotOptions {
 }
 
 const COPILOT_SYSTEM_PROMPT =
-  "You are Vedit Studio AI Video Editor Agent. Understand requests in Czech, Slovak, English, or any language. " +
-  "Return ONLY a single valid JSON object (no markdown fences) with shape: " +
+  "Vedit Studio AI Video Editor. Understand Czech, Slovak, English, or any language. " +
+  "Keep internal thinking brief and output ONLY one valid compact JSON object immediately (no markdown): " +
   '{"reply":"concise helpful response in the user\'s language","actions":[]}. ' +
-  "Available action objects in `actions` (include ONLY what the user asked for; `actions` may be `[]` for pure questions): " +
+  "Prefer macro ops (`auto_shorts`, `batch_captions`) for multi-clip/long edits so responses stay fast and compact: " +
+  '{"op":"auto_shorts","segmentDuration":3,"maxClips":8,"transitions":true}, ' +
+  '{"op":"batch_captions","items":[{"text":"...","start":0,"end":2.5}]}, ' +
+  '{"op":"keyframes","preset":"zoom-in|zoom-out|pan-right|pop-in","clipId":"optional"}, ' +
   '{"op":"aspect","ratio":"9:16|16:9|1:1|4:5|21:9"}, ' +
   '{"op":"background","value":"blur|#000000|#ffffff"}, ' +
   '{"op":"lut3d","value":"kodak-2383|teal-orange-blockbuster|fuji-eterna-soft|bleach-bypass|cyberpunk-neon","clipId":"optional"}, ' +
@@ -187,7 +190,7 @@ export async function runStudioCopilot(
             content: `Timeline: ${JSON.stringify(compactTimeline)}\nUser request: ${cleanPrompt}`,
           },
         ],
-        { timeoutMs: 42000, maxTokens: 1800 },
+        { timeoutMs: 180000, maxTokens: 4096 },
       );
 
       modelUsed = llm.model || cfg.model;
@@ -334,15 +337,79 @@ export async function runStudioCopilot(
                 bottom: Number(act.bottom ?? 0),
               });
               steps.push({ step: "clip.crop", detail: "Updated clip crop bounds" });
-            } else if (op === "split" && targetClip) {
-              const at = Number(act.at ?? opts.playhead ?? targetClip.start + targetClip.duration / 2);
-              const safeAt =
-                at > targetClip.start + 0.05 && at < targetClip.start + targetClip.duration - 0.05
-                  ? at
-                  : targetClip.start + targetClip.duration / 2;
-              if (targetClip.duration > 0.2) {
-                engine.splitClip(targetClip.id, safeAt);
-                steps.push({ step: "clip.split", detail: `Split "${targetClip.name}" at ${safeAt.toFixed(2)}s` });
+            } else if (op === "auto_shorts" && targetClip) {
+              const segDur = Math.max(0.8, Math.min(15, Number(act.segmentDuration ?? act.duration ?? 3)));
+              const maxClips = Math.max(2, Math.min(24, Number(act.maxClips ?? 10)));
+              let cur = targetClip;
+              let cuts = 1;
+              while (cur && cur.duration > segDur + 0.25 && cuts < maxClips) {
+                const [, rightClip] = engine.splitClip(cur.id, Number((cur.start + segDur).toFixed(3)));
+                cur = rightClip;
+                cuts++;
+              }
+              if (act.transitions !== false) {
+                for (const tr of seq.tracks.filter((t) => t.kind === "video")) {
+                  for (const c of tr.clips) {
+                    replaceOrSetEffect(engine, c.id, "transition", { kind: "dissolve", duration: 0.3 });
+                  }
+                }
+              }
+              steps.push({ step: "edit.auto_shorts", detail: `Created ${cuts} short clips (${segDur}s pace)` });
+            } else if (op === "batch_captions" && Array.isArray(act.items)) {
+              let count = 0;
+              for (const item of act.items as Array<Record<string, unknown>>) {
+                const text = String(item?.text ?? "").trim();
+                if (!text) continue;
+                const start = Math.max(0, Number(item.start ?? count * 2.5));
+                const end = item.end != null ? Math.max(start + 0.3, Number(item.end)) : start + 2.5;
+                engine.addCaption({ text, start, end });
+                count++;
+              }
+              if (count > 0) steps.push({ step: "caption.batch", detail: `Added ${count} timed captions` });
+            } else if (op === "keyframes" && targetClip) {
+              const preset = String(act.preset || act.value || "zoom-in");
+              const d = Math.max(0.3, targetClip.duration);
+              engine.addKeyframes(
+                targetClip.id,
+                preset === "zoom-out"
+                  ? [
+                      { time: 0, property: "scaleX", value: 1.22, easing: "ease-in-out" },
+                      { time: d, property: "scaleX", value: 1, easing: "ease-in-out" },
+                      { time: 0, property: "scaleY", value: 1.22, easing: "ease-in-out" },
+                      { time: d, property: "scaleY", value: 1, easing: "ease-in-out" },
+                    ]
+                  : preset === "pan-right"
+                    ? [
+                        { time: 0, property: "scaleX", value: 1.14, easing: "ease-in-out" },
+                        { time: d, property: "scaleX", value: 1.14, easing: "ease-in-out" },
+                        { time: 0, property: "scaleY", value: 1.14, easing: "ease-in-out" },
+                        { time: d, property: "scaleY", value: 1.14, easing: "ease-in-out" },
+                        { time: 0, property: "x", value: -90, easing: "ease-in-out" },
+                        { time: d, property: "x", value: 90, easing: "ease-in-out" },
+                      ]
+                    : [
+                        { time: 0, property: "scaleX", value: 1, easing: "ease-in-out" },
+                        { time: d, property: "scaleX", value: 1.22, easing: "ease-in-out" },
+                        { time: 0, property: "scaleY", value: 1, easing: "ease-in-out" },
+                        { time: d, property: "scaleY", value: 1.22, easing: "ease-in-out" },
+                      ],
+              );
+              steps.push({ step: "clip.keyframes", detail: `Applied "${preset}" motion keyframes` });
+            } else if (op === "split") {
+              const rawAt = Number(act.at ?? opts.playhead ?? (targetClip ? targetClip.start + targetClip.duration / 2 : 0));
+              const liveClips = seq.tracks
+                .filter((t) => t.kind === "video")
+                .flatMap((t) => t.clips)
+                .sort((a, b) => a.start - b.start);
+              const splitClipTarget =
+                liveClips.find((c) => rawAt > c.start + 0.05 && rawAt < c.start + c.duration - 0.05) ?? targetClip;
+              if (splitClipTarget && splitClipTarget.duration > 0.2) {
+                const safeAt =
+                  rawAt > splitClipTarget.start + 0.05 && rawAt < splitClipTarget.start + splitClipTarget.duration - 0.05
+                    ? rawAt
+                    : splitClipTarget.start + splitClipTarget.duration / 2;
+                engine.splitClip(splitClipTarget.id, safeAt);
+                steps.push({ step: "clip.split", detail: `Split "${splitClipTarget.name}" at ${safeAt.toFixed(2)}s` });
               }
             } else if (op === "trim" && targetClip) {
               const nextStart = act.start != null ? Math.max(0, Number(act.start)) : targetClip.start;
