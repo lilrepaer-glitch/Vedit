@@ -20,7 +20,11 @@ import {
 } from "../pro/fx.js";
 import { duckMusicUnderVoice, enhanceAudio } from "../pro/audio.js";
 import { listSavedProjects, loadProjectFromDisk, saveProjectToDisk } from "../pro/persistence.js";
-import { addGraphicOverlay, type VectorGraphicPreset } from "../pro/graphics.js";
+import {
+  addGraphicOverlay,
+  generateServerStudioAsset,
+  type VectorGraphicPreset,
+} from "../pro/graphics.js";
 import { captureDesktopClip, generateProjectThumbnail } from "../pro/capture.js";
 import {
   BUILTIN_LUTS,
@@ -1809,6 +1813,31 @@ export function createApp(opts: ServerOptions & { registry?: ProjectRegistry }):
         animationPreset: req.body?.animationPreset != null ? String(req.body.animationPreset) : undefined,
         label: req.body?.label != null ? String(req.body.label) : undefined,
         outDir: resolvePath(dataDir, "graphics"),
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      badRequest(res, (err as Error).message);
+    }
+  }, registry));
+
+  app.post("/api/v1/projects/:id/studio-assets/generate", wrap(async (req, res, engine) => {
+    try {
+      const catRaw = String(req.body?.category || "transition");
+      const category = (["transition", "motion", "overlay", "sfx"].includes(catRaw)
+        ? catRaw
+        : "transition") as "transition" | "motion" | "overlay" | "sfx";
+      const result = await generateServerStudioAsset(engine, {
+        category,
+        presetId: req.body?.presetId != null ? String(req.body.presetId) : undefined,
+        title: req.body?.title != null ? String(req.body.title) : undefined,
+        subtitle: req.body?.subtitle != null ? String(req.body.subtitle) : undefined,
+        primaryColor: req.body?.primaryColor != null ? String(req.body.primaryColor) : undefined,
+        accentColor: req.body?.accentColor != null ? String(req.body.accentColor) : undefined,
+        duration: req.body?.duration != null ? Number(req.body.duration) : undefined,
+        intensity: req.body?.intensity != null ? Number(req.body.intensity) : undefined,
+        prompt: req.body?.prompt != null ? String(req.body.prompt) : undefined,
+        atTime: req.body?.atTime != null ? Number(req.body.atTime) : undefined,
+        outDir: resolvePath(dataDir, "studio-assets"),
       });
       res.status(201).json(result);
     } catch (err) {

@@ -711,6 +711,24 @@ const rawApi = {
     ),
   removeMarker: (markerId: string) =>
     req<{ ok: boolean }>(`DELETE`, `/projects/${currentId}/markers/${markerId}`),
+  generateStudioAsset: (opts: {
+    category: "transition" | "motion" | "overlay" | "sfx";
+    presetId?: string;
+    title?: string;
+    subtitle?: string;
+    primaryColor?: string;
+    accentColor?: string;
+    duration?: number;
+    intensity?: number;
+    prompt?: string;
+    atTime?: number;
+  }) =>
+    req<{
+      summary: string;
+      asset?: Asset;
+      clip?: Clip;
+      caption?: Caption;
+    }>(`POST`, `/projects/${currentId}/studio-assets/generate`, opts),
   saveClientMp4: async (blob: Blob, filename = "Vedit_Export.mp4") => {
     const res = await fetch(
       apiUrl(`/projects/${currentId}/export/client-mp4?filename=${encodeURIComponent(filename)}`),

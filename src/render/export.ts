@@ -351,6 +351,7 @@ function clipVideoFilters(clip: Clip, speed: number, warnings: string[]): string
       case "volume":
       case "eq":
       case "transition":
+      case "procedural-fx":
       case "audio-volume":
       case "audio-denoise":
       case "audio-eq":

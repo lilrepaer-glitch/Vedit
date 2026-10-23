@@ -78,8 +78,8 @@ describe("F11 — Clean Studio v0.9.0: Tone Curves, Live Chroma Key, 3-Band EQ +
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("synchronizes release version 1.0.1 (versionCode 1001) cleanly across all manifests and runtime modules", () => {
-    expect(VEDIT_VERSION).toBe("1.0.1");
+  it("synchronizes release version 1.0.2 (versionCode 1002) cleanly across all manifests and runtime modules", () => {
+    expect(VEDIT_VERSION).toBe("1.0.2");
     const rootPkg = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")) as { version: string };
     const deskPkg = JSON.parse(fs.readFileSync(path.resolve("apps/desktop/package.json"), "utf8")) as { version: string };
     const tauriConf = JSON.parse(
@@ -88,12 +88,12 @@ describe("F11 — Clean Studio v0.9.0: Tone Curves, Live Chroma Key, 3-Band EQ +
     const cargoToml = fs.readFileSync(path.resolve("apps/desktop/src-tauri/Cargo.toml"), "utf8");
     const androidManifest = fs.readFileSync(path.resolve("apps/android/AndroidManifest.xml"), "utf8");
 
-    expect(rootPkg.version).toBe("1.0.1");
-    expect(deskPkg.version).toBe("1.0.1");
-    expect(tauriConf.version).toBe("1.0.1");
-    expect(cargoToml).toContain('version = "1.0.1"');
-    expect(androidManifest).toContain('android:versionCode="1001"');
-    expect(androidManifest).toContain('android:versionName="1.0.1"');
+    expect(rootPkg.version).toBe("1.0.2");
+    expect(deskPkg.version).toBe("1.0.2");
+    expect(tauriConf.version).toBe("1.0.2");
+    expect(cargoToml).toContain('version = "1.0.2"');
+    expect(androidManifest).toContain('android:versionCode="1002"');
+    expect(androidManifest).toContain('android:versionName="1.0.2"');
   });
 
   it("boots cleanly into a silent empty 'Untitled Edit' sequence without synthetic color bars or sine beeps", async () => {

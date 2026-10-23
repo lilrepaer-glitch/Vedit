@@ -46,6 +46,19 @@ import {
   type ToneCurvePresetUi,
 } from "./compositor";
 import {
+  buildCameraMotionKeyframes,
+  CAMERA_MOTION_PRESETS,
+  MOTION_GRAPHIC_TEMPLATES,
+  renderMotionGraphicPreviewDataUrl,
+  renderVisualAssetPreviewDataUrl,
+  STUDIO_AUDIO_ASSETS,
+  STUDIO_VISUAL_ASSETS,
+  type CameraMotionPresetId,
+  type MotionGraphicTemplateId,
+  type ProceduralVisualPresetId,
+  type StudioSfxPresetId,
+} from "./studioAssets";
+import {
   IconAdjust,
   IconAudio,
   IconCheck,
@@ -60,6 +73,7 @@ import {
   IconFreeze,
   IconKey,
   IconKeyboard,
+  IconLayers,
   IconLogo,
   IconMedia,
   IconMic,
@@ -79,8 +93,9 @@ import {
 } from "./Icons";
 import { ApiSettingsModal, ExportModal } from "./StudioModals";
 
-type ToolTab = "media" | "edit" | "adjust" | "filters" | "text" | "canvas" | "audio" | "ai";
+type ToolTab = "media" | "assets" | "edit" | "adjust" | "filters" | "text" | "canvas" | "audio" | "ai";
 type AdjustSubTab = "light" | "curves" | "key";
+type AssetStudioCat = "transition" | "motion" | "overlay" | "sfx";
 type DesktopInspectorTab = "adjust" | "audio" | "edit" | "canvas";
 
 const ASPECT_PRESETS: Array<{ id: string; label: string; width: number; height: number }> = [
@@ -93,6 +108,11 @@ const ASPECT_PRESETS: Array<{ id: string; label: string; width: number; height: 
 
 const TRANSITION_OPTIONS: Array<{ kind: string; label: string }> = [
   { kind: "none", label: "None (Cut)" },
+  { kind: "light-leak", label: "Golden Light Leak" },
+  { kind: "film-burn", label: "Kodak Film Burn" },
+  { kind: "whip-pan", label: "Whip Pan" },
+  { kind: "zoom-punch", label: "Zoom Punch" },
+  { kind: "iris-circle", label: "Iris Aperture" },
   { kind: "dissolve", label: "Cross Dissolve" },
   { kind: "fade-black", label: "Fade Black" },
   { kind: "fade-white", label: "Fade White" },
@@ -153,6 +173,41 @@ export function App() {
   const [mobileSheetHeight, setMobileSheetHeight] = useState<number | null>(null);
   const [aiElapsedSec, setAiElapsedSec] = useState(0);
   const [aiStreamChars, setAiStreamChars] = useState(0);
+  const [assetCat, setAssetCat] = useState<AssetStudioCat>("transition");
+  const [selectedTransitionPreset, setSelectedTransitionPreset] = useState<ProceduralVisualPresetId>("golden-light-leak");
+  const [selectedOverlayPreset, setSelectedOverlayPreset] = useState<ProceduralVisualPresetId>("cinema-grain-dust");
+  const [selectedMotionTemplate, setSelectedMotionTemplate] = useState<MotionGraphicTemplateId>("lower-third-editorial");
+  const [selectedSfxPreset, setSelectedSfxPreset] = useState<StudioSfxPresetId>("cinema-whoosh");
+  const [selectedCamMotion, setSelectedCamMotion] = useState<CameraMotionPresetId>("ken-burns-in");
+  const [genTitle, setGenTitle] = useState("Alex Novák");
+  const [genSubtitle, setGenSubtitle] = useState("CREATIVE DIRECTOR · STUDIO");
+  const [genPrimaryColor, setGenPrimaryColor] = useState("#f59e0b");
+  const [genAccentColor, setGenAccentColor] = useState("#3b82f6");
+  const [genDuration, setGenDuration] = useState(1.0);
+  const [genPrompt, setGenPrompt] = useState("");
+  const [genBusy, setGenBusy] = useState(false);
+
+  const visualAssetPreviews = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const item of STUDIO_VISUAL_ASSETS) {
+      map[item.id] = renderVisualAssetPreviewDataUrl(item.id, item.primaryColor, item.accentColor, 7);
+    }
+    return map;
+  }, []);
+
+  const motionGraphicPreviews = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const tpl of MOTION_GRAPHIC_TEMPLATES) {
+      map[tpl.id] = renderMotionGraphicPreviewDataUrl(
+        tpl.id,
+        tpl.defaultTitle,
+        tpl.defaultSubtitle,
+        tpl.defaultColor,
+        tpl.defaultAccent,
+      );
+    }
+    return map;
+  }, []);
 
   const [pxPerSec, setPxPerSec] = useState(64);
   const [snapEnabled, setSnapEnabled] = useState(true);
@@ -785,6 +840,55 @@ export function App() {
     }
   };
 
+  const handleGenerateStudioAsset = async (
+    category: AssetStudioCat,
+    overrides?: {
+      presetId?: string;
+      title?: string;
+      subtitle?: string;
+      primaryColor?: string;
+      accentColor?: string;
+      duration?: number;
+      prompt?: string;
+    },
+  ) => {
+    if (genBusy || !project) return;
+    setGenBusy(true);
+    try {
+      const presetId =
+        overrides?.presetId ??
+        (category === "transition"
+          ? selectedTransitionPreset
+          : category === "motion"
+            ? selectedMotionTemplate
+            : category === "overlay"
+              ? selectedOverlayPreset
+              : selectedSfxPreset);
+      const res = await api.generateStudioAsset({
+        category,
+        presetId,
+        title: overrides?.title ?? (category === "motion" ? genTitle : undefined),
+        subtitle: overrides?.subtitle ?? (category === "motion" ? genSubtitle : undefined),
+        primaryColor: overrides?.primaryColor ?? genPrimaryColor,
+        accentColor: overrides?.accentColor ?? genAccentColor,
+        duration: overrides?.duration ?? genDuration,
+        prompt: overrides?.prompt ?? genPrompt,
+        atTime: Number(playhead.toFixed(3)),
+      });
+      await refreshCurrentProject();
+      if (res.caption) {
+        setSelectedCaptionId(res.caption.id);
+      } else if (res.clip) {
+        setSelectedClipId(res.clip.id);
+      }
+      flash(res.summary || "Asset vygenerován na timeline");
+    } catch (err) {
+      flash(`Generation error: ${(err as Error).message}`);
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
   // Full Pro NLE Keyboard Shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1044,8 +1148,298 @@ export function App() {
                 ))}
               </div>
             )}
+
+            <div className="generate-footer-card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span className="section-label" style={{ margin: 0 }}>Studio Asset Generator</span>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  style={{ padding: "3px 8px", fontSize: 11.5 }}
+                  onClick={() => setActiveTab("assets")}
+                >
+                  All Assets ›
+                </button>
+              </div>
+              <div className="pill-strip">
+                {STUDIO_VISUAL_ASSETS.slice(0, 4).map((va) => (
+                  <button
+                    key={va.id}
+                    type="button"
+                    className={`chip-btn ${selectedTransitionPreset === va.id ? "active" : ""}`}
+                    onClick={() => {
+                      setSelectedTransitionPreset(va.id);
+                      setGenPrimaryColor(va.primaryColor);
+                      setGenAccentColor(va.accentColor);
+                      setGenDuration(va.defaultDuration);
+                    }}
+                  >
+                    {va.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn-generate"
+                disabled={genBusy}
+                onClick={() => void handleGenerateStudioAsset("transition")}
+              >
+                <IconSparkles size={15} />
+                <span>{genBusy ? "Generuji…" : "Generovat"}</span>
+              </button>
+            </div>
           </>
         );
+
+      case "assets": {
+        const curVisualList = STUDIO_VISUAL_ASSETS.filter(
+          (a) => a.category === (assetCat === "overlay" ? "overlay" : "transition"),
+        );
+        return (
+          <>
+            <div className="seg-control">
+              {(
+                [
+                  { id: "transition", label: "Přechody" },
+                  { id: "motion", label: "Motion" },
+                  { id: "overlay", label: "Efekty" },
+                  { id: "sfx", label: "Zvuky" },
+                ] as const
+              ).map((tabItem) => (
+                <button
+                  key={tabItem.id}
+                  type="button"
+                  className={`seg-btn ${assetCat === tabItem.id ? "active" : ""}`}
+                  onClick={() => {
+                    setAssetCat(tabItem.id);
+                    if (tabItem.id === "transition") {
+                      const d = STUDIO_VISUAL_ASSETS.find((x) => x.id === selectedTransitionPreset);
+                      if (d) {
+                        setGenPrimaryColor(d.primaryColor);
+                        setGenAccentColor(d.accentColor);
+                        setGenDuration(d.defaultDuration);
+                      }
+                    } else if (tabItem.id === "motion") {
+                      const m = MOTION_GRAPHIC_TEMPLATES.find((x) => x.id === selectedMotionTemplate);
+                      if (m) {
+                        setGenTitle(m.defaultTitle);
+                        setGenSubtitle(m.defaultSubtitle);
+                        setGenPrimaryColor(m.defaultColor);
+                        setGenAccentColor(m.defaultAccent);
+                        setGenDuration(m.defaultDuration);
+                      }
+                    } else if (tabItem.id === "overlay") {
+                      const d = STUDIO_VISUAL_ASSETS.find((x) => x.id === selectedOverlayPreset);
+                      if (d) {
+                        setGenPrimaryColor(d.primaryColor);
+                        setGenAccentColor(d.accentColor);
+                        setGenDuration(d.defaultDuration);
+                      }
+                    } else {
+                      const s = STUDIO_AUDIO_ASSETS.find((x) => x.id === selectedSfxPreset);
+                      if (s) setGenDuration(s.defaultDuration);
+                    }
+                  }}
+                >
+                  {tabItem.label}
+                </button>
+              ))}
+            </div>
+
+            {(assetCat === "transition" || assetCat === "overlay") && (
+              <div className="studio-asset-grid">
+                {curVisualList.map((item) => {
+                  const isSel =
+                    (assetCat === "transition" ? selectedTransitionPreset : selectedOverlayPreset) === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`studio-asset-card ${isSel ? "active" : ""}`}
+                      onClick={() => {
+                        if (assetCat === "transition") setSelectedTransitionPreset(item.id);
+                        else setSelectedOverlayPreset(item.id);
+                        setGenPrimaryColor(item.primaryColor);
+                        setGenAccentColor(item.accentColor);
+                        setGenDuration(item.defaultDuration);
+                      }}
+                    >
+                      {visualAssetPreviews[item.id] ? (
+                        <img
+                          className="studio-asset-preview"
+                          src={visualAssetPreviews[item.id]}
+                          alt={item.label}
+                        />
+                      ) : (
+                        <div
+                          className="studio-asset-preview"
+                          style={{
+                            background: `linear-gradient(135deg, ${item.primaryColor}, ${item.accentColor})`,
+                          }}
+                        />
+                      )}
+                      <span className="studio-asset-badge">{item.badge}</span>
+                      <span className="studio-asset-title">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {assetCat === "motion" && (
+              <div className="studio-asset-grid">
+                {MOTION_GRAPHIC_TEMPLATES.map((tpl) => (
+                  <button
+                    key={tpl.id}
+                    type="button"
+                    className={`studio-asset-card ${selectedMotionTemplate === tpl.id ? "active" : ""}`}
+                    onClick={() => {
+                      setSelectedMotionTemplate(tpl.id);
+                      setGenTitle(tpl.defaultTitle);
+                      setGenSubtitle(tpl.defaultSubtitle);
+                      setGenPrimaryColor(tpl.defaultColor);
+                      setGenAccentColor(tpl.defaultAccent);
+                      setGenDuration(tpl.defaultDuration);
+                    }}
+                  >
+                    {motionGraphicPreviews[tpl.id] ? (
+                      <img
+                        className="studio-asset-preview"
+                        src={motionGraphicPreviews[tpl.id]}
+                        alt={tpl.label}
+                      />
+                    ) : (
+                      <div
+                        className="studio-asset-preview"
+                        style={{
+                          background: `linear-gradient(135deg, #18181b, ${tpl.defaultAccent})`,
+                        }}
+                      />
+                    )}
+                    <span className="studio-asset-badge">{tpl.badge}</span>
+                    <span className="studio-asset-title">{tpl.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {assetCat === "sfx" && (
+              <div className="studio-asset-grid">
+                {STUDIO_AUDIO_ASSETS.map((sfx, sIdx) => (
+                  <button
+                    key={sfx.id}
+                    type="button"
+                    className={`studio-asset-card ${selectedSfxPreset === sfx.id ? "active" : ""}`}
+                    onClick={() => {
+                      setSelectedSfxPreset(sfx.id);
+                      setGenAccentColor(sfx.accentColor);
+                      setGenDuration(sfx.defaultDuration);
+                    }}
+                  >
+                    <div className="studio-sfx-bars">
+                      {[0.25, 0.55, 0.92, 0.78, 1.0, 0.68, 0.85, 0.48, 0.3].map((h, bi) => (
+                        <span
+                          key={bi}
+                          style={{
+                            width: 4,
+                            height: `${Math.round(h * (18 + ((sIdx + bi) % 3) * 6))}px`,
+                            borderRadius: 99,
+                            background: sfx.accentColor,
+                            opacity: 0.88,
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <span className="studio-asset-badge">{sfx.badge}</span>
+                    <span className="studio-asset-title">{sfx.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="generate-footer-card">
+              <span className="section-label" style={{ margin: 0 }}>
+                {assetCat === "motion"
+                  ? "Motion Graphic Customizer"
+                  : assetCat === "transition"
+                    ? "Transition Asset Customizer"
+                    : assetCat === "overlay"
+                      ? "Overlay Asset Customizer"
+                      : "Sound FX Synthesizer"}
+              </span>
+
+              {assetCat === "motion" ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  <input
+                    value={genTitle}
+                    onChange={(e) => setGenTitle(e.target.value)}
+                    placeholder="Hlavní titulek…"
+                  />
+                  <input
+                    value={genSubtitle}
+                    onChange={(e) => setGenSubtitle(e.target.value)}
+                    placeholder="Podtitulek / štítek…"
+                  />
+                </div>
+              ) : (
+                <input
+                  value={genPrompt}
+                  onChange={(e) => setGenPrompt(e.target.value)}
+                  placeholder="Volitelný popis stylu (např. zlatý film burn, modrý neon)…"
+                />
+              )}
+
+              <div className="form-grid-2">
+                <div className="slider-row">
+                  <div className="slider-head">
+                    <span>Duration</span>
+                    <span className="mono">{genDuration.toFixed(2)}s</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.35}
+                    max={6}
+                    step={0.05}
+                    value={genDuration}
+                    onChange={(e) => setGenDuration(Number(e.target.value))}
+                  />
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+                    <span>Barva</span>
+                    <input
+                      type="color"
+                      value={genPrimaryColor}
+                      onChange={(e) => setGenPrimaryColor(e.target.value)}
+                      style={{ width: 32, height: 30, padding: 2 }}
+                    />
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+                    <span>Akcent</span>
+                    <input
+                      type="color"
+                      value={genAccentColor}
+                      onChange={(e) => setGenAccentColor(e.target.value)}
+                      style={{ width: 32, height: 30, padding: 2 }}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="btn-generate"
+                disabled={genBusy}
+                onClick={() => void handleGenerateStudioAsset(assetCat)}
+              >
+                <IconSparkles size={15} />
+                <span>{genBusy ? "Generuji…" : "Generovat"}</span>
+              </button>
+            </div>
+          </>
+        );
+      }
 
       case "edit":
         return (
@@ -1385,6 +1779,45 @@ export function App() {
                         }}
                       >
                         Reset Motion
+                      </button>
+                    </div>
+
+                    <div className="generate-footer-card">
+                      <span className="section-label" style={{ margin: 0 }}>Cinema Camera Motion Presets</span>
+                      <div className="pill-strip">
+                        {CAMERA_MOTION_PRESETS.map((cm) => (
+                          <button
+                            key={cm.id}
+                            type="button"
+                            className={`chip-btn ${selectedCamMotion === cm.id ? "active" : ""}`}
+                            onClick={() => setSelectedCamMotion(cm.id)}
+                          >
+                            {cm.label}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-generate"
+                        onClick={async () => {
+                          const c = ensureTargetClip();
+                          if (!c) {
+                            flash("Nejprve vlož nebo vyber klip na timeline");
+                            return;
+                          }
+                          const kfs = buildCameraMotionKeyframes(
+                            selectedCamMotion,
+                            c.duration,
+                            Math.floor(1 + Math.random() * 500),
+                          );
+                          await api.addKeyframes(c.id, kfs, true);
+                          await refreshCurrentProject();
+                          const def = CAMERA_MOTION_PRESETS.find((p) => p.id === selectedCamMotion);
+                          flash(`Camera motion: ${def?.label || selectedCamMotion}`);
+                        }}
+                      >
+                        <IconSparkles size={15} />
+                        <span>Generovat</span>
                       </button>
                     </div>
                   </div>
@@ -1761,6 +2194,44 @@ export function App() {
                 />
               </div>
             )}
+
+            <div className="generate-footer-card">
+              <span className="section-label" style={{ margin: 0 }}>Transition &amp; Light Leak Assets</span>
+              <div className="studio-asset-grid">
+                {STUDIO_VISUAL_ASSETS.filter((v) => v.category === "transition").map((trAsset) => (
+                  <button
+                    key={trAsset.id}
+                    type="button"
+                    className={`studio-asset-card ${selectedTransitionPreset === trAsset.id ? "active" : ""}`}
+                    onClick={() => {
+                      setSelectedTransitionPreset(trAsset.id);
+                      setGenPrimaryColor(trAsset.primaryColor);
+                      setGenAccentColor(trAsset.accentColor);
+                      setGenDuration(trAsset.defaultDuration);
+                    }}
+                  >
+                    {visualAssetPreviews[trAsset.id] && (
+                      <img
+                        className="studio-asset-preview"
+                        src={visualAssetPreviews[trAsset.id]}
+                        alt={trAsset.label}
+                      />
+                    )}
+                    <span className="studio-asset-badge">{trAsset.badge}</span>
+                    <span className="studio-asset-title">{trAsset.label}</span>
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn-generate"
+                disabled={genBusy}
+                onClick={() => void handleGenerateStudioAsset("transition")}
+              >
+                <IconSparkles size={15} />
+                <span>{genBusy ? "Generuji…" : "Generovat"}</span>
+              </button>
+            </div>
           </>
         );
       }
@@ -1769,6 +2240,36 @@ export function App() {
         const capStyle = (selectedCaption?.style ?? {}) as Record<string, unknown>;
         return (
           <>
+            <div className="section-label" style={{ marginBottom: 0 }}>Motion Graphics Templates</div>
+            <div className="studio-asset-grid">
+              {MOTION_GRAPHIC_TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  className={`studio-asset-card ${selectedMotionTemplate === tpl.id ? "active" : ""}`}
+                  onClick={() => {
+                    setSelectedMotionTemplate(tpl.id);
+                    setGenTitle(tpl.defaultTitle);
+                    setGenSubtitle(tpl.defaultSubtitle);
+                    setGenPrimaryColor(tpl.defaultColor);
+                    setGenAccentColor(tpl.defaultAccent);
+                    setGenDuration(tpl.defaultDuration);
+                  }}
+                >
+                  {motionGraphicPreviews[tpl.id] && (
+                    <img
+                      className="studio-asset-preview"
+                      src={motionGraphicPreviews[tpl.id]}
+                      alt={tpl.label}
+                    />
+                  )}
+                  <span className="studio-asset-badge">{tpl.badge}</span>
+                  <span className="studio-asset-title">{tpl.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="section-label" style={{ marginBottom: 0 }}>Quick Subtitles</div>
             <div className="pill-strip">
               {TEXT_PRESETS.map((preset) => (
                 <button
@@ -1803,6 +2304,22 @@ export function App() {
                   }}
                   placeholder="Enter title or subtitle…"
                 />
+
+                {typeof capStyle.motionTemplate === "string" && (
+                  <input
+                    value={String(capStyle.subtitle ?? "")}
+                    onChange={(e) => {
+                      const nextStyle = { ...capStyle, subtitle: e.target.value };
+                      mutateCaptionLocal(selectedCaption.id, (c) => ({ ...c, style: nextStyle }));
+                      scheduleCommit(
+                        `cap-sub:${selectedCaption.id}`,
+                        () => api.updateCaption(selectedCaption.id, { style: nextStyle }),
+                        180,
+                      );
+                    }}
+                    placeholder="Podtitulek / štítek…"
+                  />
+                )}
 
                 <div className="form-grid-2">
                   <div className="slider-row">
@@ -1846,6 +2363,25 @@ export function App() {
                         style={{ width: 34, height: 30, padding: 2 }}
                       />
                     </label>
+                    {typeof capStyle.motionTemplate === "string" && (
+                      <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+                        <span>Accent</span>
+                        <input
+                          type="color"
+                          value={String(capStyle.accentColor || "#3b82f6")}
+                          onChange={(e) => {
+                            const nextStyle = { ...capStyle, accentColor: e.target.value };
+                            mutateCaptionLocal(selectedCaption.id, (c) => ({ ...c, style: nextStyle }));
+                            scheduleCommit(
+                              `cap-accent:${selectedCaption.id}`,
+                              () => api.updateCaption(selectedCaption.id, { style: nextStyle }),
+                              120,
+                            );
+                          }}
+                          style={{ width: 34, height: 30, padding: 2 }}
+                        />
+                      </label>
+                    )}
                     <button
                       type="button"
                       onClick={async () => {
@@ -1884,7 +2420,7 @@ export function App() {
               </div>
             ) : (
               <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                Add a title above, click any text block on the preview to drag it directly, or import subtitles below.
+                Vyber šablonu Motion Grafiky nahoře nebo přidej rychlý titulek a přetáhni ho přímo na náhledu videa.
               </div>
             )}
 
@@ -1901,6 +2437,29 @@ export function App() {
                   <IconDownload size={13} /> Export .VTT
                 </button>
               </div>
+            </div>
+
+            <div className="generate-footer-card">
+              <span className="section-label" style={{ margin: 0 }}>Generate Motion Graphic</span>
+              <input
+                value={genTitle}
+                onChange={(e) => setGenTitle(e.target.value)}
+                placeholder="Hlavní text grafiky…"
+              />
+              <input
+                value={genSubtitle}
+                onChange={(e) => setGenSubtitle(e.target.value)}
+                placeholder="Podtitulek / štítek…"
+              />
+              <button
+                type="button"
+                className="btn-generate"
+                disabled={genBusy}
+                onClick={() => void handleGenerateStudioAsset("motion")}
+              >
+                <IconSparkles size={15} />
+                <span>{genBusy ? "Generuji…" : "Generovat"}</span>
+              </button>
             </div>
           </>
         );
@@ -2320,6 +2879,34 @@ export function App() {
                 </div>
               ))}
             </div>
+
+            <div className="generate-footer-card">
+              <span className="section-label" style={{ margin: 0 }}>Transition &amp; Foley Sound Assets</span>
+              <div className="pill-strip">
+                {STUDIO_AUDIO_ASSETS.map((sfx) => (
+                  <button
+                    key={sfx.id}
+                    type="button"
+                    className={`chip-btn ${selectedSfxPreset === sfx.id ? "active" : ""}`}
+                    onClick={() => {
+                      setSelectedSfxPreset(sfx.id);
+                      setGenDuration(sfx.defaultDuration);
+                    }}
+                  >
+                    {sfx.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn-generate"
+                disabled={genBusy}
+                onClick={() => void handleGenerateStudioAsset("sfx")}
+              >
+                <IconSparkles size={15} />
+                <span>{genBusy ? "Generuji…" : "Generovat"}</span>
+              </button>
+            </div>
           </>
         );
       }
@@ -2468,6 +3055,7 @@ export function App() {
 
   const NAV_ITEMS: Array<{ id: ToolTab; label: string; icon: React.ReactNode }> = [
     { id: "media", label: "Media", icon: <IconMedia size={17} /> },
+    { id: "assets", label: "Assets", icon: <IconLayers size={17} /> },
     { id: "edit", label: "Edit", icon: <IconScissors size={17} /> },
     { id: "adjust", label: "Adjust", icon: <IconAdjust size={17} /> },
     { id: "filters", label: "Filters", icon: <IconFilter size={17} /> },

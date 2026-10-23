@@ -1,6 +1,6 @@
 {
   "name": "vedit",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Vedit Studio — native Windows & Android NLE video editor",
   "type": "module",

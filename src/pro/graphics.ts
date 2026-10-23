@@ -362,3 +362,256 @@ export async function addGraphicOverlay(
     return { asset, clip, outPath };
   });
 }
+
+export interface ServerStudioAssetRequest {
+  category: "transition" | "motion" | "overlay" | "sfx";
+  presetId?: string;
+  title?: string;
+  subtitle?: string;
+  primaryColor?: string;
+  accentColor?: string;
+  duration?: number;
+  intensity?: number;
+  prompt?: string;
+  atTime?: number;
+  outDir: string;
+}
+
+function synthesizeNodeStereoWav(preset: string, durationSec: number, seed: number): Buffer {
+  const sampleRate = 44100;
+  const numChannels = 2;
+  const dur = Math.max(0.25, Math.min(8, durationSec));
+  const frames = Math.floor(sampleRate * dur);
+  const dataBytes = frames * numChannels * 2;
+  const buf = Buffer.alloc(44 + dataBytes);
+  buf.write("RIFF", 0, "ascii");
+  buf.writeUInt32LE(36 + dataBytes, 4);
+  buf.write("WAVE", 8, "ascii");
+  buf.write("fmt ", 12, "ascii");
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(numChannels, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * numChannels * 2, 28);
+  buf.writeUInt16LE(numChannels * 2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36, "ascii");
+  buf.writeUInt32LE(dataBytes, 40);
+
+  let low = 0;
+  let band = 0;
+  let phase1 = 0;
+  let phase2 = 0;
+  let rng = (Math.floor(seed * 977) + 12345) >>> 0;
+  const nextWhite = () => {
+    rng = (1664525 * rng + 1013904223) >>> 0;
+    return rng / 2147483648 - 1;
+  };
+
+  let offset = 44;
+  for (let i = 0; i < frames; i++) {
+    const t = i / sampleRate;
+    const p = i / Math.max(1, frames - 1);
+    let l = 0;
+    let r = 0;
+    if (preset === "sub-impact-boom") {
+      const env = Math.exp(-3.4 * p) * Math.min(1, t / 0.006);
+      phase1 += (2 * Math.PI * (34 + 92 * Math.exp(-16 * p))) / sampleRate;
+      const sig = Math.sin(phase1) * env * 0.88 + nextWhite() * Math.exp(-42 * p) * 0.4;
+      l = sig;
+      r = sig * 0.98;
+    } else if (preset === "shimmer-riser") {
+      const env = Math.pow(p, 2.0) * (p > 0.96 ? (1 - p) / 0.04 : 1);
+      const sw = 1 + 1.35 * p * p;
+      phase1 += (2 * Math.PI * 196 * sw) / sampleRate;
+      phase2 += (2 * Math.PI * 293.66 * sw) / sampleRate;
+      const white = nextWhite();
+      const f = 2 * Math.sin((Math.PI * (300 + 4000 * p * p)) / sampleRate);
+      low += f * band;
+      band += f * (white - low - 0.35 * band);
+      l = (Math.sin(phase1) * 0.35 + Math.sin(phase2) * 0.28) * env + band * env * 0.4;
+      r = l * 0.96;
+    } else if (preset === "camera-shutter") {
+      const dt = Math.max(0, t - 0.075);
+      const sig = Math.exp(-95 * t) * nextWhite() * 0.9 + (t >= 0.075 ? Math.exp(-85 * dt) * nextWhite() * 0.7 : 0);
+      l = sig;
+      r = sig * 0.94;
+    } else if (preset === "velvet-ambient") {
+      const env = Math.min(1, t / 0.35) * Math.min(1, (dur - t) / 0.45) * 0.55;
+      phase1 += (2 * Math.PI * 130.81) / sampleRate;
+      phase2 += (2 * Math.PI * 196.0) / sampleRate;
+      const sig = (Math.sin(phase1) * 0.45 + Math.sin(phase2) * 0.35) * env;
+      l = sig;
+      r = sig;
+    } else {
+      // Aerodynamic transition whoosh (L -> R stereo sweep)
+      const env = Math.pow(Math.sin(p * Math.PI), 1.45);
+      const f = 2 * Math.sin((Math.PI * Math.min(8000, 220 + 2600 * env)) / sampleRate);
+      const white = nextWhite();
+      low += f * band;
+      band += f * (white - low - 0.42 * band);
+      phase1 += (2 * Math.PI * (58 + 75 * env)) / sampleRate;
+      const sig = band * env * 1.35 + Math.sin(phase1) * env * 0.35;
+      l = sig * Math.cos(p * Math.PI * 0.5);
+      r = sig * Math.sin(p * Math.PI * 0.5);
+    }
+    const clampSample = (x: number) => Math.round(Math.max(-1, Math.min(1, Math.tanh(x * 1.15))) * 32760);
+    buf.writeInt16LE(clampSample(l), offset);
+    buf.writeInt16LE(clampSample(r), offset + 2);
+    offset += 4;
+  }
+  return buf;
+}
+
+export async function generateServerStudioAsset(
+  engine: VeditEngine,
+  req: ServerStudioAssetRequest,
+) {
+  await mkdir(req.outDir, { recursive: true });
+  const seed = Math.floor(1 + Math.random() * 999);
+  const at = Math.max(0, Number(req.atTime ?? 0));
+  const c1 = req.primaryColor || "#f59e0b";
+  const c2 = req.accentColor || "#3b82f6";
+
+  if (req.category === "motion") {
+    const tpl = req.presetId || "lower-third-editorial";
+    const dur = Math.max(0.6, Number(req.duration ?? 3.4));
+    const title = (req.title || req.prompt || "Studio Motion Title").trim();
+    const subtitle = (req.subtitle ?? "VEDIT STUDIO").trim();
+    const caption = engine.addCaption({
+      text: title,
+      start: Number(at.toFixed(3)),
+      end: Number((at + dur).toFixed(3)),
+      style: {
+        motionTemplate: tpl,
+        subtitle,
+        color: req.primaryColor || "#ffffff",
+        accentColor: c2,
+        x: tpl === "lower-third-editorial" || tpl === "split-ribbon" ? 0.3 : 0.5,
+        y: tpl === "glass-callout" || tpl === "neon-hud" ? 0.18 : tpl === "chapter-card" || tpl === "kinetic-stomp" ? 0.5 : 0.82,
+        fontSize: tpl === "kinetic-stomp" ? 64 : tpl === "chapter-card" ? 58 : 46,
+        bold: true,
+      },
+    });
+    return {
+      summary: `Generated Motion Graphic "${title}" (${tpl})`,
+      caption,
+    };
+  }
+
+  if (req.category === "sfx") {
+    const preset = req.presetId || "cinema-whoosh";
+    const dur = Math.max(0.3, Number(req.duration ?? 1.0));
+    const wavPath = resolvePath(join(req.outDir, `sfx-${preset}-${Date.now()}.wav`));
+    await writeFile(wavPath, synthesizeNodeStereoWav(preset, dur, seed));
+    const startAt = preset.includes("whoosh") || preset.includes("shutter")
+      ? Number(Math.max(0, at - dur * 0.45).toFixed(3))
+      : Number(at.toFixed(3));
+    return engine.transaction(`studio.sfx "${preset}"`, () => {
+      const asset = engine.addAsset({
+        name: `${preset} #${seed}.wav`,
+        kind: "audio",
+        path: wavPath,
+        duration: dur,
+        hasAudio: true,
+      });
+      const seq = engine.activeSequence();
+      const aTrack =
+        seq.tracks.find((t) => t.kind === "audio" && !t.locked) ??
+        engine.addTrack("audio", "Sound FX");
+      const clip = engine.addClip({
+        trackId: aTrack.id,
+        assetId: asset.id,
+        name: req.title || preset,
+        start: startAt,
+        duration: dur,
+        in: 0,
+        out: dur,
+      });
+      return {
+        summary: `Generated Sound FX "${clip.name}" (${dur.toFixed(2)}s)`,
+        asset,
+        clip,
+      };
+    });
+  }
+
+  // Visual Transition or Overlay Asset: real 32-bit RGBA PNG + full-res 60fps `procedural-fx` metadata!
+  const preset = req.presetId || (req.category === "transition" ? "golden-light-leak" : "bokeh-shimmer");
+  const dur = Math.max(0.3, Number(req.duration ?? (req.category === "transition" ? 0.9 : 4.0)));
+  const w = 640;
+  const h = 360;
+  const canvas = new RgbaCanvas(w, h);
+  const colA = parseColor(c1, { r: 245, g: 158, b: 11, a: 225 });
+  const colB = parseColor(c2, { r: 59, g: 130, b: 246, a: 225 });
+  // Render smooth optical radial glow & accent band into transparent 32-bit PNG so FFmpeg server export has real alpha too!
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = (x - w * 0.5) / (w * 0.52);
+      const dy = (y - h * 0.5) / (h * 0.52);
+      const radial = Math.max(0, 1 - Math.hypot(dx, dy));
+      if (radial > 0.01) {
+        const mix = x / w;
+        canvas.blendPixel(x, y, {
+          r: Math.round(colA.r * (1 - mix) + colB.r * mix),
+          g: Math.round(colA.g * (1 - mix) + colB.g * mix),
+          b: Math.round(colA.b * (1 - mix) + colB.b * mix),
+          a: Math.round(235 * Math.pow(radial, 1.3)),
+        });
+      }
+    }
+  }
+  const pngPath = resolvePath(join(req.outDir, `fx-${preset}-${Date.now()}.png`));
+  await writeFile(pngPath, encodeRgbaPng(canvas));
+
+  const startAt =
+    req.category === "transition" ? Number(Math.max(0, at - dur / 2).toFixed(3)) : Number(at.toFixed(3));
+  const blendMode = preset.includes("wipe") || preset.includes("grain") || preset.includes("hud") ? "normal" : "screen";
+
+  return engine.transaction(`studio.${req.category} "${preset}"`, () => {
+    const asset = engine.addAsset({
+      name: `${req.title || preset} #${seed}`,
+      kind: "image",
+      path: pngPath,
+      width: w,
+      height: h,
+      duration: dur,
+      hasAudio: false,
+    });
+    const seq = engine.activeSequence();
+    const gTrack =
+      seq.tracks.find((t) => t.kind === "graphics" && !t.locked) ??
+      engine.addTrack("graphics", "FX & Transitions");
+    const clip = engine.addClip({
+      trackId: gTrack.id,
+      assetId: asset.id,
+      name: req.title || preset,
+      start: startAt,
+      duration: dur,
+      in: 0,
+      out: dur,
+    });
+    engine.addEffect(clip.id, "procedural-fx", {
+      preset,
+      primaryColor: c1,
+      accentColor: c2,
+      intensity: Number(req.intensity ?? 92),
+      seed,
+    });
+    if (blendMode !== "normal") {
+      engine.addEffect(clip.id, "blend", { mode: blendMode });
+    }
+    if (req.category === "transition") {
+      engine.addKeyframes(clip.id, [
+        { time: 0, property: "opacity", value: 0, easing: "ease-out" },
+        { time: Number((dur * 0.5).toFixed(3)), property: "opacity", value: 1, easing: "ease-in-out" },
+        { time: dur, property: "opacity", value: 0, easing: "ease-in" },
+      ]);
+    }
+    return {
+      summary: `Generated ${req.category === "transition" ? "Transition" : "Overlay"} "${clip.name}"`,
+      asset,
+      clip,
+    };
+  });
+}
